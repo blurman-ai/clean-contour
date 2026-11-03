@@ -4,6 +4,8 @@ Rules for code whose objects have a lifecycle (an order, a payment, a build, an 
 
 Background: [A clean room for coding agents](https://blurman-ai.github.io/clean-room/) (Russian version on [Habr](https://habr.com/ru/articles/1101314/)).
 
+Measured results on agent-written open-source projects: [FIELD-RESULTS.md](FIELD-RESULTS.md).
+
 ## Files
 
 | Path | What it is | Who reads it |
