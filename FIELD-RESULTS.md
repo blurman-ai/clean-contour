@@ -6,7 +6,7 @@ What the rules and the check found in open-source projects written mostly by cod
 
 - Coding agents don't keep this hygiene on their own. They write statuses straight from request handlers, derive state from logs and files, and refuse with free text.
 - Rules in `CLAUDE.md` alone help partly, because agents often don't open them. A check named in the task itself helps most.
-- Across 20 agent-written projects the check found 704 dirty places, and 17 of the projects have no instruction about state, transitions or refusal codes.
+- Across 40 agent-written projects the check found 1423 dirty places, and 33 of the projects have no instruction about state, transitions or refusal codes.
 
 ## Same tasks, with and without the rules
 
@@ -27,19 +27,21 @@ The same task on DeepSeek v4-pro gave 6, 3 and 0 dirty places for A, B and C. Th
 
 Limits: 10 tasks, one run per condition, so run-to-run variation isn't measured. The reviewer reads added lines only and misses violations visible only across files.
 
-## 20 agent-written projects
+## 40 agent-written projects
 
-Open-source Python and TypeScript projects where a coding agent signed more than two thirds of the commits. The signature only gives a lower bound. Each project was checked whole with the skill on Sonnet, without running it.
+Open-source Python and TypeScript projects where a coding agent signed more than two thirds of the commits; in 20 of them, at least 90%. The signature only gives a lower bound. Each project was checked whole with the skill on Sonnet, without running it.
 
 | | |
 |---|---|
-| Candidates examined | 1589 |
-| Dirty | 704 |
-| Projects with no instruction on state, transitions or refusal codes | 17 of 20 |
-| Risk scenarios confirmed by reading the code by hand, in 18 of the projects | 47 |
+| Candidates examined | 3526 |
+| Dirty | 1423 |
+| Projects with no instruction on state, transitions or refusal codes | 33 of 40 |
+| Risk scenarios confirmed by reading the code by hand | 58 |
 | Risk scenarios dropped by that reading | 5 |
 
-So roughly one in ten of the strongest findings didn't survive a human-directed read. The 704 will contain mistakes too: only the strongest were read by hand.
+The 20 projects with at least 90% agent commits look the same as the other 20: 37% of candidates dirty against 44%, about 36 dirty places per project against 35.
+
+So roughly one in ten of the strongest findings didn't survive a human-directed read. The 1423 will contain mistakes too: only the strongest were read by hand.
 
 One project's `AGENTS.md` forbids refunding when a provider call has an unknown outcome. Its wallet purchase does exactly that after a timeout. A rule in a file doesn't stop the violation.
 
@@ -58,6 +60,10 @@ The authors haven't been told about these yet.
 | A form fills in from an uploaded record and overwrites what the clinician already typed | Entered allergies can disappear before the patient is added |
 | A payment settles, then writing the order record fails | The buyer is told it failed, and a retry settles again unless settlement is idempotent |
 | Any admin page view moves an emergency account to active and drops the result | The job that sends the "activated" email finds nothing to send |
+| A payment webhook with an unknown price logs a warning and returns | The customer paid, the event counts as handled, and no subscription exists |
+| Budget and billing read different sets of "active" subscription statuses | A past-due customer is refused runs as unsubscribed and still charged |
+| A removed member has no membership, so a GET re-adds them by email domain | Removal doesn't hold for anyone on the workspace's domain |
+| A bulk import records each failure and then sets the upload to approved | The upload reads approved with nothing imported |
 
 ### Fixes sent to the authors
 
