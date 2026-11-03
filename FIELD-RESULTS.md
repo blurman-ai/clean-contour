@@ -6,7 +6,7 @@ What the rules and the check found in open-source projects written mostly by cod
 
 - Coding agents don't keep this hygiene on their own. They write statuses straight from request handlers, derive state from logs and files, and refuse with free text.
 - Rules in `CLAUDE.md` alone help partly, because agents often don't open them. A check named in the task itself helps most.
-- Across 15 agent-written projects the check found 540 dirty places, and 13 of the projects have no instruction about state, transitions or refusal codes.
+- Across 20 agent-written projects the check found 704 dirty places, and 17 of the projects have no instruction about state, transitions or refusal codes.
 
 ## Same tasks, with and without the rules
 
@@ -27,19 +27,19 @@ The same task on DeepSeek v4-pro gave 6, 3 and 0 dirty places for A, B and C. Th
 
 Limits: 10 tasks, one run per condition, so run-to-run variation isn't measured. The reviewer reads added lines only and misses violations visible only across files.
 
-## 15 agent-written projects
+## 20 agent-written projects
 
 Open-source Python and TypeScript projects where a coding agent signed more than two thirds of the commits. The signature only gives a lower bound. Each project was checked whole with the skill on Sonnet, without running it.
 
 | | |
 |---|---|
-| Candidates examined | 1220 |
-| Dirty | 540 |
-| Projects with no instruction on state, transitions or refusal codes | 13 of 15 |
-| Risk scenarios confirmed by reading the code by hand, in 13 of the projects | 34 |
-| Risk scenarios dropped by that reading | 4 |
+| Candidates examined | 1589 |
+| Dirty | 704 |
+| Projects with no instruction on state, transitions or refusal codes | 17 of 20 |
+| Risk scenarios confirmed by reading the code by hand, in 18 of the projects | 47 |
+| Risk scenarios dropped by that reading | 5 |
 
-So roughly one in ten of the strongest findings didn't survive a human-directed read. The 540 will contain mistakes too: only the strongest were read by hand.
+So roughly one in ten of the strongest findings didn't survive a human-directed read. The 704 will contain mistakes too: only the strongest were read by hand.
 
 One project's `AGENTS.md` forbids refunding when a provider call has an unknown outcome. Its wallet purchase does exactly that after a timeout. A rule in a file doesn't stop the violation.
 
@@ -55,6 +55,9 @@ The authors haven't been told about these yet.
 | A worker's process dies during a task | The task shows complete, because only one agent status maps to failed |
 | A webhook handler fails and returns 200 with an error in the body | The sender sees success and doesn't retry |
 | A money decision matches the text of an exception | Rewording the message sends a paid order down the rollback path |
+| A form fills in from an uploaded record and overwrites what the clinician already typed | Entered allergies can disappear before the patient is added |
+| A payment settles, then writing the order record fails | The buyer is told it failed, and a retry settles again unless settlement is idempotent |
+| Any admin page view moves an emergency account to active and drops the result | The job that sends the "activated" email finds nothing to send |
 
 ### Fixes sent to the authors
 
