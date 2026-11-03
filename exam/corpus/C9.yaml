@@ -1,0 +1,838 @@
+# C9 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C9-01
+  card: C9
+  expected: dirty
+  path: src/shipment-list/model/statusFilter.ts
+  why: A local union repeats the generated status type as a literal and has already diverged from it; returned is missing.
+  source: A copy of the generated status type in the list filter model.
+  code: |
+    ### file: src/shared/api/model/shipments.ts
+    // Generated from the OpenAPI schema. Do not edit by hand.
+    export type ShipmentStatus =
+      | "created"
+      | "packed"
+      | "in_transit"
+      | "delivered"
+      | "returned";
+
+    export interface ShipmentSummary {
+      id: string;
+      status: ShipmentStatus;
+      destination: string;
+      updatedAt: string;
+    }
+    ### file: src/shipment-list/model/statusFilter.ts
+    import type { ShipmentSummary } from "@/shared/api/model/shipments";
+
+    export type ListStatus = "created" | "packed" | "in_transit" | "delivered";
+
+    export type StatusFilter = ListStatus | "all";
+
+    export function matchesFilter(
+      shipment: ShipmentSummary,
+      filter: StatusFilter,
+    ): boolean {
+      if (filter === "all") return true;
+      return shipment.status === filter;
+    }
+
+    export function countByStatus(
+      shipments: ShipmentSummary[],
+      status: ListStatus,
+    ): number {
+      return shipments.filter(s => s.status === status).length;
+    }
+- id: C9-02
+  card: C9
+  expected: clean
+  path: app/shipping/states.py
+  why: The final and active states are declared by names next to the list and are assembled from its members.
+  source: A list of task states and named subsets of its members, used in another module.
+  code: |
+    ### file: app/shipping/states.py
+    from enum import Enum
+
+
+    class JobState(str, Enum):
+        QUEUED = "queued"
+        RUNNING = "running"
+        DONE = "done"
+        FAILED = "failed"
+
+
+    FINAL_STATES = frozenset({JobState.DONE, JobState.FAILED})
+    ACTIVE_STATES = frozenset({JobState.QUEUED, JobState.RUNNING})
+    ### file: app/services/job_cleanup.py
+    from datetime import datetime, timedelta
+
+    from app.shipping.states import ACTIVE_STATES, FINAL_STATES, JobState
+
+
+    def can_remove(job) -> bool:
+        return job.state in FINAL_STATES and job.finished_at is not None
+
+
+    def stale_active_jobs(jobs, now: datetime, limit: timedelta):
+        return [
+            job
+            for job in jobs
+            if job.state in ACTIVE_STATES and now - job.started_at > limit
+        ]
+
+
+    def mark_stale_failed(jobs, now: datetime, limit: timedelta) -> int:
+        count = 0
+        for job in stale_active_jobs(jobs, now, limit):
+            job.state = JobState.FAILED
+            job.finished_at = now
+            count += 1
+        return count
+- id: C9-03
+  card: C9
+  expected: dirty
+  path: app/schemas/jobs.py
+  why: The Literal repeats the values of the states list instead of being derived from it.
+  source: A list of states and a copy of its values as a literal in the response schema.
+  code: |
+    ### file: app/shipping/contracts/states.py
+    from enum import Enum
+
+
+    class PriceImportState(str, Enum):
+        QUEUED = "queued"
+        RUNNING = "running"
+        DONE = "done"
+        FAILED = "failed"
+
+
+    TERMINAL = frozenset({PriceImportState.DONE, PriceImportState.FAILED})
+    ### file: app/schemas/jobs.py
+    from datetime import datetime
+    from typing import Literal
+
+    from pydantic import BaseModel
+
+
+    class PriceImportResponse(BaseModel):
+        id: str
+        state: Literal["queued", "running", "done", "failed"]
+        rows_total: int
+        rows_loaded: int
+        started_at: datetime | None = None
+        finished_at: datetime | None = None
+
+
+    class PriceImportListResponse(BaseModel):
+        items: list[PriceImportResponse]
+        next_cursor: str | None = None
+- id: C9-04
+  card: C9
+  expected: clean
+  path: src/ui/sizes.tsx
+  why: The sets of interface sizes match, not state values, kinds or refusal codes.
+  source: Two interface components with the same set of sizes.
+  code: |
+    ### file: src/ui/PillButton.tsx
+    import type { ReactNode } from "react";
+
+    type PillSize = "xs" | "sm" | "md" | "lg";
+
+    const PADDING: Record<PillSize, string> = {
+      xs: "2px 8px",
+      sm: "4px 12px",
+      md: "6px 16px",
+      lg: "10px 22px",
+    };
+
+    export function PillButton({
+      size = "md",
+      children,
+      onClick,
+    }: {
+      size?: PillSize;
+      children: ReactNode;
+      onClick?: () => void;
+    }) {
+      return (
+        <button style={{ padding: PADDING[size], borderRadius: 999 }} onClick={onClick}>
+          {children}
+        </button>
+      );
+    }
+    ### file: src/ui/AppAvatar.tsx
+    type AvatarSize = "xs" | "sm" | "md" | "lg";
+
+    const DIAMETER: Record<AvatarSize, number> = { xs: 20, sm: 28, md: 40, lg: 64 };
+
+    export function AppAvatar({ size = "md", src }: { size?: AvatarSize; src: string }) {
+      const d = DIAMETER[size];
+      return <img src={src} width={d} height={d} style={{ borderRadius: "50%" }} />;
+    }
+- id: C9-05
+  card: C9
+  expected: dirty
+  path: src/shared/api/lib/apiError.ts
+  why: The error codes are declared as literals in the backend and in the frontend separately, and the frontend is already missing one code.
+  source: A list of public error codes on the server and a copy on the client.
+  code: |
+    ### file: app/errors.py
+    from enum import Enum
+
+    PUBLIC_ERROR_CODES = frozenset(
+        {
+            "address_not_found",
+            "slot_unavailable",
+            "weight_limit_exceeded",
+            "payment_declined",
+            "tariff_expired",
+            "pickup_point_closed",
+        }
+    )
+
+
+    class ApiError(Exception):
+        def __init__(self, code: str, status_code: int = 400) -> None:
+            if code not in PUBLIC_ERROR_CODES:
+                raise ValueError(f"unknown public code {code}")
+            super().__init__(code)
+            self.code = code
+            self.status_code = status_code
+    ### file: src/shared/api/lib/apiError.ts
+    const KNOWN_CODES = new Set([
+      "address_not_found",
+      "slot_unavailable",
+      "weight_limit_exceeded",
+      "payment_declined",
+      "tariff_expired",
+    ]);
+
+    export function isKnownErrorCode(code: unknown): code is string {
+      return typeof code === "string" && KNOWN_CODES.has(code);
+    }
+
+    export function errorMessageFor(code: string): string {
+      return isKnownErrorCode(code)
+        ? `errors.${code}`
+        : "errors.unknown";
+    }
+- id: C9-06
+  card: C9
+  expected: clean
+  path: tests/test_job_transitions.py
+  why: The literal list of states is in a test, and test fixtures are excluded in the card.
+  source: A parameterized test of transitions that repeats the values of the list as literals.
+  code: |
+    ### file: app/shipping/states.py
+    from enum import Enum
+
+
+    class OrderState(str, Enum):
+        CREATED = "created"
+        PACKED = "packed"
+        SHIPPED = "shipped"
+        DELIVERED = "delivered"
+
+
+    ALLOWED_NEXT = {
+        OrderState.CREATED: {OrderState.PACKED},
+        OrderState.PACKED: {OrderState.SHIPPED},
+        OrderState.SHIPPED: {OrderState.DELIVERED},
+        OrderState.DELIVERED: set(),
+    }
+    ### file: tests/test_job_transitions.py
+    import pytest
+
+    from app.shipping.states import ALLOWED_NEXT, OrderState
+
+
+    @pytest.mark.parametrize(
+        "state", ["created", "packed", "shipped", "delivered"]
+    )
+    def test_every_state_has_transitions_entry(state):
+        assert OrderState(state) in ALLOWED_NEXT
+
+
+    def test_delivered_is_terminal():
+        assert ALLOWED_NEXT[OrderState.DELIVERED] == set()
+
+
+    def test_cannot_skip_packing():
+        assert OrderState.SHIPPED not in ALLOWED_NEXT[OrderState.CREATED]
+- id: C9-07
+  card: C9
+  expected: clean
+  path: src/entities/shipment/lib/statusLabels.ts
+  why: The status type is obtained from the generated schema, the labels are given by a table over this type.
+  source: A status type taken from the generated API schema and a table of labels over it.
+  code: |
+    ### file: src/shared/api/generated/schema.ts
+    // Generated from the OpenAPI schema. Do not edit by hand.
+    export interface components {
+      schemas: {
+        ShipmentStatus: "created" | "packed" | "in_transit" | "delivered" | "returned";
+        Shipment: {
+          id: string;
+          status: components["schemas"]["ShipmentStatus"];
+          destination: string;
+        };
+      };
+    }
+    ### file: src/entities/shipment/lib/statusLabels.ts
+    import type { components } from "@/shared/api/generated/schema";
+
+    export type Status = components["schemas"]["ShipmentStatus"];
+
+    export const STATUS_LABELS: Record<Status, string> = {
+      created: "Accepted",
+      packed: "Packed",
+      in_transit: "On the way",
+      delivered: "Delivered",
+      returned: "Returned",
+    };
+
+    export function statusLabel(status: Status): string {
+      return STATUS_LABELS[status];
+    }
+
+    export function isDelivered(status: Status): boolean {
+      return status === "delivered";
+    }
+- id: C9-08
+  card: C9
+  expected: dirty
+  path: app/db/models/state_checks.py
+  why: The database constraint repeats the list of attachment states as a literal tuple and diverges from it; rejected is missing from the tuple.
+  source: A constraint on allowed states in the database model and a list of states in the contract.
+  code: |
+    ### file: app/shipping/contracts/parcel_states.py
+    from enum import Enum
+
+
+    class AttachmentState(str, Enum):
+        UPLOADED = "uploaded"
+        PROCESSING = "processing"
+        PROCESSED = "processed"
+        REJECTED = "rejected"
+        FAILED = "failed"
+
+
+    TERMINAL_ATTACHMENT_STATES = frozenset(
+        {AttachmentState.PROCESSED, AttachmentState.REJECTED, AttachmentState.FAILED}
+    )
+    ### file: app/db/models/state_checks.py
+    from sqlalchemy import CheckConstraint
+
+    _ATTACHMENT_STATES = ("uploaded", "processing", "processed", "failed")
+
+
+    def attachment_state_check() -> CheckConstraint:
+        values = ", ".join(f"'{value}'" for value in _ATTACHMENT_STATES)
+        return CheckConstraint(
+            f"state IN ({values})",
+            name="ck_attachment_state_known",
+        )
+
+
+    def invoice_state_check() -> CheckConstraint:
+        return CheckConstraint(
+            "state IN ('draft', 'issued', 'paid', 'cancelled')",
+            name="ck_invoice_state_known",
+        )
+- id: C9-09
+  card: C9
+  expected: dirty
+  path: app/services/pricing.py
+  why: The packaging kinds are declared as literals in two modules and diverge; the service has crate, the delivery layer does not.
+  source: Two literal sets of packaging kinds in the request layer and in the pricing service.
+  code: |
+    ### file: app/api/shipments.py
+    from fastapi import APIRouter, HTTPException
+
+    router = APIRouter()
+
+    _PACK_KINDS = {"box", "envelope", "pallet"}
+
+
+    @router.post("/shipments/quote")
+    async def quote(payload: QuoteRequest) -> QuoteResponse:
+        if payload.pack_kind not in _PACK_KINDS:
+            raise HTTPException(status_code=422, detail="pack_kind_unknown")
+        price = await calculate_price(
+            pack_kind=payload.pack_kind,
+            weight_kg=payload.weight_kg,
+            destination=payload.destination,
+        )
+        return QuoteResponse(price_kopecks=price)
+    ### file: app/services/pricing.py
+    PACK_KINDS = ("box", "envelope", "pallet", "crate")
+
+    BASE_PRICE = {"box": 300, "envelope": 150, "pallet": 2500, "crate": 1800}
+
+
+    async def calculate_price(*, pack_kind: str, weight_kg: float, destination) -> int:
+        if pack_kind not in PACK_KINDS:
+            raise ValueError(pack_kind)
+        zone = await zone_for(destination)
+        base = BASE_PRICE[pack_kind]
+        return int(base * zone.coefficient + weight_kg * zone.per_kg)
+- id: C9-10
+  card: C9
+  expected: clean
+  path: src/shipment-list/model/statusGroups.ts
+  why: The status groups are declared by names and typed by the imported status type.
+  source: Named subsets of statuses typed by the imported type of the list.
+  code: |
+    ### file: src/shared/api/model/shipments.ts
+    // Generated from the OpenAPI schema. Do not edit by hand.
+    export type ShipmentStatus =
+      | "created"
+      | "packed"
+      | "in_transit"
+      | "delivered"
+      | "returned";
+
+    export interface ShipmentSummary {
+      id: string;
+      status: ShipmentStatus;
+      destination: string;
+    }
+    ### file: src/shipment-list/model/statusGroups.ts
+    import type {
+      ShipmentStatus,
+      ShipmentSummary,
+    } from "@/shared/api/model/shipments";
+
+    export const FINAL_STATUSES: ReadonlySet<ShipmentStatus> = new Set<ShipmentStatus>(
+      ["delivered", "returned"],
+    );
+
+    export const ACTIVE_STATUSES: ReadonlySet<ShipmentStatus> = new Set<ShipmentStatus>(
+      ["created", "packed", "in_transit"],
+    );
+
+    export function isFinal(shipment: ShipmentSummary): boolean {
+      return FINAL_STATUSES.has(shipment.status);
+    }
+
+    export function activeShipments(items: ShipmentSummary[]): ShipmentSummary[] {
+      return items.filter(item => ACTIVE_STATUSES.has(item.status));
+    }
+- id: C9-11
+  card: C9
+  expected: dirty
+  path: src/entities/employee/lib/assignmentFilters.ts
+  why: The same assignment statuses are listed as literals in the labels file and in the filters file; the status type is declared twice.
+  source: Two literal lists of assignment statuses in the interface labels and filters files.
+  code: |
+    ### file: src/entities/employee/lib/assignmentLabels.ts
+    export const ASSIGNMENT_STATUSES = [
+      "assigned",
+      "in_progress",
+      "completed",
+      "overdue",
+      "cancelled",
+    ] as const;
+
+    export type AssignmentStatus = (typeof ASSIGNMENT_STATUSES)[number];
+
+    export const ASSIGNMENT_LABELS: Record<AssignmentStatus, string> = {
+      assigned: "Assigned",
+      in_progress: "In progress",
+      completed: "Completed",
+      overdue: "Overdue",
+      cancelled: "Cancelled",
+    };
+    ### file: src/entities/employee/lib/assignmentFilters.ts
+    import { ASSIGNMENT_LABELS } from "./assignmentLabels";
+
+    type FilterValue = "all" | "assigned" | "in_progress" | "completed" | "overdue" | "cancelled";
+
+    export const STATUS_FILTER_OPTIONS: { value: FilterValue; label: string }[] = [
+      { value: "all", label: "All" },
+      { value: "assigned", label: ASSIGNMENT_LABELS.assigned },
+      { value: "in_progress", label: ASSIGNMENT_LABELS.in_progress },
+      { value: "completed", label: ASSIGNMENT_LABELS.completed },
+      { value: "overdue", label: ASSIGNMENT_LABELS.overdue },
+      { value: "cancelled", label: ASSIGNMENT_LABELS.cancelled },
+    ];
+- id: C9-12
+  card: C9
+  expected: clean
+  path: app/db/models/state_checks.py
+  why: The database constraint values are obtained from the states list; there is no second literal set.
+  source: A constraint on allowed states assembled from the values of the contract list.
+  code: |
+    ### file: app/shipping/contracts/parcel_states.py
+    from enum import Enum
+
+
+    class AttachmentState(str, Enum):
+        UPLOADED = "uploaded"
+        PROCESSING = "processing"
+        PROCESSED = "processed"
+        REJECTED = "rejected"
+        FAILED = "failed"
+
+
+    TERMINAL_ATTACHMENT_STATES = frozenset(
+        {AttachmentState.PROCESSED, AttachmentState.REJECTED, AttachmentState.FAILED}
+    )
+    ### file: app/db/models/state_checks.py
+    from sqlalchemy import CheckConstraint
+
+    from app.shipping.contracts.parcel_states import (
+        TERMINAL_ATTACHMENT_STATES,
+        AttachmentState,
+    )
+
+    ATTACHMENT_STATE_VALUES = tuple(state.value for state in AttachmentState)
+
+
+    def attachment_state_check() -> CheckConstraint:
+        values = ", ".join(f"'{value}'" for value in ATTACHMENT_STATE_VALUES)
+        return CheckConstraint(
+            f"state IN ({values})",
+            name="ck_attachment_state_known",
+        )
+
+
+    def is_terminal_value(value: str) -> bool:
+        return AttachmentState(value) in TERMINAL_ATTACHMENT_STATES
+- id: C9-13
+  card: C9
+  expected: dirty
+  path: app/schemas/orders.py
+  why: A Literal in the request schema repeats the values of the order states list as a literal, although the list is declared above in the same file.
+  source: A list of order states and a copy of its values as a literal in the state change request schema, by form
+  code: |
+    from enum import Enum
+    from typing import Literal
+
+    from pydantic import BaseModel
+
+
+    class OrderStatus(str, Enum):
+        NEW = "new"
+        ASSIGNED = "assigned"
+        PICKED_UP = "picked_up"
+        DELIVERED = "delivered"
+        CANCELLED = "cancelled"
+
+
+    class OrderOut(BaseModel):
+        id: int
+        status: OrderStatus
+        courier_id: int | None = None
+
+
+    class OrderStatusPatch(BaseModel):
+        status: Literal["new", "assigned", "picked_up", "delivered", "cancelled"]
+        comment: str | None = None
+
+
+    class OrderListOut(BaseModel):
+        items: list[OrderOut]
+        total: int
+- id: C9-14
+  card: C9
+  expected: clean
+  path: src/entities/shipment/model/statuses.ts
+  why: The list of statuses is declared once, the type is derived from it, and the filter list is built from the same list.
+  source: A list of shipment statuses as a constant with a derived type and a filter built from it, by form
+  code: |
+    ### file: src/entities/shipment/model/statuses.ts
+    export const SHIPMENT_STATUSES = [
+      "created",
+      "packed",
+      "in_transit",
+      "delivered",
+      "returned",
+    ] as const;
+
+    export type ShipmentStatus = (typeof SHIPMENT_STATUSES)[number];
+
+    export function isShipmentStatus(value: string): value is ShipmentStatus {
+      return (SHIPMENT_STATUSES as readonly string[]).includes(value);
+    }
+    ### file: src/features/shipment-filter/model/options.ts
+    import {
+      SHIPMENT_STATUSES,
+      type ShipmentStatus,
+    } from "@/entities/shipment/model/statuses";
+
+    const LABELS: Record<ShipmentStatus, string> = {
+      created: "Accepted",
+      packed: "Packed",
+      in_transit: "On the way",
+      delivered: "Delivered",
+      returned: "Returned",
+    };
+
+    export const STATUS_OPTIONS = SHIPMENT_STATUSES.map(value => ({
+      value,
+      label: LABELS[value],
+    }));
+
+    export function parseStatusParam(raw: string | null): ShipmentStatus | null {
+      return raw !== null && raw !== "" && (SHIPMENT_STATUSES as readonly string[]).includes(raw)
+        ? (raw as ShipmentStatus)
+        : null;
+    }
+- id: C9-15
+  card: C9
+  expected: dirty
+  path: src/features/shift-form/model/schema.ts
+  why: The shift states are listed as literals in the form schema and in the generated type; the schema does not take values from the type.
+  source: A generated type of shift states and a copy of its values in the form validation schema, by form
+  code: |
+    ### file: src/shared/api/model/shifts.ts
+    export type CourierShiftState =
+      | "planned"
+      | "started"
+      | "paused"
+      | "finished"
+      | "missed";
+
+    export interface CourierShift {
+      id: string;
+      courierId: string;
+      state: CourierShiftState;
+      startsAt: string;
+    }
+    ### file: src/features/shift-form/model/schema.ts
+    import { z } from "zod";
+
+    export const shiftFormSchema = z.object({
+      courierId: z.string().min(1),
+      startsAt: z.string().datetime(),
+      state: z.enum(["planned", "started", "paused", "finished", "missed"]),
+      note: z.string().max(500).optional(),
+    });
+
+    export type ShiftFormValues = z.infer<typeof shiftFormSchema>;
+
+    export const DEFAULT_VALUES: Partial<ShiftFormValues> = {
+      state: "planned",
+      note: "",
+    };
+- id: C9-16
+  card: C9
+  expected: clean
+  path: tests/test_status_labels.py
+  why: The literal list of states is in a parameterized test, and test fixtures are excluded in the card.
+  source: A test checking that every parcel state has a label, with the list of states in a decorator, by form
+  code: |
+    import pytest
+
+    from app.shipping.labels import STATE_LABELS
+    from app.shipping.states import ParcelState
+
+
+    @pytest.mark.parametrize(
+        "value",
+        ["accepted", "sorted", "loaded", "delivered", "lost"],
+    )
+    def test_label_exists_for_value(value):
+        assert ParcelState(value) in STATE_LABELS
+
+
+    def test_labels_cover_every_state():
+        assert set(STATE_LABELS) == set(ParcelState)
+
+
+    def test_label_is_not_empty():
+        assert all(label.strip() for label in STATE_LABELS.values())
+- id: C9-17
+  card: C9
+  expected: dirty
+  path: app/shipping/pallets.py
+  why: The pallet kinds are declared as a list and repeated as a literal tuple in the same module; the contents match, but the tuple is not derived from the list.
+  source: A list of pallet kinds and a literal tuple of the same values for input validation, by form
+  code: |
+    from enum import Enum
+
+
+    class PalletKind(str, Enum):
+        EURO = "euro"
+        INDUSTRIAL = "industrial"
+        HALF = "half"
+
+
+    # allowed values from the input data
+    PALLET_KINDS = ("euro", "industrial", "half")
+
+    MAX_LOAD_KG = {
+        PalletKind.EURO: 1500,
+        PalletKind.INDUSTRIAL: 1250,
+        PalletKind.HALF: 750,
+    }
+
+
+    def parse_pallet_kind(raw: str) -> PalletKind:
+        if raw not in PALLET_KINDS:
+            raise ValueError(f"unknown pallet kind {raw!r}")
+        return PalletKind(raw)
+
+
+    def max_load(kind: PalletKind) -> int:
+        return MAX_LOAD_KG[kind]
+- id: C9-18
+  card: C9
+  expected: dirty
+  path: app/pricing/refusals.py
+  why: The calculation refusal codes are declared as literal sets in two modules, and the request layer set lacks the code tariff_expired.
+  source: Sets of tariff calculation refusal codes in the pricing service and in the request layer, by form
+  code: |
+    ### file: app/pricing/refusals.py
+    REFUSAL_CODES = frozenset(
+        {
+            "zone_unknown",
+            "weight_over_limit",
+            "route_closed",
+            "tariff_expired",
+        }
+    )
+
+
+    class QuoteRefused(Exception):
+        def __init__(self, code: str) -> None:
+            if code not in REFUSAL_CODES:
+                raise ValueError(code)
+            super().__init__(code)
+            self.code = code
+    ### file: app/api/quote_errors.py
+    from fastapi import HTTPException
+
+    from app.pricing.refusals import QuoteRefused
+
+    CLIENT_VISIBLE_CODES = {"zone_unknown", "weight_over_limit", "route_closed"}
+
+
+    def to_http_error(exc: QuoteRefused) -> HTTPException:
+        if exc.code in CLIENT_VISIBLE_CODES:
+            return HTTPException(status_code=422, detail={"code": exc.code})
+        return HTTPException(status_code=500, detail={"code": "quote_failed"})
+- id: C9-19
+  card: C9
+  expected: clean
+  path: app/schemas/price_imports.py
+  why: The label and the choice list are built from the members of the list; there is no second literal set of states in the module.
+  source: A response schema and a choice list whose values are taken from the list of loading states, by form
+  code: |
+    from enum import Enum
+
+    from pydantic import BaseModel
+
+
+    class PriceImportState(str, Enum):
+        QUEUED = "queued"
+        RUNNING = "running"
+        DONE = "done"
+        FAILED = "failed"
+
+
+    TERMINAL = frozenset({PriceImportState.DONE, PriceImportState.FAILED})
+
+    STATE_CHOICES = [(state.value, state.name.title()) for state in PriceImportState]
+    TERMINAL_VALUES = sorted(state.value for state in TERMINAL)
+
+
+    class PriceImportOut(BaseModel):
+        id: str
+        state: PriceImportState
+        rows_total: int
+        rows_loaded: int
+
+
+    def is_finished(item: PriceImportOut) -> bool:
+        return item.state in TERMINAL
+- id: C9-20
+  card: C9
+  expected: dirty
+  path: src/shipment-list/model/kindFilter.ts
+  why: The shipment kinds are listed as literals in a local union and fully match the generated type; the type is not imported.
+  source: A generated type of shipment kinds and a local copy of its values in the filter model, by form
+  code: |
+    ### file: src/shared/api/model/parcels.ts
+    export type ParcelKind = "letter" | "box" | "pallet" | "oversize";
+
+    export interface ParcelSummary {
+      id: string;
+      kind: ParcelKind;
+      weightKg: number;
+      destination: string;
+    }
+    ### file: src/shipment-list/model/kindFilter.ts
+    import type { ParcelSummary } from "@/shared/api/model/parcels";
+
+    export type ParcelKindFilter = "letter" | "box" | "pallet" | "oversize";
+
+    export function isParcelKindFilter(value: string): value is ParcelKindFilter {
+      return ["letter", "box", "pallet", "oversize"].includes(value);
+    }
+
+    export function filterByKind(
+      parcels: ParcelSummary[],
+      kind: ParcelKindFilter | null,
+    ): ParcelSummary[] {
+      return kind === null ? parcels : parcels.filter(parcel => parcel.kind === kind);
+    }
+- id: C9-21
+  card: C9
+  expected: clean
+  path: src/entities/shipment/lib/statusLabels.test.ts
+  why: The literal list of statuses is in a test, and test fixtures are excluded in the card.
+  source: A test of status labels with a literal list of values in the fixture, by form
+  code: |
+    import { describe, expect, it } from "vitest";
+
+    import type { ShipmentStatus } from "@/shared/api/model/shipments";
+    import { STATUS_LABELS, statusLabel } from "./statusLabels";
+
+    const ALL_STATUSES: ShipmentStatus[] = [
+      "created",
+      "packed",
+      "in_transit",
+      "delivered",
+      "returned",
+    ];
+
+    describe("statusLabel", () => {
+      it.each(ALL_STATUSES)("returns a label for %s", status => {
+        expect(statusLabel(status).length).toBeGreaterThan(0);
+      });
+
+      it("leaves no status without a label", () => {
+        expect(Object.keys(STATUS_LABELS).sort()).toEqual([...ALL_STATUSES].sort());
+      });
+    });
+- id: C9-22
+  card: C9
+  expected: clean
+  path: app/shifts/weekdays.py
+  why: The sets of days of the week match in two modules; these are not state values, kinds or refusal codes.
+  source: A list of days of the week in the shift calendar and a literal of days in the schedule schema, by form
+  code: |
+    ### file: app/shifts/calendar.py
+    WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+    def weekday_code(day) -> str:
+        return WEEKDAYS[day.weekday()]
+
+
+    def is_weekend(code: str) -> bool:
+        return code in ("sat", "sun")
+    ### file: app/schemas/schedule.py
+    from typing import Literal
+
+    from pydantic import BaseModel
+
+    Weekday = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+    class CourierSchedule(BaseModel):
+        courier_id: int
+        working_days: list[Weekday]
+        start_hour: int
+        end_hour: int

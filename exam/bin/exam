@@ -1,0 +1,770 @@
+#!/usr/bin/env python3
+"""Exam for the clean-contour cards: does a model find dirty code, and does it
+leave clean code alone.
+
+    bin/exam --model-cmd '<command>' [--cards C7,C9] [--repeat N] [--jobs N] --out report.json
+    bin/exam --check                 only check the corpus and the cards; no model is called
+    bin/exam --show-prompt C7-03     print the prompt the model will get
+    bin/exam --selftest              control cases; no network
+
+Cards are read from `clean-contour-check/SKILL.md`; the exam keeps no copy of
+them. The corpus is `corpus/C<N>.yaml`. Each fragment is sent with the
+"Procedure" section, one card and the fragment; the answer is one line in the
+skill's output format. `--model-cmd` is a shell command that reads the prompt
+from stdin and prints the answer to stdout.
+
+A card passes when at least 90% of dirty fragments are found and at most 10% of
+clean ones are flagged. `unclear` on a dirty fragment is a miss; on a clean one
+it is not an error and is counted separately. With `--repeat N` every fragment
+is asked N times and the worst answer counts.
+
+Exit code: 0 — every selected card passed, 1 — some card failed, 2 — call,
+corpus or model error (the measurement is void).
+"""
+from __future__ import annotations
+
+import argparse
+import concurrent.futures as cf
+import datetime
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+MODULE = HERE.parent
+CORPUS_DIR = MODULE / "corpus"
+
+# Threshold (RULES.md, "How to tell that a contour is dirty"): at least 90% of
+# dirty fragments found, at most 10% of clean ones flagged.
+MIN_RECALL = 0.9
+MAX_FALSE = 0.1
+MIN_EACH = 10           # dirty and clean fragments per card
+LINES = (15, 60)        # fragment length in lines
+DIRTY, CLEAN, UNCLEAR = "dirty", "clean", "unclear"
+VERDICTS = (DIRTY, CLEAN, UNCLEAR)
+SECTIONS = ("**Search:**", "**Questions", "**Dirty if:**", "**Does not count:**",
+            "**Dirty:**", "**Clean:**")
+FIELDS = ("id", "card", "expected", "path", "why", "source", "code")
+HINT = re.compile(r"(?<![A-Za-z_])(?:dirty|clean|unclear)(?![A-Za-z_])|(?<![A-Za-z0-9_])C\d{1,2}(?![0-9])",
+                  re.IGNORECASE)
+
+
+class ExamError(Exception):
+    """Input error: cards, corpus, call. The measurement is void."""
+
+
+# --------------------------------------------------------------------------
+# Cards
+# --------------------------------------------------------------------------
+
+@dataclass
+class Skill:
+    order: str
+    cards: dict[str, str]          # "C7" -> full text of the card
+    sha: str
+
+
+def find_skill(explicit: str | None) -> Path:
+    if explicit:
+        return Path(explicit)
+    for rel in ("../../skills/clean-contour-check/SKILL.md",               # this repository
+                "../../../skills/clean-contour-check/SKILL.md"):           # a project's .agents/
+        p = (HERE / rel).resolve()
+        if p.is_file():
+            return p
+    raise ExamError("SKILL.md with the cards not found; pass it with --skill")
+
+
+def parse_skill(text: str, *, require_sections: bool = True) -> Skill:
+    lines = text.splitlines()
+    order, i = [], None
+    for n, line in enumerate(lines):
+        if line.strip() == "## Procedure":
+            i = n + 1
+            break
+    if i is None:
+        raise ExamError('SKILL.md has no "## Procedure" section')
+    while i < len(lines) and lines[i].strip() != "---":
+        order.append(lines[i])
+        i += 1
+    cards: dict[str, list[str]] = {}
+    cur = None
+    for line in lines:
+        m = re.match(r"^## (C\d+)\. ", line)
+        if m:
+            cur = m.group(1)
+            if cur in cards:
+                raise ExamError(f"card {cur} is declared twice")
+            cards[cur] = [line]
+        elif line.startswith("## "):
+            cur = None
+        elif cur:
+            cards[cur].append(line)
+    if not cards:
+        raise ExamError('SKILL.md has no cards "## C<N>. …"')
+    out = {}
+    for code, body in cards.items():
+        t = "\n".join(body).strip()
+        if require_sections:
+            lack = [s for s in SECTIONS if s not in t]
+            if lack:
+                raise ExamError(f"card {code} lacks sections: {', '.join(lack)}")
+        out[code] = t
+    return Skill("\n".join(order).strip(), out, hashlib.sha256(text.encode()).hexdigest()[:12])
+
+
+# --------------------------------------------------------------------------
+# Corpus: a narrow subset of YAML, parsed here (no PyYAML needed)
+# --------------------------------------------------------------------------
+
+@dataclass
+class Item:
+    id: str
+    card: str
+    expected: str
+    path: str
+    why: str
+    source: str
+    code: str
+    file: str = ""
+
+
+def parse_corpus(text: str, name: str = "?") -> list[Item]:
+    """A list of `- id: …` records with one-line fields and a `code: |` block
+    (indent 4). Anything else is an error with the line number."""
+    items: list[dict] = []
+    cur: dict | None = None
+    block: list[str] | None = None
+    block_key = ""
+
+    def close_block():
+        nonlocal block
+        if block is not None and cur is not None:
+            while block and block[-1] == "":
+                block.pop()
+            cur[block_key] = "\n".join(block) + "\n"
+        block = None
+
+    for no, line in enumerate(text.splitlines(), 1):
+        where = f"{name}:{no}"
+        if "\t" in line and block is None:
+            raise ExamError(f"{where}: tab character")
+        if block is not None:
+            if line.startswith("    "):
+                block.append(line[4:])
+                continue
+            if line.strip() == "":
+                block.append("")
+                continue
+            close_block()
+        if line.strip() == "" or line.startswith("#"):
+            continue
+        m = re.match(r"^- (\w+): ?(.*)$", line) or re.match(r"^  (\w+): ?(.*)$", line)
+        if not m:
+            raise ExamError(f"{where}: line out of format: {line[:60]!r}")
+        key, val = m.group(1), m.group(2).strip()
+        if line.startswith("- "):
+            cur = {}
+            items.append(cur)
+        if cur is None:
+            raise ExamError(f"{where}: field before the first record")
+        if key not in FIELDS:
+            raise ExamError(f"{where}: unknown field {key}")
+        if key in cur:
+            raise ExamError(f"{where}: field {key} repeated")
+        if val == "|":
+            if key != "code":
+                raise ExamError(f"{where}: a `|` block is allowed only for code")
+            block, block_key = [], key
+            cur[key] = ""
+            continue
+        if key == "code":
+            raise ExamError(f"{where}: code must be a `|` block")
+        if val[:1] in ("'", '"'):
+            raise ExamError(f"{where}: quoted values are not supported")
+        cur[key] = val
+    close_block()
+    out = []
+    for d in items:
+        lack = [k for k in FIELDS if not d.get(k)]
+        if lack:
+            raise ExamError(f"{name}: record {d.get('id', '?')}: missing fields {', '.join(lack)}")
+        out.append(Item(file=name, **d))
+    return out
+
+
+def load_corpus(directory: Path) -> list[Item]:
+    files = sorted(directory.glob("*.yaml"))
+    if not files:
+        raise ExamError(f"no *.yaml files in {directory}")
+    items = []
+    for f in files:
+        items += parse_corpus(f.read_text(encoding="utf-8"), f.name)
+    return items
+
+
+def check_corpus(items: list[Item], skill: Skill, *, cards: list[str] | None = None,
+                 known_cards: bool = True, min_each: int = MIN_EACH,
+                 lines: tuple[int, int] | None = LINES, hints: bool = True) -> list[str]:
+    """Corpus problems; empty means the corpus is valid. The keyword arguments
+    switch single checks off, for the control cases that show them red."""
+    bad: list[str] = []
+    seen: set[str] = set()
+    count: dict[str, dict[str, int]] = {}
+    for it in items:
+        if it.id in seen:
+            bad.append(f"{it.id}: id repeated")
+        seen.add(it.id)
+        if known_cards and it.card not in skill.cards:
+            bad.append(f"{it.id}: card {it.card} is not in SKILL.md")
+        if it.expected not in (DIRTY, CLEAN):
+            bad.append(f"{it.id}: expected {it.expected!r}, allowed {DIRTY}|{CLEAN}")
+        n = len(it.code.rstrip("\n").split("\n"))
+        if lines and not lines[0] <= n <= lines[1]:
+            bad.append(f"{it.id}: {n} lines, need {lines[0]}–{lines[1]}")
+        if hints and HINT.search(it.code):
+            bad.append(f"{it.id}: the code hints at the answer ({HINT.search(it.code).group(0)})")
+        count.setdefault(it.card, {DIRTY: 0, CLEAN: 0})
+        if it.expected in count[it.card]:
+            count[it.card][it.expected] += 1
+    for code in (cards if cards is not None else skill.cards):
+        c = count.get(code, {DIRTY: 0, CLEAN: 0})
+        for kind in (DIRTY, CLEAN):
+            if c[kind] < min_each:
+                bad.append(f"{code}: {c[kind]} {kind} fragments, need at least {min_each}")
+    return bad
+
+
+# --------------------------------------------------------------------------
+# Prompt and answer parsing
+# --------------------------------------------------------------------------
+
+def build_prompt(skill: Skill, it: Item) -> str:
+    fence = "~~~"
+    while fence in it.code:
+        fence += "~"
+    return (
+        "You check one code fragment against one card of dirty-contour signs. "
+        "The search (step 1 of the procedure) is already done: the fragment below is the candidate it found.\n\n"
+        f"# Procedure\n\n{skill.order}\n\n"
+        f"# Card\n\n{skill.cards[it.card]}\n\n"
+        f"# Fragment (file {it.path})\n\n{fence}\n{it.code.rstrip()}\n{fence}\n\n"
+        "# Task\n\n"
+        "Run steps 2–5 of the procedure on this fragment. Answer with ONE line in the output "
+        "format: `file:line | C<number> | answers, comma separated | verdict | one sentence`. "
+        "The verdict is exactly one of three words: dirty, clean, unclear. "
+        "No other lines, no markdown, no reasoning.\n"
+    )
+
+
+def _norm(word: str) -> str | None:
+    w = re.sub(r"[\s`*_.!]+", " ", word.lower()).strip()
+    return w if w in VERDICTS else None
+
+
+def parse_verdict(answer: str) -> tuple[str | None, str]:
+    """(verdict or None, the model's explanation). The verdict is the fourth
+    field of a line; failing that, the only one of the three words in the answer."""
+    lines = [ln for ln in answer.strip().splitlines() if ln.strip()]
+    for ln in lines:
+        parts = [p.strip() for p in ln.split("|")]
+        if len(parts) >= 4:
+            v = _norm(parts[3])
+            if v:
+                return v, " | ".join(parts[4:]).strip()
+    text = answer.lower()
+    found = {v for v in VERDICTS if re.search(r"(?<![a-z])" + v + r"(?![a-z])", text)}
+    if len(found) == 1:
+        return found.pop(), answer.strip().splitlines()[-1][:300] if lines else ""
+    return None, answer.strip()[:300]
+
+
+# --------------------------------------------------------------------------
+# Scoring
+# --------------------------------------------------------------------------
+
+@dataclass
+class Policy:
+    min_recall: float = MIN_RECALL
+    max_false: float = MAX_FALSE
+    worst: bool = True          # the worst of the repeats, not the first answer
+    unsure_is_hit: bool = False  # `unclear` on a dirty fragment counts as found
+
+
+def outcome(it: Item, verdicts: list[str | None], pol: Policy) -> str:
+    """found|missed (dirty), flagged|unsure|ok (clean)."""
+    vs = verdicts if pol.worst else verdicts[:1]
+    if it.expected == DIRTY:
+        hit = all(v == DIRTY or (pol.unsure_is_hit and v == UNCLEAR) for v in vs)
+        return "found" if hit else "missed"
+    if any(v == DIRTY for v in vs):
+        return "flagged"
+    if any(v != CLEAN for v in vs):      # `unclear` or an unparsed answer
+        return "unsure"
+    return "ok"
+
+
+def score(items: list[Item], answers: dict[str, list[str | None]], pol: Policy | None = None,
+          cards: list[str] | None = None) -> dict:
+    pol = pol or Policy()
+    per: dict[str, dict] = {}
+    for it in items:
+        if cards is not None and it.card not in cards:
+            continue
+        r = per.setdefault(it.card, dict(dirty=0, found=0, clean=0, flagged=0, unsure=0,
+                                          unstable=0, misses=[]))
+        vs = answers.get(it.id, [None])
+        res = outcome(it, vs, pol)
+        if len(set(vs)) > 1:
+            r["unstable"] += 1
+        if it.expected == DIRTY:
+            r["dirty"] += 1
+            r["found"] += res == "found"
+        else:
+            r["clean"] += 1
+            r["flagged"] += res == "flagged"
+            r["unsure"] += res == "unsure"
+        if res in ("missed", "flagged"):
+            r["misses"].append(it.id)
+    for r in per.values():
+        r["recall"] = r["found"] / r["dirty"] if r["dirty"] else 0.0
+        r["false_rate"] = r["flagged"] / r["clean"] if r["clean"] else 0.0
+        # integer arithmetic: 9/10 and 1/10 sit exactly on the threshold without float error
+        ok_recall = r["dirty"] > 0 and r["found"] * 1000 >= r["dirty"] * round(pol.min_recall * 1000)
+        ok_false = r["clean"] > 0 and r["flagged"] * 1000 <= r["clean"] * round(pol.max_false * 1000)
+        r["pass"] = bool(ok_recall and ok_false)
+        r["why_fail"] = [w for w, ok in (("recall", ok_recall), ("false", ok_false)) if not ok]
+    return per
+
+
+def sort_key(code: str) -> int:
+    return int(re.sub(r"\D", "", code) or 0)
+
+
+# --------------------------------------------------------------------------
+# Model call
+# --------------------------------------------------------------------------
+
+def call_model(cmd: str, prompt: str, timeout: int, retries: int) -> dict:
+    last = ""
+    for attempt in range(retries + 1):
+        t0 = time.time()
+        try:
+            p = subprocess.run(cmd, shell=True, input=prompt, capture_output=True, text=True,
+                               timeout=timeout)
+            if p.returncode == 0 and p.stdout.strip():
+                return dict(raw=p.stdout.strip(), error=None, seconds=round(time.time() - t0, 2))
+            last = f"exit {p.returncode}: {(p.stderr or p.stdout).strip()[:200] or 'empty answer'}"
+        except subprocess.TimeoutExpired:
+            last = f"timeout {timeout} s"
+        time.sleep(min(2 * attempt, 5))
+    return dict(raw="", error=last, seconds=0.0)
+
+
+def run_exam(items: list[Item], skill: Skill, model_cmd: str, *, repeat: int, jobs: int,
+             timeout: int = 180, retries: int = 2) -> dict[str, list[dict]]:
+    tasks = [(it, k) for it in items for k in range(repeat)]
+    res: dict[str, list[dict]] = {it.id: [None] * repeat for it in items}  # type: ignore[list-item]
+
+    def one(task):
+        it, k = task
+        r = call_model(model_cmd, build_prompt(skill, it), timeout, retries)
+        v, reason = parse_verdict(r["raw"]) if not r["error"] else (None, "")
+        return it.id, k, dict(r, verdict=v, reason=reason)
+
+    with cf.ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
+        for iid, k, r in ex.map(one, tasks):
+            res[iid][k] = r
+    return res
+
+
+# --------------------------------------------------------------------------
+# Output and report
+# --------------------------------------------------------------------------
+
+def pct(a: int, b: int) -> str:
+    return f"{100 * a / b:.0f}%" if b else "—"
+
+
+def render(per: dict, items: list[Item], res: dict, pol: Policy) -> str:
+    out = [f"{'card':<6}{'dirty found':>13}{'recall':>8}{'clean flagged':>15}"
+           f"{'false':>7}{'unclear':>9}{'unstable':>10}  result"]
+    for code in sorted(per, key=sort_key):
+        r = per[code]
+        out.append(f"{code:<6}{str(r['found']) + '/' + str(r['dirty']):>13}{pct(r['found'], r['dirty']):>8}"
+                   f"{str(r['flagged']) + '/' + str(r['clean']):>15}{pct(r['flagged'], r['clean']):>7}"
+                   f"{r['unsure']:>9}{r['unstable']:>10}  "
+                   + ("PASS" if r["pass"] else "FAIL (" + ", ".join(r["why_fail"]) + ")"))
+    n_pass = sum(r["pass"] for r in per.values())
+    d = sum(r["dirty"] for r in per.values())
+    f_ = sum(r["found"] for r in per.values())
+    c = sum(r["clean"] for r in per.values())
+    fl = sum(r["flagged"] for r in per.values())
+    out.append("")
+    out.append(f"Total: {n_pass} of {len(per)} cards passed; dirty found {f_}/{d} "
+               f"({pct(f_, d)}), clean flagged {fl}/{c} ({pct(fl, c)}). "
+               f"Threshold: recall ≥ {pol.min_recall:.0%}, false ≤ {pol.max_false:.0%}.")
+    by_id = {it.id: it for it in items}
+    for code in sorted(per, key=sort_key):
+        r = per[code]
+        if r["pass"] or not r["misses"]:
+            continue
+        out.append(f"\n{code} — errors:")
+        for iid in r["misses"]:
+            it = by_id[iid]
+            worst = [a for a in res[iid] if a["verdict"] != it.expected] or res[iid]
+            a = worst[0]
+            out.append(f"  {iid} expected {it.expected}, got {a['verdict']}: {a['reason'][:160]}")
+    return "\n".join(out)
+
+
+def build_report(args, skill, items, res, per, pol) -> dict:
+    return dict(
+        date=datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        model=args.label or args.model_cmd, repeat=args.repeat,
+        thresholds=dict(min_recall=pol.min_recall, max_false=pol.max_false),
+        skill_sha=skill.sha, cards=sorted(per, key=sort_key),
+        summary={c: {k: v for k, v in r.items()} for c, r in sorted(per.items(), key=lambda kv: sort_key(kv[0]))},
+        pass_all=all(r["pass"] for r in per.values()),
+        items=[dict(id=it.id, card=it.card, expected=it.expected, path=it.path, why=it.why,
+                    outcome=outcome(it, [a["verdict"] for a in res[it.id]], pol),
+                    answers=[dict(raw=a["raw"], verdict=a["verdict"], reason=a["reason"],
+                                  error=a["error"], seconds=a["seconds"]) for a in res[it.id]])
+               for it in items],
+    )
+
+
+# --------------------------------------------------------------------------
+# Fake models for --selftest (no network)
+# --------------------------------------------------------------------------
+
+def fake_model(kind: str) -> int:
+    """Reads the prompt from stdin and prints an answer. `oracle*` takes the
+    expected verdict from the corpus by the fragment's text — a side channel a
+    real model does not have."""
+    prompt = sys.stdin.read()
+    verdict = {"dirty": DIRTY, "clean": CLEAN, "unsure": UNCLEAR}.get(kind)
+    if kind == "garbage":
+        print("hard to say")
+        return 0
+    if kind == "fail":
+        print("boom", file=sys.stderr)
+        return 1
+    if verdict is None:
+        corpus = load_corpus(Path(os.environ["EXAM_CORPUS"]))
+        mine = [it for it in corpus if it.code.rstrip() in prompt]
+        if len(mine) != 1:
+            print(f"fragment not recognised ({len(mine)})", file=sys.stderr)
+            return 1
+        it = mine[0]
+        verdict = it.expected
+        if kind in ("oracle-miss", "oracle-false"):
+            same = sorted((x for x in corpus if x.card == it.card and x.expected == it.expected),
+                          key=lambda x: x.id)
+            rank = [x.id for x in same].index(it.id)
+            if kind == "oracle-miss" and it.expected == DIRTY and rank < 2:
+                verdict = CLEAN
+            if kind == "oracle-false" and it.expected == CLEAN and rank < 2:
+                verdict = DIRTY
+    print(f"x.py:1 | {it.card if kind.startswith('oracle') else 'C0'} | yes, yes | {verdict} | fake answer")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# Control cases
+# --------------------------------------------------------------------------
+
+def selftest() -> int:
+    fails: list[str] = []
+    n = 0
+
+    def case(name: str, good: bool, sabotaged_still_ok: bool):
+        """`good` — the tool behaves as it must on the real input;
+        `sabotaged_still_ok` — the tool with the condition switched off did NOT
+        refuse what it had to (so the case is sensitive). Both must be true."""
+        nonlocal n
+        n += 1
+        if good and sabotaged_still_ok:
+            print(f"  ✓ {name}")
+        else:
+            why = []
+            if not good:
+                why.append("the tool did not refuse/pass as it must")
+            if not sabotaged_still_ok:
+                why.append("the case stays green with the condition broken")
+            print(f"  ✗ {name}: {'; '.join(why)}")
+            fails.append(name)
+
+    skill_path = find_skill(None)
+    skill = parse_skill(skill_path.read_text(encoding="utf-8"))
+    items = load_corpus(CORPUS_DIR)
+    codes = sorted(skill.cards, key=sort_key)
+    env = dict(os.environ, EXAM_CORPUS=str(CORPUS_DIR))
+    me = f"{sys.executable} {Path(__file__).resolve()}"
+
+    def exam(kind: str, pol: Policy | None = None, repeat: int = 1) -> dict:
+        res = run_exam(items, skill, f"{me} --fake {kind}", repeat=repeat, jobs=8, timeout=60, retries=0)
+        return score(items, {k: [a["verdict"] for a in v] for k, v in res.items()}, pol)
+
+    old_env = dict(os.environ)
+    os.environ.update(env)
+    try:
+        print("Cards and corpus")
+        case(f"SKILL.md yields {len(codes)} cards, each with six sections",
+             len(codes) >= 14 and all(all(s in skill.cards[c] for s in SECTIONS) for c in codes),
+             True)
+        broken = skill_path.read_text(encoding="utf-8").replace("**Clean:**", "**More:**", 1)
+        try:
+            parse_skill(broken)
+            refused = False
+        except ExamError:
+            refused = True
+        try:
+            parse_skill(broken, require_sections=False)
+            tolerated = True
+        except ExamError:
+            tolerated = False
+        case("a card without a section is refused", refused, tolerated)
+
+        problems = check_corpus(items, skill)
+        case("corpus intact: every card has at least 10+10, 15–60 lines, no hints",
+             not problems and {it.card for it in items} == set(codes), True)
+        for p in problems[:5]:
+            print(f"      {p}")
+
+        def mut(f):
+            copy = [Item(**{**vars(it)}) for it in items]
+            f(copy)
+            return copy
+
+        alien = mut(lambda c: setattr(c[0], "card", "C99"))
+        case("a fragment with an unknown card is refused",
+             any("is not in SKILL.md" in p for p in check_corpus(alien, skill)),
+             not any("is not in SKILL.md" in p for p in check_corpus(alien, skill, known_cards=False)))
+
+        card0 = codes[0]
+        no_card = [it for it in items if it.card != card0]
+        case("a card without corpus is refused",
+             any(p.startswith(card0 + ":") for p in check_corpus(no_card, skill)),
+             not any(p.startswith(card0 + ":") for p in check_corpus(no_card, skill, min_each=0)))
+
+        few, kept = [], 0
+        for it in items:
+            if it.card == card0 and it.expected == DIRTY:
+                kept += 1
+                if kept > 9:
+                    continue
+            few.append(it)
+        case("9 dirty instead of 10 are refused",
+             any(f"9 {DIRTY} fragments" in p for p in check_corpus(few, skill)),
+             not any(f"9 {DIRTY} fragments" in p for p in check_corpus(few, skill, min_each=9)))
+
+        short = mut(lambda c: setattr(c[0], "code", "x = 1\n"))
+        case("a fragment shorter than 15 lines is refused",
+             any(" lines, need " in p for p in check_corpus(short, skill)),
+             not any(" lines, need " in p for p in check_corpus(short, skill, lines=None)))
+
+        leak = mut(lambda c: setattr(c[0], "code", c[0].code + "# this is dirty\n"))
+        case("a hint at the answer in the code is refused",
+             any("hints at the answer" in p for p in check_corpus(leak, skill)),
+             not any("hints at the answer" in p for p in check_corpus(leak, skill, hints=False)))
+
+        bad_expected = mut(lambda c: setattr(c[0], "expected", UNCLEAR))
+        case("expected `unclear` is refused",
+             any("expected" in p for p in check_corpus(bad_expected, skill)), True)
+
+        dup = mut(lambda c: setattr(c[1], "id", c[0].id))
+        case("a repeated id is refused", any("id repeated" in p for p in check_corpus(dup, skill)), True)
+
+        print("\nCorpus parser")
+        sample = "# c\n- id: A-1\n  card: C1\n  expected: clean\n  path: a/b.py\n  why: w: x\n  source: s\n  code: |\n    a = 1\n\n    b = 2\n\n"
+        got = parse_corpus(sample, "s")
+        ok = got[0].code == "a = 1\n\nb = 2\n" and got[0].why == "w: x"
+        refused = 0
+        for badtext in (sample.replace("  why: w: x", "  why: 'q'"), sample.replace("  path:", "  pth:"),
+                        sample.replace("    a = 1", "\ta = 1"), sample.replace("  code: |", "  code: x"),
+                        sample.replace("  source: s\n", "")):
+            try:
+                parse_corpus(badtext, "s")
+            except ExamError:
+                refused += 1
+        case("the parser reads a block and refuses quotes, an unknown field, a tab, code without a block, a missing field",
+             ok and refused == 5, True)
+        try:
+            import yaml  # only for the comparison; the tool does not need it
+        except ImportError:
+            yaml = None
+        if yaml:
+            same = True
+            for f in sorted(CORPUS_DIR.glob("*.yaml")):
+                theirs = yaml.safe_load(f.read_text(encoding="utf-8"))
+                mine = parse_corpus(f.read_text(encoding="utf-8"), f.name)
+                same &= [{k: v for k, v in vars(m).items() if k != "file"} for m in mine] == \
+                        [{k: str(v) for k, v in t.items()} for t in theirs]
+            case("the parser reads the corpus the same way as PyYAML", same, True)
+        else:
+            print("  - no PyYAML, comparison skipped")
+
+        print("\nModel answer parsing")
+        table = [("x.py:1 | C7 | yes, no | dirty | because", DIRTY),
+                 ("x:1 | C7 | yes | Clean. | ok", CLEAN),
+                 ("x:1 | C7 | unclear | **unclear** | no data", UNCLEAR),
+                 ("dirty", DIRTY),
+                 ("x | C1 | yes | dirty / clean / unclear | format echo", None),
+                 ("don't know", None),
+                 ("x | C1 | yes | maybe | no", None)]
+        case("the verdict is read from the fourth field; a format echo and garbage are not a verdict",
+             all(parse_verdict(a)[0] == w for a, w in table), True)
+
+        print("\nThreshold and scoring")
+        one = [Item(f"T-{i}", "C1", DIRTY if i < 10 else CLEAN, "p", "w", "s", "c") for i in range(20)]
+
+        def sc(found, flagged, pol=None):
+            ans = {}
+            for i, it in enumerate(one):
+                if i < 10:
+                    ans[it.id] = [DIRTY if i < found else CLEAN]
+                else:
+                    ans[it.id] = [DIRTY if i - 10 < flagged else CLEAN]
+            return score(one, ans, pol)["C1"]["pass"]
+
+        case("9 of 10 found passes, 8 of 10 does not", sc(9, 0) and not sc(8, 0), sc(8, 0, Policy(min_recall=0.8)))
+        case("1 of 10 flagged passes, 2 of 10 does not", sc(10, 1) and not sc(10, 2), sc(10, 2, Policy(max_false=0.2)))
+        rep = {it.id: [DIRTY, CLEAN] if it.expected == DIRTY else [CLEAN, DIRTY] for it in one}
+        case("--repeat: the worst answer counts",
+             not score(one, rep)["C1"]["pass"] and score(one, rep)["C1"]["found"] == 0 and score(one, rep)["C1"]["flagged"] == 10,
+             score(one, rep, Policy(worst=False))["C1"]["found"] == 10)
+        uns = {it.id: [UNCLEAR] for it in one}
+        r = score(one, uns)["C1"]
+        case("`unclear`: a miss on dirty, not an error on clean, counted separately",
+             r["found"] == 0 and r["flagged"] == 0 and r["unsure"] == 10 and not r["pass"],
+             score(one, uns, Policy(unsure_is_hit=True))["C1"]["found"] == 10)
+
+        print("\nExam on fake models (whole corpus, prompt → verdict → score)")
+        oracle = exam("oracle")
+        miss = exam("oracle-miss")
+        case(f"the oracle fake passes all {len(codes)} cards",
+             set(oracle) == set(codes) and all(r["pass"] for r in oracle.values()),
+             not any(r["pass"] for r in miss.values()))
+        d_all = exam("dirty")
+        d_off = exam("dirty", Policy(max_false=1.0))
+        case('the "always dirty" fake fails every card on false',
+             all((not r["pass"]) and r["why_fail"] == ["false"] for r in d_all.values()),
+             all(r["pass"] for r in d_off.values()))
+        false_ = exam("oracle-false")
+        case("an oracle that flags 2 clean fragments per card fails every card on false",
+             all(not r["pass"] and "false" in r["why_fail"] for r in false_.values()),
+             True)
+        c_all = exam("clean")
+        c_off = exam("clean", Policy(min_recall=0.0))
+        case('the "always clean" fake fails every card on recall',
+             all((not r["pass"]) and r["why_fail"] == ["recall"] for r in c_all.values()),
+             all(r["pass"] for r in c_off.values()))
+        u_all = exam("unsure")
+        case('the "always unclear" fake fails on recall with no false flags',
+             all(not r["pass"] and r["flagged"] == 0 and r["unsure"] == r["clean"] for r in u_all.values()),
+             all(r["pass"] for r in exam("unsure", Policy(min_recall=0.0)).values()))
+        g_all = exam("garbage")
+        case("an unparsed answer is a miss on dirty and not a false flag on clean",
+             all(not r["pass"] and r["found"] == 0 and r["flagged"] == 0 for r in g_all.values()), True)
+        o2 = exam("oracle", repeat=2)
+        case("--repeat 2 with the oracle still passes everything", all(r["pass"] for r in o2.values()), True)
+
+        sub = [it for it in items if it.card == card0][:2]
+        failing = run_exam(sub, skill, f"{me} --fake fail", repeat=1, jobs=2, timeout=30, retries=0)
+        errs = sum(1 for v in failing.values() for a in v if a["error"])
+        case("a failing model command is a call error, not an answer", errs == len(sub), True)
+    finally:
+        os.environ.clear()
+        os.environ.update(old_env)
+
+    print()
+    if fails:
+        print(f"exam --selftest: {len(fails)} of {n} failed")
+        return 1
+    print(f"exam --selftest: {n} of {n} passed")
+    return 0
+
+
+# --------------------------------------------------------------------------
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--model-cmd", help="shell command: prompt on stdin, answer on stdout")
+    ap.add_argument("--cards", help="comma separated, for example C7,C9; all by default")
+    ap.add_argument("--repeat", type=int, default=1, help="runs per fragment; the worst counts")
+    ap.add_argument("--jobs", type=int, default=4, help="parallel model calls")
+    ap.add_argument("--timeout", type=int, default=180, help="seconds per call")
+    ap.add_argument("--retries", type=int, default=2, help="retries of a failed call")
+    ap.add_argument("--label", help="model name in the report (otherwise the command itself)")
+    ap.add_argument("--out", help="where to write the JSON report with every answer")
+    ap.add_argument("--skill", help="path to SKILL.md (looked up nearby by default)")
+    ap.add_argument("--corpus", default=str(CORPUS_DIR), help="directory with C<N>.yaml")
+    ap.add_argument("--check", action="store_true", help="only check the corpus and the cards")
+    ap.add_argument("--show-prompt", metavar="ID", help="print the prompt for a fragment")
+    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--fake", help=argparse.SUPPRESS)
+    a = ap.parse_args(argv)
+
+    if a.fake:
+        return fake_model(a.fake)
+    if a.selftest:
+        return selftest()
+    try:
+        skill = parse_skill(find_skill(a.skill).read_text(encoding="utf-8"))
+        items = load_corpus(Path(a.corpus))
+        want = None
+        if a.cards:
+            want = [c.strip() for c in a.cards.split(",") if c.strip()]
+            unknown = [c for c in want if c not in skill.cards]
+            if unknown:
+                raise ExamError(f"no such cards in SKILL.md: {', '.join(unknown)}")
+            items = [it for it in items if it.card in want]
+        bad = check_corpus(items, skill, cards=want)
+        if bad:
+            raise ExamError("corpus is invalid:\n  " + "\n  ".join(bad))
+        if a.check:
+            print(f"corpus valid: {len(items)} fragments, {len({i.card for i in items})} cards")
+            return 0
+        if a.show_prompt:
+            it = next((i for i in items if i.id == a.show_prompt), None)
+            if not it:
+                raise ExamError(f"no fragment {a.show_prompt}")
+            print(build_prompt(skill, it))
+            return 0
+        if not a.model_cmd:
+            raise ExamError("--model-cmd is required")
+        if a.repeat < 1:
+            raise ExamError("--repeat must be at least 1")
+        pol = Policy()
+        res = run_exam(items, skill, a.model_cmd, repeat=a.repeat, jobs=a.jobs,
+                       timeout=a.timeout, retries=a.retries)
+    except ExamError as e:
+        print(f"exam: {e}", file=sys.stderr)
+        return 2
+
+    per = score(items, {k: [x["verdict"] for x in v] for k, v in res.items()}, pol)
+    print(render(per, items, res, pol))
+    errors = sum(1 for v in res.values() for x in v if x["error"])
+    unparsed = sum(1 for v in res.values() for x in v if not x["error"] and x["verdict"] is None)
+    if unparsed:
+        print(f"\nUnparsed answers: {unparsed} (a miss on dirty, `unclear` on clean).")
+    if a.out:
+        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.out).write_text(json.dumps(build_report(a, skill, items, res, per, pol),
+                                          ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        print(f"Report: {a.out}")
+    if errors:
+        print(f"\nModel call errors: {errors}. The measurement is void.", file=sys.stderr)
+        return 2
+    return 0 if all(r["pass"] for r in per.values()) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

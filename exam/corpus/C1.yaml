@@ -1,0 +1,837 @@
+# C1 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C1-01
+  card: C1
+  expected: clean
+  path: app/shipping/scans.py
+  why: The search fires on any over events, but the expression checks a repeated-request key, not a state; the status comes from the shipment field.
+  source: scan handler protected against repeated registration by the request key
+  code: |
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.shipping.models import Shipment, ShipmentEvent
+    from app.shipping.schemas import ScanResult
+
+
+    async def register_scan(
+        db: AsyncSession, shipment_id: int, request_key: str, point_id: int
+    ) -> ScanResult:
+        shipment = await db.get(Shipment, shipment_id)
+        if shipment is None:
+            raise LookupError("shipment_not_found")
+        events = (
+            await db.scalars(
+                select(ShipmentEvent).where(ShipmentEvent.shipment_id == shipment_id)
+            )
+        ).all()
+        request_token_already_taken = any(e.request_key == request_key for e in events)
+        if request_token_already_taken:
+            return ScanResult(duplicate=True, status=shipment.status)
+        db.add(
+            ShipmentEvent(
+                shipment_id=shipment_id,
+                event_type="scanned",
+                request_key=request_key,
+                point_id=point_id,
+            )
+        )
+        await db.commit()
+        return ScanResult(duplicate=False, status=shipment.status)
+- id: C1-02
+  card: C1
+  expected: clean
+  path: app/shipping/timeline.py
+  why: The log is used for the display feed; the state is returned from the stored field of the shipment.
+  source: building the event feed for the screen, the status comes from the entity field
+  code: |
+    from app.shipping.models import Shipment, ShipmentEvent, ShipmentStatus
+    from app.shipping.schemas import ShipmentTimeline, TimelineEntry
+
+    EVENT_TITLES = {
+        "created": "Shipment created",
+        "picked_up": "Courier picked up the parcel",
+        "delivery_failed": "Delivery failed",
+        "delivered": "Delivered to the recipient",
+        "cancelled": "Shipment cancelled",
+    }
+
+
+    def shipment_timeline(shipment: Shipment, events: list[ShipmentEvent]) -> ShipmentTimeline:
+        entries = [
+            TimelineEntry(
+                at=event.created_at,
+                title=EVENT_TITLES.get(event.event_type, event.event_type),
+                actor=event.actor_name,
+            )
+            for event in sorted(events, key=lambda e: e.created_at)
+        ]
+        return ShipmentTimeline(
+            shipment_id=shipment.id,
+            status=shipment.status,
+            finished=shipment.status in ShipmentStatus.FINAL,
+            entries=entries,
+        )
+- id: C1-03
+  card: C1
+  expected: dirty
+  path: src/tickets/lib/ticketStage.ts
+  why: The stage of an application is obtained by a reduce fold over the event log, although the application response has a status field.
+  source: frontend function that folds the event log of an application into a stage
+  code: |
+    import type { Ticket, TicketEvent } from "../model/types";
+
+    export type TicketStage = "new" | "assigned" | "in_work" | "resolved" | "closed";
+
+    export function ticketStage(ticket: Ticket, events: TicketEvent[]): TicketStage {
+      const ordered = [...events].sort((a, b) => a.seq - b.seq);
+      return ordered.reduce<TicketStage>((stage, event) => {
+        switch (event.type) {
+          case "assigned":
+            return "assigned";
+          case "work_started":
+            return "in_work";
+          case "resolved":
+            return "resolved";
+          case "closed":
+            return "closed";
+          case "reopened":
+            return "in_work";
+          default:
+            return stage;
+        }
+      }, "new");
+    }
+
+    export function ticketBadgeText(ticket: Ticket, events: TicketEvent[]): string {
+      const stage = ticketStage(ticket, events);
+      const suffix = ticket.status === "archived" ? " (archived)" : "";
+      return STAGE_TEXT[stage] + suffix;
+    }
+
+    const STAGE_TEXT: Record<TicketStage, string> = {
+      new: "New",
+      assigned: "Assigned",
+      in_work: "In progress",
+      resolved: "Resolved",
+      closed: "Closed",
+    };
+- id: C1-04
+  card: C1
+  expected: clean
+  path: app/reports/dispatch_delays.py
+  why: The report computes the delay between events and the number of retries; the shipment state is not derived.
+  source: report on the time and frequency of events in the analytics module
+  code: |
+    from statistics import median
+
+    from app.shipping.models import ShipmentEvent
+
+
+    def _first(events: list[ShipmentEvent], event_type: str) -> ShipmentEvent | None:
+        return next((e for e in events if e.event_type == event_type), None)
+
+
+    def dispatch_delays_minutes(events_by_shipment: dict[int, list[ShipmentEvent]]) -> list[float]:
+        delays: list[float] = []
+        for events in events_by_shipment.values():
+            created = _first(events, "created")
+            picked = _first(events, "picked_up")
+            if created is None or picked is None:
+                continue
+            delays.append((picked.created_at - created.created_at).total_seconds() / 60)
+        return delays
+
+
+    def delay_report(events_by_shipment: dict[int, list[ShipmentEvent]]) -> dict:
+        delays = dispatch_delays_minutes(events_by_shipment)
+        reattempts = sum(
+            1
+            for events in events_by_shipment.values()
+            for e in events
+            if e.event_type == "delivery_failed"
+        )
+        return {
+            "shipments": len(events_by_shipment),
+            "median_delay_min": median(delays) if delays else None,
+            "max_delay_min": max(delays, default=None),
+            "reattempts_total": reattempts,
+        }
+- id: C1-05
+  card: C1
+  expected: dirty
+  path: src/orders/model/orderCardModel.ts
+  why: The "finished" flag for an order card is obtained through events.some over the log, although the order type has a status field.
+  source: order card model on the frontend, the result is derived by checking event types
+  code: |
+    import type { Order, OrderEvent, OrderStatus } from "./types";
+
+    export type OrderCardModel = {
+      id: string;
+      title: string;
+      status: OrderStatus;
+      delivered: boolean;
+      returned: boolean;
+      isFinished: boolean;
+      lastEventAt: string;
+      canCancel: boolean;
+    };
+
+    export function orderCardModel(order: Order, events: OrderEvent[]): OrderCardModel {
+      const delivered = events.some(e => e.type === "delivered");
+      const returned = events.some(e => e.type === "returned_to_sender");
+      const lastEvent = events[events.length - 1];
+      const isFinished = delivered || returned;
+
+      return {
+        id: order.id,
+        title: `Order No. ${order.number}`,
+        status: order.status,
+        delivered,
+        returned,
+        isFinished,
+        lastEventAt: lastEvent?.createdAt ?? order.createdAt,
+        canCancel: !isFinished && order.paymentConfirmed,
+      };
+    }
+- id: C1-06
+  card: C1
+  expected: dirty
+  path: app/shipping/shipment_view.py
+  why: The function returns the shipment stage by folding the event log, although the shipment has a stored status field (questions 1 and 2 yes, question 3 yes).
+  source: computing the card stage in the service layer with a loop over the event log
+  code: |
+    from app.shipping.models import Shipment, ShipmentEvent, ShipmentStatus
+
+
+    def shipment_stage(shipment: Shipment, events: list[ShipmentEvent]) -> str:
+        """Shipment stage for the card in the account area."""
+        stage = "created"
+        for event in sorted(events, key=lambda e: e.created_at):
+            if event.event_type == "picked_up":
+                stage = "in_transit"
+            elif event.event_type == "delivery_failed":
+                stage = "returning"
+            elif event.event_type == "delivered":
+                return "delivered"
+            elif event.event_type == "cancelled":
+                return "cancelled"
+        return stage
+
+
+    def shipment_card(shipment: Shipment, events: list[ShipmentEvent]) -> dict:
+        return {
+            "id": shipment.id,
+            "number": shipment.number,
+            "recipient": shipment.recipient_name,
+            "stage": shipment_stage(shipment, events),
+            "updated_at": shipment.updated_at,
+            "is_final": shipment.status in ShipmentStatus.FINAL,
+        }
+- id: C1-07
+  card: C1
+  expected: clean
+  path: migrations/versions/4c1d7a90b2e5_shipment_status_backfill.py
+  why: The migration folds the event log into a stored field once; this is a data migration module from the exceptions list.
+  source: schema migration that fills the new state field from the event log
+  code: |
+    """fill shipments.status from shipment_events
+
+    Revision ID: 4c1d7a90b2e5
+    Revises: 9a03f5d1c6b8
+    """
+    import sqlalchemy as sa
+    from alembic import op
+
+    LAST_EVENT_TO_STATUS = {
+        "picked_up": "in_transit",
+        "delivery_failed": "returning",
+        "delivered": "delivered",
+        "cancelled": "cancelled",
+    }
+
+
+    def upgrade() -> None:
+        bind = op.get_bind()
+        shipments = sa.table("shipments", sa.column("id"), sa.column("status"))
+        events = sa.table(
+            "shipment_events",
+            sa.column("shipment_id"),
+            sa.column("event_type"),
+            sa.column("created_at"),
+        )
+        rows = bind.execute(
+            sa.select(events.c.shipment_id, events.c.event_type).order_by(events.c.created_at)
+        ).all()
+        last_event = {}
+        for shipment_id, event_type in rows:
+            last_event[shipment_id] = event_type
+        for shipment_id, event_type in last_event.items():
+            status = LAST_EVENT_TO_STATUS.get(event_type, "created")
+            bind.execute(
+                shipments.update().where(shipments.c.id == shipment_id).values(status=status)
+            )
+- id: C1-08
+  card: C1
+  expected: dirty
+  path: app/jobs/outcome.py
+  why: The task result is read from the event log by a loop with return, although the task has a stored status field in the same model.
+  source: async service-layer function that returns the task result from the last log event
+  code: |
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.jobs.models import DeliveryJob, JobEvent
+
+
+    async def delivery_job_outcome(db: AsyncSession, job_id: int) -> str | None:
+        events = (
+            await db.scalars(
+                select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.seq)
+            )
+        ).all()
+        for event in reversed(events):
+            if event.kind == "job_succeeded":
+                return "success"
+            if event.kind == "job_failed":
+                return "failed"
+            if event.kind == "job_timed_out":
+                return "timeout"
+        return None
+
+
+    async def job_needs_attention(db: AsyncSession, job: DeliveryJob) -> bool:
+        outcome = await delivery_job_outcome(db, job.id)
+        return outcome in ("failed", "timeout") and job.status != "archived"
+- id: C1-09
+  card: C1
+  expected: clean
+  path: app/shipping/state.py
+  why: Completion is read from the stored status field by the declared list, the event log takes no part.
+  source: functions that read the shipment state from the stored field with a declared list of final values
+  code: |
+    from enum import StrEnum
+
+    from sqlalchemy import select
+
+    from app.shipping.models import Shipment
+
+
+    class ShipmentStatus(StrEnum):
+        CREATED = "created"
+        IN_TRANSIT = "in_transit"
+        RETURNING = "returning"
+        DELIVERED = "delivered"
+        CANCELLED = "cancelled"
+
+
+    FINAL_STATUSES = frozenset({ShipmentStatus.DELIVERED, ShipmentStatus.CANCELLED})
+
+
+    def shipment_finished(shipment: Shipment) -> bool:
+        return shipment.status in FINAL_STATUSES
+
+
+    def active_shipments_query(courier_id: int):
+        return select(Shipment).where(
+            Shipment.courier_id == courier_id,
+            Shipment.status.not_in(FINAL_STATUSES),
+        )
+
+
+    def shipment_summary(shipment: Shipment) -> dict:
+        return {
+            "id": shipment.id,
+            "number": shipment.number,
+            "status": shipment.status,
+            "finished": shipment_finished(shipment),
+        }
+- id: C1-10
+  card: C1
+  expected: dirty
+  path: app/inspections/rows.py
+  why: Among ordinary counts there is a hidden computation of the check result from signing and interruption events; the check has no stored result field, and status describes only the record.
+  source: building a row of the checks list, where the result is derived from the log among other counts
+  code: |
+    from app.inspections.models import Inspection, InspectionEvent
+    from app.inspections.schemas import InspectionRow
+
+
+    def build_inspection_row(
+        inspection: Inspection, events: list[InspectionEvent]
+    ) -> InspectionRow:
+        photos = [e for e in events if e.event_type == "photo_attached"]
+        comments = [e for e in events if e.event_type == "comment_added"]
+        defects = sum(e.payload.get("count", 1) for e in events if e.event_type == "defect_found")
+
+        finished = any(e.event_type == "inspection_signed" for e in events)
+        aborted = any(e.event_type == "inspection_interrupted" for e in events)
+        if finished:
+            result = "finished"
+        elif aborted:
+            result = "interrupted"
+        else:
+            result = "in progress"
+
+        return InspectionRow(
+            inspection_id=inspection.id,
+            warehouse=inspection.warehouse_name,
+            inspector=inspection.inspector_name,
+            record_status=inspection.status,
+            photos_count=len(photos),
+            comments_count=len(comments),
+            defects_count=defects,
+            result=result,
+            started_at=inspection.started_at,
+        )
+- id: C1-11
+  card: C1
+  expected: clean
+  path: tests/shipping/test_delivery.py
+  why: A fragment from tests; checks over the event log in tests do not count.
+  source: tests of the delivery service that check the event record and the status
+  code: |
+    from app.shipping import service
+    from app.shipping.models import ShipmentEvent, ShipmentStatus
+
+
+    def test_delivered_event_is_recorded(db, shipment):
+        service.mark_delivered(db, shipment.id)
+
+        events = db.query(ShipmentEvent).filter_by(shipment_id=shipment.id).all()
+        assert any(e.event_type == "delivered" for e in events)
+        assert shipment.status == ShipmentStatus.DELIVERED
+
+
+    def test_cancelled_shipment_has_no_delivery_event(db, shipment):
+        service.cancel(db, shipment.id, reason="at the sender's request")
+
+        events = db.query(ShipmentEvent).filter_by(shipment_id=shipment.id).all()
+        assert not any(e.event_type == "delivered" for e in events)
+        assert any(e.event_type == "cancelled" for e in events)
+        assert shipment.status == ShipmentStatus.CANCELLED
+
+
+    def test_finished_shipments_are_listed_by_status(db, make_shipment):
+        done = make_shipment(status=ShipmentStatus.DELIVERED)
+        make_shipment(status=ShipmentStatus.IN_TRANSIT)
+
+        assert [s.id for s in service.list_finished(db)] == [done.id]
+- id: C1-12
+  card: C1
+  expected: dirty
+  path: app/shifts/state.py
+  why: The shift state is folded from the event log by the reduce function, and the shift model has a stored status field.
+  source: folding the shift event log into a state in the service layer
+  code: |
+    from functools import reduce
+
+    from app.shifts.models import Shift, ShiftEvent
+
+
+    def _fold(state: str, event: ShiftEvent) -> str:
+        if event.event_type == "shift_started":
+            return "active"
+        if event.event_type == "break_started":
+            return "on_break"
+        if event.event_type == "break_finished":
+            return "active"
+        if event.event_type == "shift_closed":
+            return "closed"
+        return state
+
+
+    def shift_state(shift: Shift, events: list[ShiftEvent]) -> str:
+        ordered = sorted(events, key=lambda e: e.created_at)
+        return reduce(_fold, ordered, "planned")
+
+
+    def can_start_break(shift: Shift, events: list[ShiftEvent]) -> bool:
+        return shift.status != "cancelled" and shift_state(shift, events) == "active"
+- id: C1-13
+  card: C1
+  expected: dirty
+  path: app/warehouse/pallet_stage.py
+  why: The pallet stage is returned by walking the event log with return, although the pallet has a stored status field in the card (questions 1 and 2 yes, question 3 yes).
+  source: computing the pallet stage for the warehouse card by walking the event log in the service layer
+  code: |
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.warehouse.models import Pallet, PalletEvent
+    from app.warehouse.schemas import PalletCard
+
+
+    async def pallet_stage(db: AsyncSession, pallet_id: int) -> str:
+        """Pallet stage for the warehouse card."""
+        events = (
+            await db.scalars(
+                select(PalletEvent)
+                .where(PalletEvent.pallet_id == pallet_id)
+                .order_by(PalletEvent.occurred_at)
+            )
+        ).all()
+        # the latest events come first
+        for event in reversed(events):
+            if event.event_type == "loaded_to_truck":
+                return "shipped"
+            if event.event_type == "put_away":
+                return "stored"
+            if event.event_type == "unloaded":
+                return "received"
+        return "expected"
+
+
+    async def pallet_card(db: AsyncSession, pallet_id: int) -> PalletCard:
+        pallet = await db.get(Pallet, pallet_id)
+        if pallet is None:
+            raise LookupError("pallet_not_found")
+        return PalletCard(
+            id=pallet.id,
+            sku_count=pallet.sku_count,
+            zone_code=pallet.zone_code,
+            status=pallet.status,
+            stage=await pallet_stage(db, pallet_id),
+        )
+- id: C1-14
+  card: C1
+  expected: clean
+  path: src/orders/lib/confirmHandover.ts
+  why: The search fires on some over events, but the expression checks a repeated-request key and says nothing about the state; the order status is read from its field.
+  source: frontend function that confirms delivery of an order, protected against repeated submission by the request key
+  code: |
+    import type { Order, OrderEvent } from "../model/types";
+    import { postOrderEvent } from "../api/orderEvents";
+
+    export type HandoverResult = {
+      accepted: boolean;
+      orderStatus: Order["status"];
+    };
+
+    export async function confirmHandover(
+      order: Order,
+      events: OrderEvent[],
+      requestKey: string,
+    ): Promise<HandoverResult> {
+      // the key is created once per button press
+      const alreadySent = events.some(e => e.requestKey === requestKey);
+      if (alreadySent) {
+        return { accepted: false, orderStatus: order.status };
+      }
+      if (order.status === "cancelled") {
+        throw new Error("order_cancelled");
+      }
+      await postOrderEvent(order.id, {
+        type: "handover_confirmed",
+        requestKey,
+        at: new Date().toISOString(),
+      });
+      return { accepted: true, orderStatus: order.status };
+    }
+- id: C1-15
+  card: C1
+  expected: dirty
+  path: src/routes/model/useRouteSummary.ts
+  why: The "route finished" flag is obtained through some over the event log, although the route type and the label below use a status field (questions 1 and 2 yes, question 3 yes).
+  source: frontend hook that assembles the courier route summary and derives completion from the event log
+  code: |
+    import { useMemo } from "react";
+    import type { Route, RouteEvent } from "./types";
+
+    export interface RouteSummary {
+      id: string;
+      courierName: string;
+      stopsDone: number;
+      stopsTotal: number;
+      finished: boolean;
+    }
+
+    export function useRouteSummary(route: Route, events: RouteEvent[]): RouteSummary {
+      return useMemo(() => {
+        const stopsDone = events.filter(e => e.type === "stop_completed").length;
+        // recompute on every new route event
+        const finished = events.some(e => e.type === "route_closed");
+        return {
+          id: route.id,
+          courierName: route.courier.fullName,
+          stopsDone,
+          stopsTotal: route.stops.length,
+          finished,
+        };
+      }, [route, events]);
+    }
+
+    export function routeStatusLabel(route: Route, summary: RouteSummary): string {
+      if (route.status === "archived") return "Archived";
+      return summary.finished ? "Finished" : "On the way";
+    }
+- id: C1-16
+  card: C1
+  expected: clean
+  path: app/warehouse/dock_report.py
+  why: The report computes the waiting time between events and the number of repeats; the entity state is not derived from the log.
+  source: report on the waiting time at the ramp and the frequency of events in the analytics module
+  code: |
+    from collections import Counter
+    from datetime import timedelta
+    from statistics import median
+
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    from app.warehouse.models import DockEvent
+
+
+    def dock_wait_report(session: Session, dock_id: int) -> dict:
+        """Waiting time at the ramp and event frequency."""
+        events = session.scalars(
+            select(DockEvent).where(DockEvent.dock_id == dock_id).order_by(DockEvent.occurred_at)
+        ).all()
+        waits: list[timedelta] = []
+        arrived_at = {}
+        for event in events:
+            if event.event_type == "truck_arrived":
+                arrived_at[event.truck_id] = event.occurred_at
+            elif event.event_type == "unloading_started" and event.truck_id in arrived_at:
+                waits.append(event.occurred_at - arrived_at.pop(event.truck_id))
+        counts = Counter(e.event_type for e in events)
+        return {
+            "dock_id": dock_id,
+            "median_wait_minutes": (
+                median(w.total_seconds() / 60 for w in waits) if waits else None
+            ),
+            "arrivals": counts["truck_arrived"],
+            "repeat_scans": counts["scan_repeated"],
+        }
+- id: C1-17
+  card: C1
+  expected: dirty
+  path: app/pickups/request_state.py
+  why: The state of a pickup request is folded from the event log through a dictionary and a loop, while the response also returns the stored result_status field of the same request (questions 1 and 2 yes, question 3 yes).
+  source: computing the pickup request state in the dispatcher list row, folding the log in the service layer
+  code: |
+    from app.pickups.models import PickupRequest
+
+    STATE_BY_EVENT = {
+        "request_created": "new",
+        "courier_assigned": "assigned",
+        "pickup_done": "picked_up",
+        "pickup_failed": "failed",
+        "request_cancelled": "cancelled",
+    }
+
+
+    def request_state(request: PickupRequest) -> str:
+        """Current state of a pickup request for the dispatcher list."""
+        ordered = sorted(request.events, key=lambda e: e.occurred_at)
+        state = "new"
+        for event in ordered:
+            state = STATE_BY_EVENT.get(event.event_type, state)
+        return state
+
+
+    def dispatcher_list_row(request: PickupRequest) -> dict:
+        return {
+            "id": request.id,
+            "address": request.address,
+            "window_from": request.window_from.isoformat(),
+            "window_to": request.window_to.isoformat(),
+            "state": request_state(request),
+            "result_status": request.result_status,
+            "last_event_at": max((e.occurred_at for e in request.events), default=None),
+        }
+- id: C1-18
+  card: C1
+  expected: clean
+  path: app/scripts/shipment_stage_backfill.py
+  why: The migration script folds the log into the stored stage field once and is not used afterwards; this is a data migration module from the exceptions list.
+  source: one-off data migration script that fills the new stage field of shipments from the event log
+  code: |
+    """One-off fill of the stage field of shipments from the event log."""
+    import argparse
+
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    from app.db import SessionLocal
+    from app.shipping.models import Shipment, ShipmentEvent
+
+    STAGE_BY_EVENT = {
+        "created": "accepted",
+        "picked_up": "in_transit",
+        "delivered": "delivered",
+        "returned": "returned",
+    }
+
+
+    def backfill_batch(session: Session, last_id: int, size: int) -> int:
+        shipments = session.scalars(
+            select(Shipment).where(Shipment.id > last_id).order_by(Shipment.id).limit(size)
+        ).all()
+        for shipment in shipments:
+            events = session.scalars(
+                select(ShipmentEvent)
+                .where(ShipmentEvent.shipment_id == shipment.id)
+                .order_by(ShipmentEvent.occurred_at)
+            ).all()
+            stage = "accepted"
+            for event in events:
+                stage = STAGE_BY_EVENT.get(event.event_type, stage)
+            shipment.stage = stage
+        session.commit()
+        return shipments[-1].id if shipments else last_id
+
+
+    def main() -> None:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--batch", type=int, default=500)
+        args = parser.parse_args()
+        last_id = 0
+        with SessionLocal() as session:
+            while True:
+                next_id = backfill_batch(session, last_id, args.batch)
+                if next_id == last_id:
+                    break
+                last_id = next_id
+
+
+    if __name__ == "__main__":
+        main()
+- id: C1-19
+  card: C1
+  expected: dirty
+  path: app/delivery/attempt_outcome.py
+  why: The result of a delivery attempt is determined from the event log through any and a count, although the attempt has a stored result_status field that is returned in the response (questions 1 and 2 yes, question 3 yes).
+  source: determining the result of a delivery attempt from the event log in the service layer
+  code: |
+    from enum import Enum
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.delivery.models import AttemptEvent, DeliveryAttempt
+
+
+    class AttemptOutcome(str, Enum):
+        DELIVERED = "delivered"
+        FAILED = "failed"
+        IN_PROGRESS = "in_progress"
+
+
+    async def attempt_outcome(db: AsyncSession, attempt_id: int) -> AttemptOutcome:
+        """Attempt result for the route list."""
+        events = (
+            await db.scalars(select(AttemptEvent).where(AttemptEvent.attempt_id == attempt_id))
+        ).all()
+        if any(e.event_type == "handed_over" for e in events):
+            return AttemptOutcome.DELIVERED
+        no_answer = sum(1 for e in events if e.event_type == "no_answer")
+        if no_answer >= 3 or any(e.event_type == "refused" for e in events):
+            return AttemptOutcome.FAILED
+        return AttemptOutcome.IN_PROGRESS
+
+
+    async def attempt_response(db: AsyncSession, attempt_id: int) -> dict:
+        attempt = await db.get(DeliveryAttempt, attempt_id)
+        return {
+            "id": attempt.id,
+            "courier_id": attempt.courier_id,
+            "result_status": attempt.result_status,
+            "outcome": (await attempt_outcome(db, attempt_id)).value,
+        }
+- id: C1-20
+  card: C1
+  expected: clean
+  path: tests/shipping/test_handover.py
+  why: A fragment from tests; checks over the event log in tests do not count.
+  source: tests of shipment delivery that check the event record and the stored status
+  code: |
+    import pytest
+
+    from app.shipping.service import load_events, register_handover
+
+
+    @pytest.mark.asyncio
+    async def test_handover_writes_event(db, shipment):
+        await register_handover(db, shipment.id, request_key="k-1")
+        events = await load_events(db, shipment.id)
+        assert any(e.event_type == "handed_over" for e in events)
+
+
+    @pytest.mark.asyncio
+    async def test_handover_moves_status(db, shipment):
+        await register_handover(db, shipment.id, request_key="k-2")
+        await db.refresh(shipment)
+        assert shipment.status == "delivered"
+
+
+    @pytest.mark.asyncio
+    async def test_repeated_key_adds_no_event(db, shipment):
+        await register_handover(db, shipment.id, request_key="k-3")
+        await register_handover(db, shipment.id, request_key="k-3")
+        events = await load_events(db, shipment.id)
+        assert sum(1 for e in events if e.event_type == "handed_over") == 1
+- id: C1-21
+  card: C1
+  expected: dirty
+  path: app/couriers/onboarding.py
+  why: The "courier onboarding completed" flag is derived by comparing a set of log event types, although the courier has a stored onboarding_status field (questions 1 and 2 yes, question 3 yes).
+  source: checking that courier onboarding is complete by a set of log events in the service layer
+  code: |
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    from app.couriers.models import Courier, CourierEvent
+
+    REQUIRED_STEPS = {"documents_signed", "instruction_passed", "kit_issued"}
+
+
+    def is_onboarding_complete(session: Session, courier_id: int) -> bool:
+        """Whether all courier onboarding steps are passed."""
+        types = set(
+            session.scalars(
+                select(CourierEvent.event_type).where(CourierEvent.courier_id == courier_id)
+            )
+        )
+        return REQUIRED_STEPS <= types
+
+
+    def courier_profile(session: Session, courier: Courier) -> dict:
+        # profile fields for the dispatcher screen
+        return {
+            "id": courier.id,
+            "full_name": courier.full_name,
+            "depot_id": courier.depot_id,
+            "onboarding_status": courier.onboarding_status,
+            "onboarding_done": is_onboarding_complete(session, courier.id),
+        }
+- id: C1-22
+  card: C1
+  expected: clean
+  path: app/warehouse/slot_booking.py
+  why: The any expression compares a repeated-request token, not a state; the window state is read from its state field.
+  source: booking a receiving window at the ramp, protected against a repeated request by the token
+  code: |
+    from datetime import datetime
+
+    from sqlalchemy.orm import Session
+
+    from app.warehouse.models import SlotEvent, SlotState, TimeSlot
+
+
+    class SlotUnavailable(Exception):
+        pass
+
+
+    def book_slot(session: Session, slot: TimeSlot, carrier_id: int, dedup_token: str) -> TimeSlot:
+        """Books a receiving window; a repeat with the same token changes nothing."""
+        if any(e.dedup_token == dedup_token for e in slot.events):
+            return slot
+        if slot.state != SlotState.FREE:
+            raise SlotUnavailable(slot.id)
+        slot.carrier_id = carrier_id
+        slot.booked_at = datetime.utcnow()
+        session.add(
+            SlotEvent(slot_id=slot.id, event_type="booked", carrier_id=carrier_id, dedup_token=dedup_token)
+        )
+        session.commit()
+        return slot

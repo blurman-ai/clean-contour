@@ -1,0 +1,852 @@
+# C8 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C8-01
+  card: C8
+  expected: dirty
+  path: app/shipping/planning.py
+  why: The window and the consolidation node are assigned to all shipment kinds except express; the processing is chosen by the condition "not such-and-such kind".
+  source: Shipment planning where the processing is chosen by a negative check of the kind.
+  code: |
+    from app.shipping.kinds import is_express, is_pallet
+    from app.shipping.models import Shipment
+    from app.shipping.schedule import (
+        pick_hub,
+        reserve_express_slot,
+        reserve_regular_window,
+    )
+
+
+    def plan_shipment(shipment: Shipment) -> ShipmentPlan:
+        plan = ShipmentPlan(shipment_id=shipment.id)
+        plan.documents = ["invoice"]
+        if is_pallet(shipment):
+            plan.documents.append("loading-plan")
+
+        plan.slot = reserve_express_slot(shipment) if shipment.paid_express else None
+
+        if not is_express(shipment):
+            plan.window = reserve_regular_window(shipment)
+            plan.hub = pick_hub(shipment.destination)
+            plan.consolidation_days = 2
+
+        plan.insured = shipment.declared_value > 10_000
+        plan.notes = shipment.comment.strip() if shipment.comment else ""
+        return plan
+
+
+    def plan_many(shipments: list[Shipment]) -> list[ShipmentPlan]:
+        return [plan_shipment(shipment) for shipment in shipments]
+- id: C8-02
+  card: C8
+  expected: clean
+  path: app/shipping/transport/pickup_loader.py
+  why: The condition "not such-and-such kind" gives a refusal with a code; this is the card's exception.
+  source: Loading a record of the needed kind with a refusal by code if the record is of another kind.
+  code: |
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.shipping.errors import PickupError
+    from app.shipping.models import Shipment, ShipmentKind
+
+
+    async def load_owned_pickup(
+        db: AsyncSession,
+        *,
+        shipment_id: int,
+        owner_id: int,
+        for_update: bool = False,
+    ) -> Shipment:
+        statement = select(Shipment).where(
+            Shipment.id == shipment_id,
+            Shipment.created_by_user_id == owner_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        shipment = await db.scalar(statement)
+        if shipment is None:
+            raise PickupError("pickup_not_found", status_code=404)
+        if shipment.kind != ShipmentKind.PICKUP.value:
+            raise PickupError("not_a_pickup", status_code=409)
+        return shipment
+
+
+    def pickup_window(shipment: Shipment) -> tuple[str, str]:
+        start = shipment.pickup_from.strftime("%H:%M")
+        end = shipment.pickup_to.strftime("%H:%M")
+        return start, end
+- id: C8-03
+  card: C8
+  expected: clean
+  path: src/shipping/ui/ShipmentActions.tsx
+  why: The negations concern the loading state and the mobile screen flag; the kind is checked by a positive comparison.
+  source: Shipment action button block with negative conditions about loading and the screen.
+  code: |
+    import { Button, Group } from "@ui/base";
+    import { useMediaQuery } from "@ui/hooks";
+
+    type ShipmentActionsProps = {
+      shipment: { id: string; kind: "parcel" | "freight" | "envelope" };
+      isLoading: boolean;
+      onCancel: (id: string) => void;
+      onAddPallet: (id: string) => void;
+      onRebook?: (id: string) => void;
+    };
+
+    export function ShipmentActions({
+      shipment,
+      isLoading,
+      onCancel,
+      onAddPallet,
+      onRebook,
+    }: ShipmentActionsProps) {
+      const isMobile = useMediaQuery("(max-width: 48em)");
+      const isFreight = shipment.kind === "freight";
+
+      return (
+        <Group gap={isMobile ? 6 : 10}>
+          <Button
+            variant="default"
+            loading={isLoading}
+            disabled={isLoading}
+            onClick={() => onCancel(shipment.id)}
+          >
+            Cancel
+          </Button>
+          {isFreight && !isLoading ? (
+            <Button onClick={() => onAddPallet(shipment.id)}>Add pallet</Button>
+          ) : null}
+          {onRebook && !isMobile ? (
+            <Button variant="subtle" onClick={() => onRebook(shipment.id)}>
+              Reorder
+            </Button>
+          ) : null}
+        </Group>
+      );
+    }
+- id: C8-04
+  card: C8
+  expected: dirty
+  path: src/shipping/ui/ShipmentCard.tsx
+  why: The tracking link is shown to all kinds except freight; the processing is chosen by a negative comparison of the kind.
+  source: Shipment card in a list, where showing an element is chosen by a negative comparison of the kind.
+  code: |
+    import { Anchor, Badge, Card, Text } from "@ui/base";
+    import {
+      isDraftItem,
+      itemKind,
+      itemTitle,
+      trackingPath,
+    } from "../lib/shipmentItem";
+    import type { ShipmentListItem } from "../model/types";
+
+    export function ShipmentCard({ item }: { item: ShipmentListItem }) {
+      const isDraft = isDraftItem(item);
+      const kind = itemKind(item);
+      const title = itemTitle(item);
+      const showTrackingLink = !isDraft && kind !== "freight";
+
+      return (
+        <Card withBorder padding="sm">
+          <Text fw={600}>{title}</Text>
+          {isDraft ? (
+            <Badge color="orange" size="xs">
+              Draft
+            </Badge>
+          ) : (
+            <Badge color="blue" size="xs">
+              {kind}
+            </Badge>
+          )}
+          <Text size="sm" c="dimmed">
+            {item.address}
+          </Text>
+          {showTrackingLink ? (
+            <Anchor href={trackingPath(item)} size="sm">
+              Track
+            </Anchor>
+          ) : null}
+        </Card>
+      );
+    }
+- id: C8-05
+  card: C8
+  expected: clean
+  path: app/shipping/plans.py
+  why: The processing is taken from the kinds table by the kind field; there are no negative checks.
+  source: Choosing shipment processing from the kinds table with a positive check of a single kind.
+  code: |
+    from typing import Protocol
+
+    from app.shipping.models import Shipment, ShipmentKind
+
+
+    class ShipmentPlanBuilder(Protocol):
+        def build(self, shipment: Shipment) -> ShipmentPlan: ...
+
+
+    class ExpressBuilder:
+        def build(self, shipment: Shipment) -> ShipmentPlan:
+            return ShipmentPlan(shipment.id, slot=reserve_express_slot(shipment))
+
+
+    class RegularBuilder:
+        def build(self, shipment: Shipment) -> ShipmentPlan:
+            return ShipmentPlan(
+                shipment.id,
+                window=reserve_regular_window(shipment),
+                hub=pick_hub(shipment.destination),
+            )
+
+
+    class PalletBuilder:
+        def build(self, shipment: Shipment) -> ShipmentPlan:
+            plan = RegularBuilder().build(shipment)
+            plan.documents.append("loading-plan")
+            return plan
+
+
+    PLANS: dict[ShipmentKind, ShipmentPlanBuilder] = {
+        ShipmentKind.EXPRESS: ExpressBuilder(),
+        ShipmentKind.REGULAR: RegularBuilder(),
+        ShipmentKind.PALLET: PalletBuilder(),
+    }
+
+
+    def plan_shipment(shipment: Shipment) -> ShipmentPlan:
+        plan = PLANS[shipment.kind].build(shipment)
+        if shipment.kind is ShipmentKind.PALLET:
+            plan.needs_ramp = True
+        return plan
+- id: C8-06
+  card: C8
+  expected: dirty
+  path: app/services/revision_publication.py
+  why: The draft structure is updated for any builds except the courier one; a negative check of the kind chooses the processing among other code.
+  source: Applying a completed revision, where one of the branches is chosen by the condition "not such-and-such build".
+  code: |
+    async def apply_completed_revision(db, draft, revision, now):
+        snapshot = with_pinned_limits(revision.cargo_snapshot_json)
+        revision.cargo_snapshot_json = snapshot
+        revision.error_message = None
+        revision.completed_at = now
+        revision.updated_at = now
+        await db.flush()
+
+        draft.current_batch_id = revision.id
+        is_courier_build = revision.mode == COURIER_BUILD_MODE
+        if revision.layout_snapshot_json is not None and not is_courier_build:
+            draft.layout_json = revision.layout_snapshot_json
+        if is_courier_build:
+            options = (
+                revision.dispatch_options_json
+                if isinstance(revision.dispatch_options_json, dict)
+                else {}
+            )
+            source_version = options.get("_courier_build_plan_version")
+            source_sha256 = options.get("_courier_build_plan_sha256")
+            if (
+                isinstance(source_version, int)
+                and isinstance(source_sha256, str)
+                and draft.plan_version == source_version
+                and draft.plan_sha256 == source_sha256
+            ):
+                # The built artifact advances the plan version once; an edit made
+                # while the worker ran keeps its own version.
+                draft.plan_version = source_version + 1
+        await finish_batch_and_settle_order(db, draft, revision, "completed")
+        await db.flush()
+        return draft
+- id: C8-07
+  card: C8
+  expected: clean
+  path: app/schemas/shipment_create.py
+  why: The condition "not such-and-such kind" rejects a combination with a refusal code; no processing is chosen.
+  source: Consistency check of the request fields, a refusal with a code for an incompatible kind.
+  code: |
+    from pydantic import BaseModel, model_validator
+
+    from app.shipping.models import ShipmentKind
+
+
+    class ShipmentCreate(BaseModel):
+        kind: ShipmentKind
+        destination: str
+        weight_kg: float | None = None
+        pallet_count: int | None = None
+        pickup_slot: str | None = None
+        route_template: dict | None = None
+
+        @model_validator(mode="after")
+        def _check_kind_fields(self) -> "ShipmentCreate":
+            if self.pallet_count is not None and self.kind != ShipmentKind.PALLET:
+                raise ValueError("pallet_count_kind_conflict")
+            if self.route_template is not None and self.kind != ShipmentKind.REGULAR:
+                raise ValueError("route_template_kind_conflict")
+            if self.pickup_slot is not None and self.kind != ShipmentKind.PICKUP:
+                raise ValueError("pickup_slot_kind_conflict")
+            return self
+
+        @model_validator(mode="after")
+        def _check_weight(self) -> "ShipmentCreate":
+            if self.kind == ShipmentKind.PARCEL and not self.weight_kg:
+                raise ValueError("weight_required_for_parcel")
+            return self
+- id: C8-08
+  card: C8
+  expected: dirty
+  path: src/survey/lib/surveyScore.ts
+  why: Scoring for all questions except multiple choice goes by one correct id; the processing is chosen by a negative comparison of the kind.
+  source: Questionnaire scoring where the second branch is chosen by the condition "not the multiple-choice kind of question".
+  code: |
+    import type { SurveyQuestion, SurveyAnswer } from "../model/types";
+
+    type SurveyLike = {
+      id: string;
+      questions: SurveyQuestion[];
+    };
+
+    function multiAnswerMatches(
+      question: SurveyQuestion,
+      answer: SurveyAnswer | undefined,
+    ): boolean {
+      if (!Array.isArray(answer)) return false;
+      const expected = new Set(question.expectedChoiceIndices ?? []);
+      return answer.length === expected.size && answer.every(i => expected.has(i));
+    }
+
+    export function computeSurveyScore(
+      survey: SurveyLike | undefined,
+      answers: Record<string, SurveyAnswer>,
+    ): number {
+      if (!survey) return 0;
+      return survey.questions.reduce((score, question) => {
+        if (
+          question.kind === "multiple_choice" &&
+          question.expectedChoiceIndices?.length &&
+          multiAnswerMatches(question, answers[question.id])
+        ) {
+          return score + 1;
+        }
+        if (
+          question.kind !== "multiple_choice" &&
+          question.correctOptionId &&
+          String(answers[question.id]) === String(question.correctOptionId)
+        ) {
+          return score + 1;
+        }
+        return score;
+      }, 0);
+    }
+- id: C8-09
+  card: C8
+  expected: clean
+  path: app/shipping/validation.py
+  why: The negative checks concern the correctness of values and the working day; these are not kinds of an object.
+  source: Value validity checks in delivery request intake.
+  code: |
+    from datetime import date
+
+    from app.shipping.calendar import is_business_day, is_valid_postal_code
+    from app.shipping.errors import TicketError
+    from app.shipping.models import Ticket
+
+
+    def check_ticket(ticket: Ticket, today: date) -> None:
+        if not is_valid_postal_code(ticket.postal_code):
+            raise TicketError("postal_code_invalid", field="postal_code")
+
+        if not is_business_day(ticket.requested_date):
+            raise TicketError("requested_date_not_business_day", field="requested_date")
+
+        if ticket.requested_date < today:
+            raise TicketError("requested_date_in_past", field="requested_date")
+
+        if not ticket.contact_phone and not ticket.contact_email:
+            raise TicketError("contact_required", field="contact_phone")
+
+
+    def normalize_ticket(ticket: Ticket) -> Ticket:
+        ticket.comment = (ticket.comment or "").strip()
+        ticket.postal_code = ticket.postal_code.replace(" ", "")
+        return ticket
+
+
+    def accept_ticket(ticket: Ticket, today: date) -> Ticket:
+        ticket = normalize_ticket(ticket)
+        check_ticket(ticket, today)
+        ticket.status = "accepted"
+        return ticket
+- id: C8-10
+  card: C8
+  expected: dirty
+  path: app/shipping/labels.py
+  why: A waybill by the parcel sample is built for all kinds except pallet; the processing is chosen by a comparison "not equal" to a list value.
+  source: Choosing the label print method, where the branch is chosen by a comparison of inequality to a value of the kinds list.
+  code: |
+    from app.shipping.models import Shipment, ShipmentKind
+    from app.shipping.print import render_pallet_sheet, render_small_label
+
+
+    def build_label(shipment: Shipment) -> bytes:
+        address = format_address(shipment.destination)
+        if shipment.kind != ShipmentKind.PALLET:
+            label = render_small_label(
+                address=address,
+                barcode=shipment.barcode,
+                weight_kg=shipment.weight_kg,
+            )
+            return label
+        sheet = render_pallet_sheet(
+            address=address,
+            barcode=shipment.barcode,
+            pallet_count=shipment.pallet_count,
+        )
+        return sheet
+
+
+    def format_address(destination) -> str:
+        parts = [destination.city, destination.street, destination.house]
+        return ", ".join(part for part in parts if part)
+
+
+    def label_filename(shipment: Shipment) -> str:
+        return f"label-{shipment.barcode}.pdf"
+- id: C8-11
+  card: C8
+  expected: clean
+  path: src/orders/lib/assertExpress.ts
+  why: The negative comparison of the kind gives a refusal with a code; this is the card's exception.
+  source: Guard check of the order kind with an exception carrying a refusal code.
+  code: |
+    import { OrderError } from "./orderError";
+    import type { Order } from "../model/types";
+
+    export function assertExpressOrder(order: Order): void {
+      if (order.kind !== "express") {
+        throw new OrderError("order_kind_not_accepted", {
+          orderId: order.id,
+          kind: order.kind,
+        });
+      }
+    }
+
+    export function expressDeadline(order: Order): Date {
+      assertExpressOrder(order);
+      const created = new Date(order.createdAt);
+      created.setHours(created.getHours() + 4);
+      return created;
+    }
+
+    export function formatExpressDeadline(order: Order): string {
+      const deadline = expressDeadline(order);
+      return deadline.toLocaleTimeString("ru-RU", {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    }
+
+    export function isExpressLate(order: Order, now: Date): boolean {
+      return now.getTime() > expressDeadline(order).getTime();
+    }
+- id: C8-12
+  card: C8
+  expected: dirty
+  path: src/shipping/model/stopStep.ts
+  why: A stop with an address is processed in all cases except a parcel locker; the branch is chosen by the condition "not such-and-such stop kind".
+  source: Route step parsing where the fallback processing is chosen by the condition "not such-and-such step kind".
+  code: |
+    type RouteStep = {
+      id: string;
+      kind: "locker" | "address" | "hub";
+      lockerId?: string;
+      address?: string;
+      eta?: string;
+    };
+
+    type StepView = { title: string; hint: string; mapQuery: string };
+
+    export function describeStep(step: RouteStep): StepView {
+      if (step.kind !== "locker" || !step.lockerId) {
+        return {
+          title: step.address ?? "Address not specified",
+          hint: "Hand the parcel to the recipient in person",
+          mapQuery: step.address ?? "",
+        };
+      }
+      return {
+        title: `Parcel locker ${step.lockerId}`,
+        hint: "Put the parcel in a free cell",
+        mapQuery: `locker ${step.lockerId}`,
+      };
+    }
+
+    export function describeRoute(steps: RouteStep[]): StepView[] {
+      return steps.map(describeStep);
+    }
+
+    export function firstEta(steps: RouteStep[]): string | null {
+      return steps.find(step => step.eta)?.eta ?? null;
+    }
+- id: C8-13
+  card: C8
+  expected: dirty
+  path: app/shipping/packing_tasks.py
+  why: Ordinary packaging and labeling are chosen by the condition "not hazardous cargo"; the processing is chosen by a negative check of the kind, and there is no refusal in the branch.
+  source: Building a task for the packer where the branch is chosen by the condition "not such-and-such cargo kind", by form
+  code: |
+    import logging
+
+    from app.shipping.kinds import is_hazardous
+    from app.shipping.models import Parcel
+    from app.shipping.packing import (
+        PackingTask,
+        apply_standard_padding,
+        attach_fragile_marks,
+        pick_box,
+    )
+
+    logger = logging.getLogger(__name__)
+
+    MAX_STACK_DEFAULT = 4
+
+
+    def prepare_for_packing(parcel: Parcel) -> PackingTask:
+        """Builds a task for the packer for a parcel."""
+        task = PackingTask(parcel_id=parcel.id, box_size=pick_box(parcel))
+        # we recompute the number of labels before handing over to the warehouse
+        task.labels = ["barcode"]
+        if parcel.weight_kg > 20:
+            task.labels.append("heavy")
+
+        if not is_hazardous(parcel):
+            apply_standard_padding(task, parcel)
+            attach_fragile_marks(task, parcel)
+            task.max_stack_height = MAX_STACK_DEFAULT
+        else:
+            task.labels.append("adr")
+            task.max_stack_height = 1
+
+        task.requires_second_check = parcel.declared_value > 50_000
+        logger.info("packing_task_ready parcel=%s box=%s", parcel.id, task.box_size)
+        return task
+- id: C8-14
+  card: C8
+  expected: clean
+  path: src/shipping/model/palletBooking.ts
+  why: The condition "not such-and-such kind" only returns an error with a code; the processing is not chosen by kind.
+  source: Pallet slot booking check that returns a refusal code for another shipment kind, by form
+  code: |
+    import type { Shipment } from "./types";
+
+    export type BookingError = { code: string; field?: string };
+
+    export type BookingResult =
+      | { ok: true; bookingId: string }
+      | { ok: false; error: BookingError };
+
+    export function checkPalletBooking(shipment: Shipment): BookingError | null {
+      if (shipment.kind !== "pallet") {
+        return { code: "pallet_booking_not_supported", field: "kind" };
+      }
+      if (!shipment.palletCount || shipment.palletCount < 1) {
+        return { code: "pallet_count_required", field: "palletCount" };
+      }
+      return null;
+    }
+
+    export async function bookPalletSlot(
+      shipment: Shipment,
+      api: { reserve(shipmentId: string, count: number): Promise<string> },
+    ): Promise<BookingResult> {
+      const error = checkPalletBooking(shipment);
+      if (error) {
+        return { ok: false, error };
+      }
+      const bookingId = await api.reserve(shipment.id, shipment.palletCount);
+      return { ok: true, bookingId };
+    }
+- id: C8-15
+  card: C8
+  expected: dirty
+  path: src/pricing/lib/quote.ts
+  why: The consolidation and zone surcharge is added to all service kinds except express; the processing is chosen by a negative comparison of the kind.
+  source: Quote line calculation where part of the lines is added by the condition "not such-and-such service kind", by form
+  code: |
+    import type { QuoteInput, QuoteLine } from "../model/types";
+    import { baseRate, fuelSurcharge, zoneSurcharge } from "./rates";
+
+    const MIN_CHARGEABLE_KG = 0.5;
+
+    export function buildQuoteLines(input: QuoteInput): QuoteLine[] {
+      const weight = Math.max(input.weightKg, MIN_CHARGEABLE_KG);
+      const lines: QuoteLine[] = [
+        { code: "base", amountKopecks: baseRate(input.zone, weight) },
+      ];
+
+      // standard delivery goes by a consolidated trip
+      if (input.serviceKind !== "express") {
+        lines.push({ code: "consolidation", amountKopecks: Math.round(weight * 18) });
+        lines.push({ code: "zone", amountKopecks: zoneSurcharge(input.zone) });
+      }
+
+      if (input.insured) {
+        lines.push({
+          code: "insurance",
+          amountKopecks: Math.round(input.declaredKopecks * 0.004),
+        });
+      }
+      lines.push({ code: "fuel", amountKopecks: fuelSurcharge(lines) });
+      return lines;
+    }
+
+    export function totalKopecks(lines: QuoteLine[]): number {
+      return lines.reduce((sum, line) => sum + line.amountKopecks, 0);
+    }
+- id: C8-16
+  card: C8
+  expected: clean
+  path: app/api/pallets.py
+  why: The condition "not such-and-such kind" gives only a refusal with a code; after the check the processing of one kind follows.
+  source: Handler dependency that refuses with a code if the shipment is not a pallet one, by form
+  code: |
+    from fastapi import APIRouter, Depends, HTTPException
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.deps import get_db
+    from app.shipping.kinds import is_pallet
+    from app.shipping.models import Pallet, Shipment
+    from app.shipping.schemas import PalletIn, PalletOut
+
+    router = APIRouter()
+
+
+    async def get_pallet_shipment(
+        shipment_id: int,
+        db: AsyncSession = Depends(get_db),
+    ) -> Shipment:
+        shipment = await db.get(Shipment, shipment_id)
+        if shipment is None:
+            raise HTTPException(status_code=404, detail={"code": "shipment_not_found"})
+        if not is_pallet(shipment):
+            raise HTTPException(status_code=409, detail={"code": "pallet_shipment_required"})
+        return shipment
+
+
+    @router.post("/shipments/{shipment_id}/pallets")
+    async def add_pallet(
+        payload: PalletIn,
+        shipment: Shipment = Depends(get_pallet_shipment),
+        db: AsyncSession = Depends(get_db),
+    ) -> PalletOut:
+        pallet = Pallet(shipment_id=shipment.id, weight_kg=payload.weight_kg)
+        db.add(pallet)
+        await db.commit()
+        return PalletOut.model_validate(pallet)
+- id: C8-17
+  card: C8
+  expected: clean
+  path: app/shipping/pickup_batches.py
+  why: The inequalities compare warehouse identifiers and a day off; this is not a check of the kind of an object, and the processing is not chosen by kind.
+  source: Splitting pickup requests by warehouses and moving them from days off, negative comparisons not about the kind, by form
+  code: |
+    from collections import defaultdict
+    from datetime import date, timedelta
+
+    from app.shipping.calendar import is_holiday
+    from app.shipping.models import PickupRequest
+
+
+    def group_pickups_by_day(requests: list[PickupRequest]) -> dict[date, list[PickupRequest]]:
+        """Moves requests from days off to the nearest working day."""
+        groups: dict[date, list[PickupRequest]] = defaultdict(list)
+        for request in requests:
+            day = request.requested_date
+            while is_holiday(day):
+                day += timedelta(days=1)
+            groups[day].append(request)
+        return groups
+
+
+    def split_into_batches(requests: list[PickupRequest]) -> list[list[PickupRequest]]:
+        batches: list[list[PickupRequest]] = []
+        current: list[PickupRequest] = []
+        for request in sorted(requests, key=lambda item: item.depot_id):
+            if current and current[-1].depot_id != request.depot_id:
+                batches.append(current)
+                current = []
+            current.append(request)
+        if current:
+            batches.append(current)
+        return batches
+
+
+    def has_workday_request(requests: list[PickupRequest]) -> bool:
+        return any(not is_holiday(request.requested_date) for request in requests)
+- id: C8-18
+  card: C8
+  expected: dirty
+  path: app/billing/settlement.py
+  why: Card payment is chosen by the condition "account type is not corporate"; the processing is chosen by a negative comparison with a member of the kinds list.
+  source: Closing the settlement of a shipment where the payment method is chosen by a comparison "not equal" to a value of the list, by form
+  code: |
+    from datetime import timedelta
+
+    from app.billing.gateway import PaymentGateway
+    from app.billing.models import AccountType, Customer, Settlement
+    from app.billing.numbers import next_invoice_number
+    from app.billing.totals import calculate_total
+    from app.shipping.models import Shipment
+    from app.time import utcnow
+
+    INVOICE_DUE_DAYS = 14
+
+
+    async def settle_shipment(db, shipment: Shipment, payments: PaymentGateway) -> Settlement:
+        """Closes the settlement: charges the payment or issues an invoice."""
+        customer = await db.get(Customer, shipment.customer_id)
+        amount = await calculate_total(db, shipment)
+        settlement = Settlement(shipment_id=shipment.id, amount_kopecks=amount)
+
+        # the payment gateway is called only for card payment
+        if customer.account_type != AccountType.CORPORATE:
+            charge = await payments.charge_card(customer.card_token, amount)
+            settlement.payment_ref = charge.reference
+            settlement.paid_at = utcnow()
+        else:
+            settlement.invoice_number = await next_invoice_number(db)
+            settlement.due_at = utcnow() + timedelta(days=INVOICE_DUE_DAYS)
+
+        db.add(settlement)
+        await db.commit()
+        return settlement
+- id: C8-19
+  card: C8
+  expected: clean
+  path: src/sorting/lib/routeParcel.ts
+  why: The negative checks concern an empty value, a trial run flag and a node identifier; the kind is chosen by a table by the kind field.
+  source: Parcel routing at sorting, processing by kind from a table, negations not about the kind, by form
+  code: |
+    import type { Parcel, ParcelKind } from "../model/types";
+    import { currentHubId, markScanned, queueTransfer } from "./api";
+    import { sortToConveyor, sortToLetterBin, sortToRamp } from "./stations";
+
+    const HANDLERS: Record<ParcelKind, (parcel: Parcel) => Promise<void>> = {
+      letter: parcel => sortToLetterBin(parcel),
+      box: parcel => sortToConveyor(parcel),
+      pallet: parcel => sortToRamp(parcel),
+    };
+
+    export async function routeParcel(
+      parcel: Parcel | undefined,
+      dryRun: boolean,
+    ): Promise<void> {
+      if (!parcel || !parcel.barcode) {
+        return;
+      }
+      if (!dryRun) {
+        await markScanned(parcel.id);
+      }
+      await HANDLERS[parcel.kind](parcel);
+      // a parcel for another node is put in the transfer queue
+      if (parcel.destinationHubId !== currentHubId()) {
+        await queueTransfer(parcel.id, parcel.destinationHubId);
+      }
+    }
+- id: C8-20
+  card: C8
+  expected: dirty
+  path: app/shipping/pickup_slots.py
+  why: The default pickup window is overwritten for all kinds except express; the processing is chosen by the condition "is not" with a member of the kinds list.
+  source: Pickup window assignment where the branch is chosen by an "is not" comparison with a member of the kinds list, by form
+  code: |
+    from datetime import datetime, timedelta
+
+    from app.shipping.depots import nearest_depot, next_batch_start
+    from app.shipping.models import PickupSlot, Shipment, ShipmentKind
+
+    EXPRESS_LEAD = timedelta(minutes=30)
+
+
+    def schedule_pickup(db, shipment: Shipment, now: datetime) -> PickupSlot:
+        """Assigns a pickup window at the nearest warehouse."""
+        depot = nearest_depot(db, shipment.origin)
+        slot = PickupSlot(shipment_id=shipment.id, depot_id=depot.id)
+        slot.starts_at = now + EXPRESS_LEAD
+        slot.window_minutes = 30
+        slot.shared_vehicle = False
+
+        if shipment.kind is not ShipmentKind.EXPRESS:
+            slot.starts_at = next_batch_start(depot, now)
+            slot.window_minutes = 120
+            slot.shared_vehicle = True
+
+        slot.contact_phone = shipment.sender_phone
+        db.add(slot)
+        return slot
+- id: C8-21
+  card: C8
+  expected: dirty
+  path: src/orders/model/acceptOrder.ts
+  why: The warehouse reserve and the first free window are assigned to all orders except return ones; the processing is chosen by a negative check of the kind.
+  source: Order intake where part of the processing is chosen by the condition "not such-and-such order kind", by form
+  code: |
+    import type { AcceptedOrder, Deps, Order } from "./types";
+    import { isReturnOrder, validateOrder } from "./orderKinds";
+
+    /** Takes the order into work and saves the intake result. */
+    export async function acceptOrder(order: Order, deps: Deps): Promise<AcceptedOrder> {
+      const validated = validateOrder(order);
+      const accepted: AcceptedOrder = {
+        id: order.id,
+        lines: validated.lines,
+        warnings: [],
+      };
+
+      if (!isReturnOrder(order)) {
+        accepted.reservation = await deps.stock.reserve(order.lines);
+        accepted.pickupAt = await deps.slots.firstFree(order.warehouseId);
+      }
+
+      if (order.comment) {
+        accepted.note = order.comment.trim();
+      }
+      if (order.lines.length > 50) {
+        accepted.warnings.push("many_lines");
+      }
+
+      await deps.orders.save(accepted);
+      return accepted;
+    }
+- id: C8-22
+  card: C8
+  expected: clean
+  path: app/shipping/consolidation.py
+  why: The condition "not such-and-such kind" in the check gives only a refusal with a code; the processing is not chosen by kind.
+  source: Check of a batch of parcels for a consolidated trip, a refusal with a code for foreign kinds, by form
+  code: |
+    from app.shipping.models import Parcel, ParcelKind
+
+    MAX_BOX_KG = 30
+
+
+    class BatchError(Exception):
+        def __init__(self, code: str) -> None:
+            super().__init__(code)
+            self.code = code
+
+
+    def check_consolidation_batch(parcels: list[Parcel]) -> None:
+        """A consolidated trip accepts only boxes up to the limit weight."""
+        if not parcels:
+            raise BatchError("batch_empty")
+        kinds = {parcel.kind for parcel in parcels}
+        if kinds != {ParcelKind.BOX}:
+            raise BatchError("batch_accepts_boxes_only")
+        if any(parcel.weight_kg > MAX_BOX_KG for parcel in parcels):
+            raise BatchError("batch_parcel_too_heavy")
+
+
+    def consolidate(parcels: list[Parcel]) -> list[str]:
+        check_consolidation_batch(parcels)
+        ordered = sorted(parcels, key=lambda parcel: (parcel.destination_hub, parcel.id))
+        return [parcel.barcode for parcel in ordered]

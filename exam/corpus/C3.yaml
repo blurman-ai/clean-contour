@@ -1,0 +1,680 @@
+# C3 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C3-01
+  card: C3
+  expected: dirty
+  path: app/couriers/live_state.py
+  why: The courier state is set from the response of an external tracking service, that is, from the data of another system.
+  source: service-layer function that returns the courier state from the response of an external service
+  code: |
+    import httpx
+
+    from app.couriers.models import Courier
+
+    TRACKING_URL = "https://tracking.example.test/v1/couriers"
+
+
+    async def courier_live_state(courier: Courier, client: httpx.AsyncClient) -> str:
+        """State for the dispatcher panel."""
+        response = await client.get(f"{TRACKING_URL}/{courier.tracker_id}")
+        if response.status_code == 404:
+            return "unknown"
+        payload = response.json()
+        if payload["status"] == "unreachable":
+            return "offline"
+        if payload["status"] == "moving":
+            return "on_route"
+        return "idle"
+
+
+    async def dispatcher_row(courier: Courier, client: httpx.AsyncClient) -> dict:
+        return {
+            "courier_id": courier.id,
+            "full_name": courier.full_name,
+            "depot_id": courier.depot_id,
+            "state": await courier_live_state(courier, client),
+            "shift_status": courier.shift_status,
+        }
+- id: C3-02
+  card: C3
+  expected: clean
+  path: app/drafts/job_events.py
+  why: The writer moves the draft to a new stored state on the task outcome through the write function in one transaction together with the transition data.
+  source: task completion handler that moves the draft state in one transaction
+  code: |
+    from sqlalchemy.orm import Session
+
+    from app.drafts.models import Draft, PlanningJob
+    from app.drafts.state import DraftStatus, set_order_status
+
+
+    def on_job_finished(session: Session, job_id: int) -> None:
+        with session.begin():
+            job = session.get(PlanningJob, job_id)
+            draft = session.get(Draft, job.draft_id, with_for_update=True)
+            if job.status == "failed":
+                draft.failure_code = job.failure_code
+                draft.failed_at = job.finished_at
+                set_order_status(draft, DraftStatus.FAILED)
+            elif job.status == "succeeded":
+                draft.layout_json = job.result_json
+                draft.ready_at = job.finished_at
+                set_order_status(draft, DraftStatus.READY)
+- id: C3-03
+  card: C3
+  expected: dirty
+  path: src/drafts/lib/reconcileQueueJobs.ts
+  why: The status of a queue record is set from the fields of the draft and revision responses, that is, from the state of neighboring entities.
+  source: frontend function that recomputes the queue record status from server responses about other entities
+  code: |
+    import type { QueueJob, QueueServerState } from "../model/types";
+
+    export function reconcileQueueJobs(
+      jobs: QueueJob[],
+      states: Map<string, QueueServerState>,
+    ): QueueJob[] {
+      return jobs.map(job => {
+        const state = states.get(job.draftId);
+        if (!state) return job;
+
+        if (state.draft?.phase === "published" && state.draft.publishedId) {
+          return { ...job, status: "completed", error: undefined };
+        }
+        if (state.revision?.status === "failed" || state.revision?.status === "timeout") {
+          return { ...job, status: "failed", error: state.revision.errorText };
+        }
+        if (state.status?.readyToPublish) {
+          return { ...job, status: "ready_to_publish", error: undefined };
+        }
+        if (state.revision?.status === "generating") {
+          return { ...job, status: "generating", progress: state.status?.percent ?? 0 };
+        }
+        return job;
+      });
+    }
+- id: C3-04
+  card: C3
+  expected: dirty
+  path: app/runs/progress.py
+  why: The run phase is computed on every read from the states of its nodes, that is, from a field of another table.
+  source: computing the run phase from the states of related nodes in the transport layer
+  code: |
+    from app.runs.models import NodeState, Run, RunNode
+
+
+    def run_phase(run: Run, nodes: list[RunNode]) -> str:
+        done = sum(1 for node in nodes if node.state == NodeState.SUCCEEDED.value)
+        running = [node for node in nodes if node.state == NodeState.RUNNING.value]
+        phase = "running" if running else "queued"
+        if done == len(nodes):
+            phase = "completed"
+        elif not running and any(node.state == NodeState.FAILED.value for node in nodes):
+            phase = "failed"
+        elif not running and any(node.state == NodeState.CANCELLED.value for node in nodes):
+            phase = "cancelled"
+        return phase
+
+
+    def run_progress(run: Run, nodes: list[RunNode]) -> dict:
+        return {
+            "run_id": run.id,
+            "phase": run_phase(run, nodes),
+            "nodes_total": len(nodes),
+            "nodes_done": sum(1 for n in nodes if n.state == NodeState.SUCCEEDED.value),
+            "started_at": run.started_at,
+        }
+- id: C3-05
+  card: C3
+  expected: dirty
+  path: app/drafts/serializers.py
+  why: The draft status is returned by the status of the related job, and the draft's own status field takes no part in the decision (questions 1 and 2 yes, question 3 yes).
+  source: draft serializer where its status is taken from the build job
+  code: |
+    from app.drafts.models import Draft, PlanningJob
+    from app.drafts.schemas import DraftOut
+
+
+    def draft_status(draft: Draft, job: PlanningJob | None) -> str:
+        if job is not None and job.status == "failed":
+            return "failed"
+        if job is not None and job.status in ("queued", "running"):
+            return "generating"
+        return "ready"
+
+
+    def to_draft_out(draft: Draft, job: PlanningJob | None) -> DraftOut:
+        return DraftOut(
+            id=draft.id,
+            title=draft.title,
+            owner_id=draft.owner_id,
+            status=draft_status(draft, job),
+            created_at=draft.created_at,
+            updated_at=draft.updated_at,
+            stored_status=draft.status,
+        )
+- id: C3-06
+  card: C3
+  expected: clean
+  path: tests/drafts/test_draft_status.py
+  why: A fragment from tests; comparisons of neighboring entity statuses in tests do not count.
+  source: tests that compare the job status and the draft status after the handler
+  code: |
+    from app.drafts.job_events import on_job_finished
+    from app.drafts.state import DraftStatus
+
+
+    def test_failed_job_moves_draft_to_failed(session, draft, job):
+        job.status = "failed"
+        job.failure_code = "provider_unavailable"
+        session.commit()
+
+        on_job_finished(session, job.id)
+
+        session.refresh(draft)
+        assert job.status == "failed"
+        assert draft.status == DraftStatus.FAILED
+
+
+    def test_succeeded_job_moves_draft_to_ready(session, draft, job):
+        job.status = "succeeded"
+        job.result_json = {"sections": 3}
+        session.commit()
+
+        on_job_finished(session, job.id)
+
+        session.refresh(draft)
+        assert job.status == "succeeded"
+        assert draft.status == DraftStatus.READY
+- id: C3-07
+  card: C3
+  expected: dirty
+  path: app/orders/payment_state.py
+  why: The order payment state is returned by the payment status, although the order has its own payment_state field that takes no part in the decision.
+  source: service-layer function that returns the order state by the status of the related payment
+  code: |
+    from app.orders.models import Order
+    from app.payments.models import Payment
+
+
+    def order_payment_state(order: Order, payment: Payment | None) -> str:
+        """What to show in the orders list in the "Payment" column."""
+        if payment is None:
+            return "awaiting_payment"
+        if payment.status == "refunded":
+            return "refunded"
+        if payment.status == "captured":
+            return "paid"
+        if payment.status in ("declined", "expired"):
+            return "payment_failed"
+        return "awaiting_payment"
+
+
+    def order_row(order: Order, payment: Payment | None) -> dict:
+        return {
+            "id": order.id,
+            "number": order.number,
+            "customer": order.customer_name,
+            "payment_state": order_payment_state(order, payment),
+            "stored_payment_state": order.payment_state,
+            "total": order.total,
+        }
+- id: C3-08
+  card: C3
+  expected: clean
+  path: app/shipping/out.py
+  why: The shipment state is taken from its own field; the job status is returned as a separate field and takes no part in the state decision.
+  source: building a shipment response where the job status is only shown alongside
+  code: |
+    from app.shipping.models import Shipment
+    from app.shipping.schemas import ShipmentOut
+    from app.jobs.models import DeliveryJob
+
+
+    def shipment_out(shipment: Shipment, job: DeliveryJob | None) -> ShipmentOut:
+        return ShipmentOut(
+            id=shipment.id,
+            number=shipment.number,
+            recipient=shipment.recipient_name,
+            status=shipment.status,
+            last_job_status=job.status if job is not None else None,
+            last_job_finished_at=job.finished_at if job is not None else None,
+            created_at=shipment.created_at,
+        )
+
+
+    def shipments_out(shipments: list[Shipment], jobs: dict[int, DeliveryJob]) -> list[ShipmentOut]:
+        return [shipment_out(s, jobs.get(s.id)) for s in shipments]
+- id: C3-09
+  card: C3
+  expected: clean
+  path: src/shipments/lib/workspaceLock.ts
+  why: The function returns the workspace lock from a list of jobs, not the state of one entity; the status of each job is stored on the server.
+  source: frontend helper function that folds the list of queue jobs into a lock flag
+  code: |
+    import type { QueueJob } from "../model/types";
+
+    const ACTIVE_DISPATCH_STATUSES: ReadonlySet<string> = new Set([
+      "queued",
+      "running",
+      "uploading",
+    ]);
+
+    /**
+     * While the queue has an active job, a new shipment cannot be created.
+     */
+    export function isDepotLocked(jobs: QueueJob[]): boolean {
+      return jobs.some(job => ACTIVE_DISPATCH_STATUSES.has(job.status));
+    }
+
+    export function lockHint(jobs: QueueJob[]): string | null {
+      if (!isDepotLocked(jobs)) {
+        return null;
+      }
+      const active = jobs.filter(job => ACTIVE_DISPATCH_STATUSES.has(job.status)).length;
+      return `Jobs are being processed (${active}), a new shipment is unavailable`;
+    }
+- id: C3-10
+  card: C3
+  expected: clean
+  path: app/orders/payment_webhook.py
+  why: The writer moves the order to a new stored state on a payment system event in one transaction through the write function.
+  source: payment system event handler that moves the order to a stored state
+  code: |
+    from sqlalchemy.orm import Session
+
+    from app.orders.models import Order
+    from app.orders.state import OrderPaymentState, set_order_payment_state
+    from app.payments.schemas import PaymentEvent
+
+
+    def apply_payment_event(session: Session, event: PaymentEvent) -> None:
+        with session.begin():
+            order = session.get(Order, event.order_id, with_for_update=True)
+            if order is None:
+                return
+            if event.status == "captured":
+                order.paid_at = event.occurred_at
+                order.paid_amount = event.amount
+                set_order_payment_state(order, OrderPaymentState.PAID)
+            elif event.status == "refunded":
+                order.refunded_at = event.occurred_at
+                set_order_payment_state(order, OrderPaymentState.REFUNDED)
+            elif event.status in ("declined", "expired"):
+                order.payment_error = event.reason
+                set_order_payment_state(order, OrderPaymentState.FAILED)
+- id: C3-11
+  card: C3
+  expected: dirty
+  path: app/reports/export_status.py
+  why: The report status is taken from the state of the export queue record, not from the report's own field.
+  source: report status function that reads the state of a record of another table
+  code: |
+    from app.exports.models import ExportQueueItem
+    from app.reports.models import Report
+
+
+    def report_status(report: Report, queue_item: ExportQueueItem | None) -> str:
+        if queue_item is None:
+            return "building"
+        if queue_item.state in ("failed", "dead"):
+            return "failed"
+        if queue_item.state == "done":
+            return "ready"
+        return "building"
+
+
+    def report_download_info(report: Report, queue_item: ExportQueueItem | None) -> dict:
+        status = report_status(report, queue_item)
+        return {
+            "report_id": report.id,
+            "title": report.title,
+            "status": status,
+            "download_url": report.file_url if status == "ready" else None,
+            "requested_at": report.created_at,
+            "attempts": queue_item.attempts if queue_item is not None else 0,
+        }
+- id: C3-12
+  card: C3
+  expected: clean
+  path: app/jobs/queue_metrics.py
+  why: Counting the jobs in the queue gives a number for a metric; no entity state is set.
+  source: queue length aggregate by the stored status of jobs
+  code: |
+    from sqlalchemy import func, select
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.jobs.models import DeliveryJob
+
+
+    async def queue_depth(db: AsyncSession) -> int:
+        return await db.scalar(
+            select(func.count(DeliveryJob.id)).where(DeliveryJob.status == "queued")
+        )
+
+
+    async def running_count(db: AsyncSession) -> int:
+        return await db.scalar(
+            select(func.count(DeliveryJob.id)).where(DeliveryJob.status == "running")
+        )
+
+
+    async def queue_snapshot(db: AsyncSession, max_running: int) -> dict:
+        queued = await queue_depth(db)
+        running = await running_count(db)
+        return {
+            "queued": queued,
+            "running": running,
+            "free_slots": max(max_running - running, 0),
+        }
+- id: C3-13
+  card: C3
+  expected: dirty
+  path: app/loading/manifest_state.py
+  why: The loading sheet state is returned entirely by the status of the related trip; the sheet's own field is not read in the decision (questions 1 and 2 yes).
+  source: service-layer function that returns the loading sheet state by the status of the related trip
+  code: |
+    from dataclasses import dataclass
+
+    from app.dispatch.models import Dispatch
+    from app.loading.models import LoadingManifest
+
+
+    @dataclass
+    class ManifestView:
+        id: int
+        truck_plate: str
+        pallet_count: int
+        state: str
+
+
+    def manifest_state(manifest: LoadingManifest, dispatch: Dispatch) -> str:
+        """Sheet state for the loading screen."""
+        if dispatch.status == "cancelled":
+            return "void"
+        if dispatch.status == "completed":
+            return "closed"
+        return "open"
+
+
+    def manifest_view(manifest: LoadingManifest, dispatch: Dispatch) -> ManifestView:
+        return ManifestView(
+            id=manifest.id,
+            truck_plate=manifest.truck_plate,
+            pallet_count=len(manifest.pallets),
+            state=manifest_state(manifest, dispatch),
+        )
+- id: C3-14
+  card: C3
+  expected: clean
+  path: app/warehouse/out.py
+  why: The pallet state is taken from its own field; the placement job status is returned as a separate field and takes no part in the pallet state decision.
+  source: building a pallet response where the placement job status is only shown alongside
+  code: |
+    from pydantic import BaseModel
+
+    from app.warehouse.models import Pallet, PutAwayTask
+
+
+    class PalletOut(BaseModel):
+        id: int
+        zone_code: str
+        state: str
+        put_away_task_status: str | None
+
+
+    def pallet_out(pallet: Pallet, task: PutAwayTask | None) -> PalletOut:
+        """Pallet response: its own state and the placement job status alongside."""
+        return PalletOut(
+            id=pallet.id,
+            zone_code=pallet.zone_code,
+            state=pallet.state,
+            put_away_task_status=task.status if task is not None else None,
+        )
+
+
+    def pallets_out(rows: list[tuple[Pallet, PutAwayTask | None]]) -> list[PalletOut]:
+        return [pallet_out(pallet, task) for pallet, task in rows]
+- id: C3-15
+  card: C3
+  expected: dirty
+  path: src/orders/model/orderPhase.ts
+  why: The order phase is computed by the status of the related delivery, and the order's own status field takes no part in the decision (questions 1 and 2 yes, question 3 yes).
+  source: frontend function that chooses the order phase by the status of the related delivery
+  code: |
+    import type { Delivery, Order } from "./types";
+
+    export type OrderPhase = "waiting" | "on_the_way" | "problem" | "delivered";
+
+    export function orderPhase(order: Order, delivery: Delivery | undefined): OrderPhase {
+      if (!delivery) return "waiting";
+      if (delivery.status === "failed" || delivery.status === "returned") return "problem";
+      if (delivery.status === "delivered") return "delivered";
+      return "on_the_way";
+    }
+
+    export function orderListItem(order: Order, delivery: Delivery | undefined) {
+      // row of the orders list in the recipient's account
+      return {
+        id: order.id,
+        recipient: order.recipientName,
+        status: order.status,
+        phase: orderPhase(order, delivery),
+        courier: delivery?.courierName ?? "",
+      };
+    }
+- id: C3-16
+  card: C3
+  expected: clean
+  path: app/requests/carrier_events.py
+  why: The writer moves the request to a new stored state on a carrier event through the write function in one transaction; the state is not derived on read.
+  source: carrier refusal handler that moves the transport request in one transaction
+  code: |
+    from sqlalchemy.orm import Session
+
+    from app.requests.models import CarrierBooking, TransportRequest
+    from app.requests.state import RequestState, transition_request_state
+
+
+    def on_carrier_rejected(session: Session, booking_id: int, reason: str) -> None:
+        with session.begin():
+            booking = session.get(CarrierBooking, booking_id)
+            if booking is None:
+                raise LookupError("booking_not_found")
+            request = session.get(TransportRequest, booking.request_id)
+            # the reason for the refusal stays in the booking
+            booking.rejection_reason = reason
+            if request.state == RequestState.BOOKED:
+                transition_request_state(
+                    session,
+                    request,
+                    RequestState.REBOOKING,
+                    reason=booking.rejection_reason,
+                )
+- id: C3-17
+  card: C3
+  expected: dirty
+  path: app/reports/serializers.py
+  why: The report status is taken from the export job, and the report's own status field takes part second, only if there is no job (questions 1 and 2 yes, question 3 yes).
+  source: report serializer where the status is taken from the export job
+  code: |
+    from app.reports.models import ExportJob, Report
+    from app.reports.schemas import ReportOut
+
+
+    def report_status(report: Report, job: ExportJob | None) -> str:
+        # the export status wins while the file is being prepared
+        if job is not None:
+            return job.status
+        return report.status
+
+
+    def report_out(report: Report, job: ExportJob | None) -> ReportOut:
+        """Response for the reports list in the logistician's account."""
+        return ReportOut(
+            id=report.id,
+            title=report.title,
+            period_from=report.period_from,
+            period_to=report.period_to,
+            created_by=report.created_by,
+            status=report_status(report, job),
+            download_url=job.file_url if job is not None and job.status == "done" else None,
+        )
+- id: C3-18
+  card: C3
+  expected: clean
+  path: src/shipments/ui/ShipmentRow.tsx
+  why: The shipment status and the label print job status are shown in different cells; the shipment's own status is taken from its field.
+  source: shipment table row where the print job status is shown in a separate cell
+  code: |
+    import { Badge, Table } from "@mantine/core";
+    import type { LabelJob, Shipment } from "../model/types";
+    import { SHIPMENT_STATUS_TEXT, LABEL_JOB_TEXT } from "../model/texts";
+
+    interface ShipmentRowProps {
+      shipment: Shipment;
+      labelJob?: LabelJob;
+      onOpen: (id: string) => void;
+    }
+
+    // row of the shipments table in the recipient's account
+    export function ShipmentRow({ shipment, labelJob, onOpen }: ShipmentRowProps) {
+      const status = shipment.status;
+      return (
+        <Table.Tr onClick={() => onOpen(shipment.id)}>
+          <Table.Td>{shipment.trackingNo}</Table.Td>
+          <Table.Td>{shipment.recipientName}</Table.Td>
+          <Table.Td>
+            <Badge>{SHIPMENT_STATUS_TEXT[status]}</Badge>
+          </Table.Td>
+          <Table.Td>{labelJob ? LABEL_JOB_TEXT[labelJob.status] : "—"}</Table.Td>
+        </Table.Tr>
+      );
+    }
+- id: C3-19
+  card: C3
+  expected: dirty
+  path: app/requests/booking_state.py
+  why: The transport request state is derived from the status of the carrier's booking record through a mapping table, and the request's own state field takes no part in the decision (questions 1 and 2 yes, question 3 yes).
+  source: service-layer function that returns the transport request state by the booking status from another table
+  code: |
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    from app.requests.models import CarrierBooking, TransportRequest
+
+    REQUEST_STATE_BY_BOOKING = {
+        "pending": "booking",
+        "confirmed": "booked",
+        "rejected": "rebooking",
+        "expired": "rebooking",
+    }
+
+
+    def request_state(session: Session, request: TransportRequest) -> str:
+        """Request state for the logistician's table."""
+        booking_status = session.scalar(
+            select(CarrierBooking.status)
+            .where(CarrierBooking.request_id == request.id)
+            .order_by(CarrierBooking.created_at.desc())
+            .limit(1)
+        )
+        if booking_status is None:
+            return "new"
+        return REQUEST_STATE_BY_BOOKING[booking_status]
+
+
+    def request_row(session: Session, request: TransportRequest) -> dict:
+        # row of the transport requests table
+        return {
+            "id": request.id,
+            "route": f"{request.origin} - {request.destination}",
+            "state": request_state(session, request),
+            "own_state": request.state,
+        }
+- id: C3-20
+  card: C3
+  expected: clean
+  path: tests/requests/test_carrier_events.py
+  why: A fragment from tests; comparisons of neighboring entity statuses in tests do not count.
+  source: tests that compare the booking status and the transport request state after the handler
+  code: |
+    import pytest
+
+    from app.requests.carrier_events import on_carrier_rejected
+    from app.requests.state import RequestState
+
+
+    def test_rejection_moves_request_to_rebooking(session, booked_request, booking):
+        on_carrier_rejected(session, booking.id, reason="no_capacity")
+        session.refresh(booked_request)
+        assert booked_request.state == RequestState.REBOOKING
+        assert booking.rejection_reason == "no_capacity"
+
+
+    def test_rejection_keeps_booking_status(session, booked_request, booking):
+        on_carrier_rejected(session, booking.id, reason="no_capacity")
+        session.refresh(booking)
+        assert booking.status == "rejected"
+        assert booked_request.state != booking.status
+
+
+    def test_rejection_of_new_request_changes_nothing(session, new_request, booking_for_new):
+        on_carrier_rejected(session, booking_for_new.id, reason="no_capacity")
+        session.refresh(new_request)
+        assert new_request.state == RequestState.NEW
+- id: C3-21
+  card: C3
+  expected: dirty
+  path: app/stocktakes/state.py
+  why: The inventory state is derived from the statuses of its counting passes (rows of another table), and the inventory's own status field is returned alongside and takes no part in the decision (questions 1 and 2 yes, question 3 yes).
+  source: service-layer function that returns the inventory state by the statuses of related counting passes
+  code: |
+    from app.stocktakes.models import CountRun, Stocktake
+
+
+    def stocktake_state(stocktake: Stocktake, runs: list[CountRun]) -> str:
+        """Inventory state by counting passes."""
+        if any(run.status == "failed" for run in runs):
+            return "failed"
+        if runs and all(run.status == "done" for run in runs):
+            return "completed"
+        if any(run.status == "running" for run in runs):
+            return "counting"
+        return "planned"
+
+
+    def stocktake_row(stocktake: Stocktake, runs: list[CountRun]) -> dict:
+        return {
+            "id": stocktake.id,
+            "warehouse": stocktake.warehouse_code,
+            "planned_for": stocktake.planned_for.isoformat(),
+            "status": stocktake.status,
+            "state": stocktake_state(stocktake, runs),
+            "runs": len(runs),
+        }
+- id: C3-22
+  card: C3
+  expected: clean
+  path: app/dispatch/assign.py
+  why: The vehicle status is read only as an admission condition and leads to a refusal; no route state is set or returned.
+  source: assigning a vehicle to a route with a check of the vehicle status as an admission condition
+  code: |
+    from sqlalchemy.orm import Session
+
+    from app.dispatch.models import Route, Vehicle
+
+
+    class VehicleNotAvailable(Exception):
+        pass
+
+
+    def assign_vehicle(session: Session, route: Route, vehicle: Vehicle) -> Route:
+        """Assigns a vehicle to a route if it is free and fits the load capacity."""
+        if vehicle.status != "available":
+            raise VehicleNotAvailable(vehicle.id)
+        if vehicle.capacity_kg < route.total_weight_kg:
+            raise VehicleNotAvailable(vehicle.id)
+        route.vehicle_id = vehicle.id
+        route.plate_snapshot = vehicle.plate
+        session.add(route)
+        session.commit()
+        return route

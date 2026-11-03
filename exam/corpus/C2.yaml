@@ -1,0 +1,776 @@
+# C2 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C2-01
+  card: C2
+  expected: dirty
+  path: src/surveys/model/useSurveyState.ts
+  why: The "not started" state of a questionnaire is decided by an empty list of answers; the questionnaire type has no state field.
+  source: frontend hook that decides the questionnaire stage by the emptiness of the received list
+  code: |
+    import { useQuery } from "@tanstack/react-query";
+
+    import { fetchSurveyAnswers } from "../api/surveyApi";
+
+    export type Survey = {
+      id: string;
+      title: string;
+      questionsTotal: number;
+    };
+
+    export type SurveyUiState = "not_started" | "in_progress" | "finished";
+
+    export function useSurveyState(survey: Survey) {
+      const { data, isLoading } = useQuery({
+        queryKey: ["survey-answers", survey.id],
+        queryFn: () => fetchSurveyAnswers(survey.id),
+      });
+
+      const rows = data?.items ?? [];
+      let state: SurveyUiState = "in_progress";
+      if (rows.length === 0) {
+        state = "not_started";
+      } else if (rows.length >= survey.questionsTotal) {
+        state = "finished";
+      }
+
+      return { state, answered: rows.length, isLoading };
+    }
+- id: C2-02
+  card: C2
+  expected: clean
+  path: app/pricing/imports.py
+  why: Before creating a row it checks that such a price list import has not been created yet; this is not a state derivation.
+  source: creating a price list upload with an existence check before the insert
+  code: |
+    from datetime import datetime, timezone
+
+    from sqlalchemy.orm import Session
+
+    from app.pricing.models import PriceImport
+
+
+    def create_price_import(session: Session, supplier_id: int, file_hash: str) -> PriceImport:
+        existing = (
+            session.query(PriceImport)
+            .filter_by(supplier_id=supplier_id, file_hash=file_hash)
+            .first()
+        )
+        if existing is None:
+            existing = PriceImport(
+                supplier_id=supplier_id,
+                file_hash=file_hash,
+                created_at=datetime.now(timezone.utc),
+                status="uploaded",
+            )
+            session.add(existing)
+            session.flush()
+        return existing
+- id: C2-03
+  card: C2
+  expected: clean
+  path: app/api/invoices.py
+  why: The empty selection here gives a 404 response to a request for a nonexistent waybill; no entity state is decided.
+  source: waybill read handler with a 404 response for a missing object
+  code: |
+    from fastapi import APIRouter, Depends, HTTPException
+    from sqlalchemy.orm import Session
+
+    from app.db import get_session
+    from app.invoices.models import Invoice, InvoiceLine
+    from app.invoices.schemas import InvoiceOut
+
+    router = APIRouter()
+
+
+    @router.get("/invoices/{invoice_id}", response_model=InvoiceOut)
+    def get_invoice(invoice_id: int, session: Session = Depends(get_session)):
+        invoice = session.query(Invoice).filter_by(id=invoice_id).first()
+        if invoice is None:
+            raise HTTPException(status_code=404, detail="Waybill not found")
+        lines = session.query(InvoiceLine).filter_by(invoice_id=invoice.id).all()
+        if not lines:
+            return InvoiceOut(id=invoice.id, number=invoice.number, status=invoice.status, lines=[])
+        return InvoiceOut(
+            id=invoice.id,
+            number=invoice.number,
+            status=invoice.status,
+            lines=[(line.sku, line.quantity) for line in lines],
+        )
+- id: C2-04
+  card: C2
+  expected: dirty
+  path: app/zones/access_service.py
+  why: Employee access to a zone is decided by an empty selection of grants, and the employee has no stored access field.
+  source: warehouse employee access decision by the absence of grant rows
+  code: |
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.zones.models import Employee, ZoneGrant
+    from app.zones.schemas import AccessDecision
+
+
+    async def decide_access(db: AsyncSession, employee: Employee, zone_id: int) -> AccessDecision:
+        if employee.dismissed_at is not None:
+            return AccessDecision(state="closed", reason="Employee dismissed")
+        grants = (
+            await db.scalars(
+                select(ZoneGrant).where(
+                    ZoneGrant.employee_id == employee.id,
+                    ZoneGrant.zone_id == zone_id,
+                    ZoneGrant.revoked_at.is_(None),
+                )
+            )
+        ).all()
+        if not grants:
+            return AccessDecision(state="no_access", reason="Access to the zone not granted")
+        level = max(g.level for g in grants)
+        return AccessDecision(state="granted", reason="", level=level)
+- id: C2-05
+  card: C2
+  expected: clean
+  path: app/reports/listing.py
+  why: The empty selection returns an empty page; no entity state is decided by it, and the report status field is stored and returned as is.
+  source: paged list of reports with an empty result and a stored status
+  code: |
+    from sqlalchemy.orm import Session
+
+    from app.reports.models import Report
+    from app.reports.schemas import ReportItem, ReportPage
+
+
+    def list_reports(session: Session, owner_id: int, offset: int, limit: int) -> ReportPage:
+        query = session.query(Report).filter(Report.owner_id == owner_id)
+        total = query.count()
+        rows = query.order_by(Report.created_at.desc()).offset(offset).limit(limit).all()
+        if not rows:
+            return ReportPage(items=[], total=total, offset=offset)
+        items = [
+            ReportItem(
+                id=row.id,
+                title=row.title,
+                status=row.status,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ]
+        return ReportPage(items=items, total=total, offset=offset)
+- id: C2-06
+  card: C2
+  expected: dirty
+  path: app/warehouse/dispatch_ready.py
+  why: Shipment readiness for dispatch is decided by the absence of photo rows among ordinary checks; the model has no readiness field.
+  source: shipment readiness check where the state is derived from the absence of related rows
+  code: |
+    from sqlalchemy import exists, select
+    from sqlalchemy.orm import Session
+
+    from app.warehouse.models import Shipment, ShipmentPhoto, ShipmentSeal
+
+
+    class DispatchCheck:
+        def __init__(self, ready: bool, reasons: list[str]):
+            self.ready = ready
+            self.reasons = reasons
+
+
+    def check_dispatch(session: Session, shipment: Shipment) -> DispatchCheck:
+        reasons: list[str] = []
+        if shipment.weight_kg is None or shipment.weight_kg <= 0:
+            reasons.append("weight is not set")
+        if not shipment.recipient_phone:
+            reasons.append("recipient phone is not set")
+        has_photo = session.scalar(
+            select(exists().where(ShipmentPhoto.shipment_id == shipment.id))
+        )
+        if not has_photo:
+            return DispatchCheck(ready=False, reasons=reasons + ["packaging is not ready"])
+        sealed = session.query(ShipmentSeal).filter_by(shipment_id=shipment.id).count()
+        if sealed == 0:
+            reasons.append("no seal")
+        return DispatchCheck(ready=not reasons, reasons=reasons)
+- id: C2-07
+  card: C2
+  expected: clean
+  path: tests/zones/test_zone_access.py
+  why: A fragment from tests; empty-selection checks in tests do not count.
+  source: tests of warehouse employee access to zones
+  code: |
+    from app.zones.access import zone_access
+    from app.zones.models import ZoneGrant
+
+
+    def test_no_grants_means_nothing_in_db(session, employee):
+        rows = session.query(ZoneGrant).filter_by(employee_id=employee.id).all()
+        assert rows == []
+        assert session.query(ZoneGrant).count() == 0
+
+
+    def test_grant_row_is_created(session, employee, zone):
+        session.add(ZoneGrant(employee_id=employee.id, zone_id=zone.id, level="read"))
+        session.commit()
+        found = session.query(ZoneGrant).filter_by(employee_id=employee.id).first()
+        assert found is not None
+        assert zone_access(session, employee, zone).level == "read"
+
+
+    def test_access_to_other_zone_stays_closed(session, employee, zone, other_zone):
+        session.add(ZoneGrant(employee_id=employee.id, zone_id=zone.id, level="read"))
+        session.commit()
+        assert session.query(ZoneGrant).filter_by(zone_id=other_zone.id).first() is None
+- id: C2-08
+  card: C2
+  expected: dirty
+  path: app/couriers/access.py
+  why: The courier "no account" state is decided by checking an empty user_id; the courier has no access state field.
+  source: determining the employee access state by the absence of a linked account
+  code: |
+    from dataclasses import dataclass
+
+    from app.couriers.models import Courier
+
+
+    @dataclass
+    class AccessInfo:
+        courier_id: int
+        state: str
+        message: str
+
+
+    def courier_access(courier: Courier) -> AccessInfo:
+        """What to show the dispatcher in the courier card.
+
+        A courier stores: id, user_id, phone, full_name, hired_at, depot_id.
+        """
+        if courier.user_id is None:
+            return AccessInfo(
+                courier_id=courier.id,
+                state="no_account",
+                message="The courier has no account",
+            )
+        if courier.phone_verified_at is None:
+            return AccessInfo(
+                courier_id=courier.id,
+                state="invited",
+                message="Courier invited, phone not confirmed",
+            )
+        return AccessInfo(courier_id=courier.id, state="active", message="")
+- id: C2-09
+  card: C2
+  expected: clean
+  path: app/subscriptions/checkout.py
+  why: The is not None condition passes the stored status on or None; no state is assigned by the absence of a row.
+  source: building a payment response with an optional bank confirmation
+  code: |
+    from app.subscriptions.models import Payment, BankEvidence
+    from app.subscriptions.schemas import CheckoutView
+
+
+    def checkout_view(payment: Payment, evidence: BankEvidence | None) -> CheckoutView:
+        bank_status = evidence.status if evidence is not None else None
+        bank_reference = evidence.reference if evidence is not None else None
+        return CheckoutView(
+            payment_id=payment.id,
+            amount=payment.amount,
+            status=payment.status,
+            bank_status=bank_status,
+            bank_reference=bank_reference,
+            can_retry_payment=payment.status in ("failed", "expired"),
+            paid_at=payment.paid_at,
+        )
+
+
+    def checkout_views(payments: list[Payment], evidences: dict[int, BankEvidence]) -> list[CheckoutView]:
+        if not payments:
+            return []
+        return [checkout_view(p, evidences.get(p.id)) for p in payments]
+- id: C2-10
+  card: C2
+  expected: dirty
+  path: app/pricing/readiness.py
+  why: The "empty" state of a price list upload is decided by a zero row count; the upload has no state field.
+  source: determining the upload state by the number of related rows
+  code: |
+    from sqlalchemy import func, select
+    from sqlalchemy.orm import Session
+
+    from app.pricing.models import PriceImport, PriceRow
+
+
+    def import_summary(session: Session, price_import: PriceImport) -> dict:
+        total = session.scalar(
+            select(func.count()).select_from(PriceRow).where(PriceRow.import_id == price_import.id)
+        )
+        invalid = session.scalar(
+            select(func.count())
+            .select_from(PriceRow)
+            .where(PriceRow.import_id == price_import.id, PriceRow.error.is_not(None))
+        )
+        if total == 0:
+            return {
+                "import_id": price_import.id,
+                "supplier_id": price_import.supplier_id,
+                "state": "empty",
+                "rows": 0,
+                "invalid": 0,
+            }
+        state = "has_errors" if invalid else "ready"
+        return {
+            "import_id": price_import.id,
+            "supplier_id": price_import.supplier_id,
+            "state": state,
+            "rows": total,
+            "invalid": invalid,
+        }
+- id: C2-11
+  card: C2
+  expected: clean
+  path: src/surveys/model/surveyProgress.ts
+  why: The state is read from the state field in the server response, without derivation from the presence of rows.
+  source: reading the stored questionnaire state from the server response
+  code: |
+    import type { SurveyResponse } from "@/shared/api/types";
+
+    export type SurveyState = SurveyResponse["state"];
+
+    export type SurveyProgressView = {
+      state: SurveyState;
+      answered: number;
+      total: number;
+      canResume: boolean;
+    };
+
+    export function surveyProgressView(survey: SurveyResponse): SurveyProgressView {
+      const state = survey.state;
+      return {
+        state,
+        answered: survey.answeredCount,
+        total: survey.questionsTotal,
+        canResume: state === "in_progress",
+      };
+    }
+
+    export function surveyStateLabel(state: SurveyState): string {
+      switch (state) {
+        case "not_started":
+          return "Not started";
+        case "in_progress":
+          return "In progress";
+        case "finished":
+          return "Completed";
+      }
+    }
+- id: C2-12
+  card: C2
+  expected: dirty
+  path: app/surveys/progress.py
+  why: The "not started" state of a questionnaire is decided by the absence of answers, and the questionnaire model has no state field (questions 1 and 2 yes).
+  source: computing the employee questionnaire state by the presence of answer rows
+  code: |
+    from sqlalchemy import Column, ForeignKey, Integer, String
+    from sqlalchemy.orm import Session
+
+    from app.db import Base
+
+
+    class Survey(Base):
+        __tablename__ = "surveys"
+
+        id = Column(Integer, primary_key=True)
+        employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False)
+        title = Column(String, nullable=False)
+
+
+    class SurveyAnswer(Base):
+        __tablename__ = "survey_answers"
+
+        id = Column(Integer, primary_key=True)
+        survey_id = Column(Integer, ForeignKey("surveys.id"), nullable=False)
+        question_no = Column(Integer, nullable=False)
+
+
+    def survey_progress(session: Session, survey: Survey, questions_total: int) -> dict:
+        last = (
+            session.query(SurveyAnswer)
+            .filter_by(survey_id=survey.id)
+            .order_by(SurveyAnswer.question_no.desc())
+            .first()
+        )
+        if last is None:
+            return {"state": "not_started", "answered": 0}
+        state = "finished" if last.question_no >= questions_total else "in_progress"
+        return {"state": state, "answered": last.question_no}
+- id: C2-13
+  card: C2
+  expected: dirty
+  path: app/shifts/handover_state.py
+  why: The "not started" state of a shift handover is decided by an empty selection of acts, and the shift model has no handover state field.
+  source: determining the shift handover state by the absence of act rows in the service layer
+  code: |
+    from dataclasses import dataclass
+    from datetime import datetime
+
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    from app.shifts.models import HandoverAct
+
+
+    @dataclass
+    class Shift:
+        id: int
+        depot_id: int
+        starts_at: datetime
+        lead_name: str
+
+
+    def handover_state(session: Session, shift: Shift) -> str:
+        """Shift handover state for the shift supervisor panel."""
+        act = session.scalars(
+            select(HandoverAct)
+            .where(HandoverAct.shift_id == shift.id)
+            .order_by(HandoverAct.created_at.desc())
+        ).first()
+        if act is None:
+            return "not_started"
+        if act.signed_by_receiver is None:
+            return "waiting_signature"
+        return "accepted"
+
+
+    def shift_panel_row(session: Session, shift: Shift) -> dict:
+        # one row of the shift table on the supervisor screen
+        return {
+            "shift_id": shift.id,
+            "depot_id": shift.depot_id,
+            "starts_at": shift.starts_at.isoformat(),
+            "lead_name": shift.lead_name,
+            "handover": handover_state(session, shift),
+        }
+- id: C2-14
+  card: C2
+  expected: clean
+  path: src/orders/ui/OrdersTable.tsx
+  why: An empty list of orders shows an empty screen; no state of an order or another entity is decided by emptiness.
+  source: frontend component with an orders table and a placeholder for an empty list
+  code: |
+    import type { Order } from "../model/types";
+    import { EmptyPlaceholder } from "../../../shared/ui/EmptyPlaceholder";
+    import { OrderRow } from "./OrderRow";
+
+    interface OrdersTableProps {
+      orders: Order[];
+      onOpen: (orderId: string) => void;
+    }
+
+    export function OrdersTable({ orders, onOpen }: OrdersTableProps) {
+      if (orders.length === 0) {
+        return <EmptyPlaceholder title="No orders" hint="Change the date or warehouse filter" />;
+      }
+      return (
+        <table className="orders-table">
+          <thead>
+            <tr>
+              <th>Number</th>
+              <th>Recipient</th>
+              <th>Warehouse</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {orders.map(order => (
+              <OrderRow key={order.id} order={order} onOpen={onOpen} />
+            ))}
+          </tbody>
+        </table>
+      );
+    }
+- id: C2-15
+  card: C2
+  expected: dirty
+  path: src/tariffs/model/zoneCoverage.ts
+  why: The "zone not covered by a tariff" state is decided by an empty list of tariffs, and the zone type has no coverage state field.
+  source: frontend function that chooses the zone coverage state by the emptiness of the tariff list
+  code: |
+    import type { Tariff } from "./types";
+
+    export interface DeliveryZone {
+      id: string;
+      name: string;
+      depotId: string;
+      radiusKm: number;
+    }
+
+    export type ZoneCoverage = "uncovered" | "covered";
+
+    export function zoneCoverage(zone: DeliveryZone, tariffs: Tariff[]): ZoneCoverage {
+      const zoneTariffs = tariffs.filter(t => t.zoneId === zone.id);
+      return zoneTariffs.length === 0 ? "uncovered" : "covered";
+    }
+
+    export function zoneOption(zone: DeliveryZone, tariffs: Tariff[]) {
+      // label in the zone selection dropdown
+      const coverage = zoneCoverage(zone, tariffs);
+      return {
+        value: zone.id,
+        label: coverage === "uncovered" ? `${zone.name} (no tariff)` : zone.name,
+        disabled: coverage === "uncovered",
+      };
+    }
+- id: C2-16
+  card: C2
+  expected: clean
+  path: app/pricing/rates.py
+  why: The empty selection picks a default value for the price calculation; no entity state is assigned by it.
+  source: choosing a tariff for the cost calculation with a fallback value when the row is absent
+  code: |
+    from decimal import Decimal
+
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    from app.pricing.models import Tariff
+
+    DEFAULT_RATE = Decimal("120.00")
+
+
+    def delivery_price(session: Session, zone_id: int, weight_kg: Decimal) -> Decimal:
+        # the zone's current tariff with the latest start date
+        tariff = session.scalars(
+            select(Tariff)
+            .where(Tariff.zone_id == zone_id, Tariff.active.is_(True))
+            .order_by(Tariff.valid_from.desc())
+        ).first()
+        if tariff is None:
+            rate = DEFAULT_RATE
+            per_kg = Decimal("0")
+        else:
+            rate = tariff.base_rate
+            per_kg = tariff.per_kg
+        extra = max(weight_kg - Decimal("5"), Decimal("0")) * per_kg
+        return (rate + extra).quantize(Decimal("0.01"))
+- id: C2-17
+  card: C2
+  expected: dirty
+  path: app/orders/planning_state.py
+  why: The "not scheduled" order planning state is decided by the absence of route leg rows through exists, and the order model has no planning state field.
+  source: determining the order planning state by the absence of related route leg rows
+  code: |
+    from enum import Enum
+
+    from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, exists, select
+    from sqlalchemy.orm import Session
+
+    from app.db import Base
+
+
+    class Order(Base):
+        __tablename__ = "orders"
+        id = Column(Integer, primary_key=True)
+        recipient = Column(String, nullable=False)
+        depot_id = Column(Integer, ForeignKey("depots.id"), nullable=False)
+        created_at = Column(DateTime, nullable=False)
+
+
+    class RouteLeg(Base):
+        __tablename__ = "route_legs"
+        id = Column(Integer, primary_key=True)
+        order_id = Column(Integer, ForeignKey("orders.id"), nullable=False)
+        courier_id = Column(Integer, ForeignKey("couriers.id"), nullable=False)
+
+
+    class OrderPlanning(str, Enum):
+        NOT_PLANNED = "not_planned"
+        PLANNED = "planned"
+
+
+    def order_planning(session: Session, order: Order) -> OrderPlanning:
+        """Whether the order is scheduled on a route."""
+        has_leg = session.scalar(select(exists().where(RouteLeg.order_id == order.id)))
+        if not has_leg:
+            return OrderPlanning.NOT_PLANNED
+        return OrderPlanning.PLANNED
+- id: C2-18
+  card: C2
+  expected: clean
+  path: app/pickups/create.py
+  why: An "already created?" check before creating the same pickup request by an external number; no entity state is assigned.
+  source: creating a pickup request with an existence check of the request by the external number
+  code: |
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    from app.pickups.models import PickupRequest
+    from app.pickups.schemas import PickupIn
+
+
+    def create_pickup(session: Session, payload: PickupIn) -> PickupRequest:
+        """Creates a pickup request; a repeat with the same external number returns the created one."""
+        existing = session.scalars(
+            select(PickupRequest).where(PickupRequest.external_no == payload.external_no)
+        ).first()
+        if existing is not None:
+            return existing
+        request = PickupRequest(
+            external_no=payload.external_no,
+            address=payload.address,
+            window_from=payload.window_from,
+            window_to=payload.window_to,
+            status="new",
+        )
+        session.add(request)
+        session.commit()
+        session.refresh(request)
+        return request
+- id: C2-19
+  card: C2
+  expected: dirty
+  path: app/couriers/badge_state.py
+  why: The courier pass "not issued" state is decided by the absence of a pass row, and the courier has no pass state field.
+  source: determining the courier pass state by the absence of a row in the request handler
+  code: |
+    from enum import Enum
+
+    from fastapi import APIRouter, Depends
+    from sqlalchemy import Column, Date, Integer, String, select
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db import Base
+    from app.couriers.models import Badge
+    from app.db import get_session
+
+    router = APIRouter(prefix="/couriers")
+
+
+    class Courier(Base):
+        __tablename__ = "couriers"
+        id = Column(Integer, primary_key=True)
+        full_name = Column(String, nullable=False)
+        depot_id = Column(Integer, nullable=False)
+        shift_date = Column(Date, nullable=False)
+
+
+    class BadgeState(str, Enum):
+        NOT_ISSUED = "not_issued"
+        ACTIVE = "active"
+        EXPIRED = "expired"
+
+
+    @router.get("/{courier_id}/badge")
+    async def courier_badge(courier_id: int, db: AsyncSession = Depends(get_session)) -> dict:
+        """Courier pass state for the warehouse checkpoint."""
+        courier = await db.get(Courier, courier_id)
+        badge = (
+            await db.scalars(select(Badge).where(Badge.courier_id == courier_id))
+        ).one_or_none()
+        if badge is None:
+            state = BadgeState.NOT_ISSUED
+        elif badge.valid_until < courier.shift_date:
+            state = BadgeState.EXPIRED
+        else:
+            state = BadgeState.ACTIVE
+        return {"courier_id": courier_id, "badge_state": state.value}
+- id: C2-20
+  card: C2
+  expected: clean
+  path: tests/pallets/test_cancel.py
+  why: A fragment from tests; empty-selection checks in tests do not count.
+  source: tests of pallet placement cancellation that check the absence of rows after the cancellation
+  code: |
+    import pytest
+    from sqlalchemy import select
+
+    from app.pallets.models import PutAwayTask
+    from app.pallets.service import cancel_put_away
+
+
+    def test_cancel_removes_open_tasks(session, pallet):
+        cancel_put_away(session, pallet.id)
+        left = session.scalars(select(PutAwayTask).where(PutAwayTask.pallet_id == pallet.id)).all()
+        assert len(left) == 0
+
+
+    def test_cancel_keeps_other_pallets(session, pallet, other_pallet):
+        cancel_put_away(session, pallet.id)
+        rows = session.query(PutAwayTask).filter_by(pallet_id=other_pallet.id).all()
+        assert rows
+
+
+    def test_cancel_unknown_pallet(session):
+        with pytest.raises(LookupError):
+            cancel_put_away(session, 404)
+        assert session.query(PutAwayTask).count() == 0
+- id: C2-21
+  card: C2
+  expected: dirty
+  path: app/finance/reconciliation_state.py
+  why: The reconciliation "not started" state is decided by a zero row count through len, and the reconciliation batch has no state field.
+  source: determining the waybill reconciliation batch state by the number of related rows in the service layer
+  code: |
+    from decimal import Decimal
+
+    from sqlalchemy import Column, Integer, String, select
+    from sqlalchemy.orm import Session
+
+    from app.db import Base
+    from app.finance.models import ReconciliationLine
+
+
+    class ReconciliationBatch(Base):
+        __tablename__ = "reconciliation_batches"
+        id = Column(Integer, primary_key=True)
+        period = Column(String, nullable=False)
+        carrier_name = Column(String, nullable=False)
+
+
+    def batch_summary(session: Session, batch: ReconciliationBatch) -> dict:
+        """Reconciliation batch summary for accounting."""
+        lines = session.scalars(
+            select(ReconciliationLine).where(ReconciliationLine.batch_id == batch.id)
+        ).all()
+        # the difference is computed from the carrier's amount and ours
+        if len(lines) == 0:
+            batch_state = "not_started"
+            diff = Decimal("0")
+        else:
+            diff = sum((line.carrier_amount - line.our_amount for line in lines), Decimal("0"))
+            batch_state = "matched" if diff == 0 else "has_differences"
+        return {
+            "batch_id": batch.id,
+            "period": batch.period,
+            "carrier": batch.carrier_name,
+            "lines": len(lines),
+            "difference": str(diff),
+            "state": batch_state,
+        }
+- id: C2-22
+  card: C2
+  expected: clean
+  path: app/api/manifests.py
+  why: The empty selection answers 404 to a request for a nonexistent statement; no entity state is decided.
+  source: loading statement read handler with a 404 response for a missing object
+  code: |
+    from fastapi import APIRouter, Depends, HTTPException
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db import get_session
+    from app.loading.models import LoadingManifest
+    from app.loading.schemas import ManifestOut
+
+    router = APIRouter(prefix="/manifests")
+
+
+    @router.get("/{manifest_id}", response_model=ManifestOut)
+    async def read_manifest(manifest_id: int, db: AsyncSession = Depends(get_session)):
+        # the statement is looked up by number only
+        manifest = (
+            await db.scalars(select(LoadingManifest).where(LoadingManifest.id == manifest_id))
+        ).first()
+        if manifest is None:
+            raise HTTPException(status_code=404, detail="manifest_not_found")
+        return ManifestOut(
+            id=manifest.id,
+            truck_plate=manifest.truck_plate,
+            status=manifest.status,
+            pallet_count=len(manifest.pallets),
+        )

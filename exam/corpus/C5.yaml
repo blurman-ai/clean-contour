@@ -1,0 +1,952 @@
+# C5 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C5-01
+  card: C5
+  expected: dirty
+  path: app/services/report_projection.py
+  why: Both functions answer whether a report is finished and compute it from a snapshot, but the second allows a closing page to fail, so the rules diverge by a branch.
+  source: Two functions in neighboring service-layer modules that compute the readiness of one document from a snapshot.
+  code: |
+    ### file: app/services/report_projection.py
+    def _report_is_completed(snapshot: dict[str, Any]) -> bool:
+        if not bool(snapshot.get("title_is_ready")):
+            return False
+        if not bool(snapshot.get("summary_is_ready")):
+            return False
+        if not bool(snapshot.get("pages_generated")):
+            return False
+        return _report_is_publishable(_to_publish_contract(snapshot))
+
+    ### file: app/services/report_revision_gate.py
+    def _report_generation_is_completed(
+        snapshot: dict[str, Any], *, template_version_id: str | None = None
+    ) -> bool:
+        """Whether the generator has enough content to finish the author's revision.
+
+        A closing page is required for publication, but its explicitly declared
+        nonblocking failure must not keep an otherwise written report in
+        ``generating`` forever.
+        """
+
+        if not bool(snapshot.get("title_is_ready")):
+            return False
+        if not bool(snapshot.get("summary_is_ready")):
+            return False
+        if not bool(snapshot.get("pages_generated")):
+            return False
+
+        publishable = _to_publish_contract(
+            snapshot, template_version_id=template_version_id
+        )
+        if _report_is_publishable(publishable):
+            return True
+        if _report_has_closing_page(publishable):
+            return False
+
+        notices = snapshot.get("dispatch_notices")
+        if not isinstance(notices, list) or not any(
+            isinstance(notice, dict)
+            and str(notice.get("code") or "").strip()
+            in {"closing_page_generation_blocked", "closing_page_generation_failed"}
+            for notice in notices
+        ):
+            return False
+
+        pages = snapshot.get("pages")
+        return isinstance(pages, list) and bool(pages)
+
+- id: C5-02
+  card: C5
+  expected: clean
+  path: app/services/shift_state.py
+  why: The second function only calls the first and computes nothing itself, and a thin wrapper over one function does not count.
+  source: A stored-state check function in an entity module and a thin wrapper over it in a neighboring module.
+  code: |
+    ### file: app/services/shift_state.py
+    def checked_shift_status(old: object, new: ShiftStatus) -> str:
+        if not shift_transition_allowed(_text(old), new.value):
+            reject_unlisted_transition(
+                f"shift_transition_not_allowed:{_text(old)}->{new.value}"
+            )
+        return new.value
+
+
+    def set_shift_status(shift: Shift, new: ShiftStatus) -> None:
+        """The one place a shift changes its stored status."""
+
+        if shift.status == new.value:
+            return
+        shift.status = checked_shift_status(shift.status, new)
+
+
+    def shift_is_completed(shift: Shift | None) -> bool:
+        return shift is not None and shift.status == ShiftStatus.COMPLETED
+
+
+    ### file: app/services/worker_assignment.py
+    from app.services.shift_state import shift_is_completed
+
+
+    def delivery_is_completed(shift: Shift | None) -> bool:
+        return shift_is_completed(shift)
+
+
+    def enrollment_anchor_at(*, assignment: WorkerAssignment) -> datetime:
+        value = assignment.created_at
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+- id: C5-03
+  card: C5
+  expected: dirty
+  path: src/features/library/lib/inspectionCardState.ts
+  why: Both functions determine the state of one inspection draft by status, but a structure in preparation gives "building" on the card while the badge stays "draft".
+  source: Two frontend functions in neighboring modules that compute the state label of one catalog card.
+  code: |
+    ### file: src/features/library/lib/inspectionCardState.ts
+    export type InspectionCardStateKey =
+      | "building"
+      | "layoutReady"
+      | "prepError"
+      | "buildError";
+
+    export function inspectionCardStateKey(
+      item: CatalogItem,
+      activeDispatchOrderIds?: ReadonlySet<string>,
+    ): InspectionCardStateKey | null {
+      if (!isBoardOrderItem(item)) return null;
+      if (boardItemServiceType(item) !== "inspection") return null;
+
+      if (isInspectionBuilding(item, activeDispatchOrderIds)) return "building";
+
+      if (isBoardOrderTerminalFailure(item.status)) {
+        return isInspectionChecklistReady(item) ? "buildError" : "prepError";
+      }
+      if (isInspectionChecklistReady(item)) return "layoutReady";
+      if (item.status === "layout_planning") return "building";
+      return null;
+    }
+
+    ### file: src/features/library/lib/boardItemKind.ts
+    const INSPECTION_BUILDING_STATUSES = new Set(["full_planning", "generating", "queued"]);
+
+    export function isInspectionBuilding(
+      item: CatalogItem,
+      activeDispatchOrderIds?: ReadonlySet<string>,
+    ): boolean {
+      if (!isBoardOrderItem(item)) return false;
+      if (boardItemServiceType(item) !== "inspection") return false;
+      return (
+        isInActiveDispatchQueue(item, activeDispatchOrderIds) ||
+        INSPECTION_BUILDING_STATUSES.has(item.status)
+      );
+    }
+
+    export function inspectionDraftBadgeLabelKey(
+      item: CatalogItem,
+      activeDispatchOrderIds?: ReadonlySet<string>,
+    ): "library.itemKind.generating" | "library.inspectionState.building" | "library.itemKind.draft" {
+      if (isInActiveDispatchQueue(item, activeDispatchOrderIds)) return "library.itemKind.generating";
+      if (isInspectionBuilding(item, activeDispatchOrderIds)) return "library.inspectionState.building";
+      return "library.itemKind.draft";
+    }
+
+- id: C5-04
+  card: C5
+  expected: clean
+  path: src/pages/workspace/files/lib/fileRowState.ts
+  why: The row state is read through one shared function that parses the server value; the other functions of the module only call it.
+  source: Declaration of attachment states with parsing of the server value and thin read functions for a list row.
+  code: |
+    ### file: src/widgets/builder/model/parcelReadiness.ts
+    export type AttachmentState =
+      | "checking"
+      | "uploading"
+      | "processing"
+      | "processed"
+      | "failed";
+
+    /** Processing status from the server response (`processing_status` / `status`). */
+    export function parcelStateFromServerStatus(
+      raw: string | undefined,
+    ): AttachmentState {
+      if (raw === "processed" || raw === "failed") return raw;
+      // The server knows three values: failed, processed, processing. Any other
+      // means "processing is not finished".
+      return "processing";
+    }
+
+    export function initialParcelStateFromServerStatus(
+      raw: string | undefined,
+    ): AttachmentState {
+      return raw === undefined ? "checking" : parcelStateFromServerStatus(raw);
+    }
+
+    ### file: src/pages/workspace/files/lib/fileRowState.ts
+    export function fileRowState(
+      processingStatus: string | null | undefined,
+    ): AttachmentState {
+      return initialParcelStateFromServerStatus(processingStatus ?? undefined);
+    }
+
+    export function isFileReady(processingStatus: string | null | undefined): boolean {
+      return fileRowState(processingStatus) === "processed";
+    }
+
+    export function isFileFailed(processingStatus: string | null | undefined): boolean {
+      return fileRowState(processingStatus) === "failed";
+    }
+
+- id: C5-05
+  card: C5
+  expected: dirty
+  path: app/services/attachment_kind.py
+  why: Both functions determine the kind of one file by name and content type, but the extension lists and the order of checks differ, so the same file gets a different kind.
+  source: A file kind classifier on the backend and the same classifier on the frontend with their own extension lists.
+  code: |
+    ### file: app/services/attachment_kind.py
+    _PHOTO_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"}
+
+
+    def attachment_kind(
+        *, content_type: str | None, original_filename: str
+    ) -> AttachmentKind:
+        normalized_content_type = (content_type or "").strip().lower()
+        if normalized_content_type.startswith("audio/"):
+            return "audio"
+        if normalized_content_type.startswith("image/"):
+            return "image"
+        ext = ""
+        if original_filename and "." in original_filename:
+            ext = f".{original_filename.rsplit('.', 1)[-1].lower()}"
+        if ext in SUPPORTED_SCAN_EXTENSIONS:
+            return "audio"
+        if ext in _PHOTO_EXTENSIONS:
+            return "image"
+        return "document"
+
+    ### file: src/pages/workspace/files/lib/fileKind.ts
+    const PHOTO_EXTENSIONS = new Set([
+      ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".bmp", ".avif",
+    ]);
+    const SCAN_EXTENSIONS = new Set([".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac"]);
+
+    export function fileKindOf(params: {
+      originalFilename: string;
+      contentType?: string | null;
+    }): "audio" | "image" | "document" {
+      const ext = fileExtLower(params.originalFilename);
+      const contentType = (params.contentType ?? "").split(";")[0]!.trim().toLowerCase();
+      if (contentType.startsWith("image/") || PHOTO_EXTENSIONS.has(ext)) return "image";
+      if (contentType.startsWith("audio/") || SCAN_EXTENSIONS.has(ext)) return "audio";
+      return "document";
+    }
+
+- id: C5-06
+  card: C5
+  expected: clean
+  path: app/services/invoice_reports.py
+  why: Both places read the one stored status field of an invoice and compute nothing, so the calculation rules cannot diverge.
+  source: A check function and an SQL selection condition, both reading the one stored state field.
+  code: |
+    ### file: app/services/invoice_state.py
+    def set_invoice_status(invoice: Invoice, new: InvoiceStatus) -> None:
+        """The one place an invoice changes its stored status."""
+
+        if invoice.status == new.value:
+            return
+        invoice.status = checked_invoice_status(invoice.status, new)
+        if new is InvoiceStatus.PAID and invoice.paid_at is None:
+            invoice.paid_at = datetime.now(UTC)
+
+
+    def invoice_is_paid(invoice: Invoice | None) -> bool:
+        return invoice is not None and invoice.status == InvoiceStatus.PAID.value
+
+    ### file: app/services/invoice_reports.py
+    def paid_invoices_clause():
+        """Filter for reports that count only paid invoices."""
+
+        return Invoice.status == InvoiceStatus.PAID.value
+
+
+    async def paid_total(db: AsyncSession, *, customer_id: uuid.UUID) -> Decimal:
+        total = await db.scalar(
+            select(func.coalesce(func.sum(Invoice.amount), 0)).where(
+                Invoice.customer_id == customer_id,
+                paid_invoices_clause(),
+            )
+        )
+        return Decimal(total)
+
+- id: C5-07
+  card: C5
+  expected: dirty
+  path: app/services/inspection_scoring.py
+  why: Both functions decide whether an employee passed the inspection, but the preview uses a common threshold, while the working path also needs the number of answers and per-category thresholds.
+  source: Pass result calculation in the preview handler and in the working path service function.
+  code: |
+    ### file: app/api/preview/inspection_runtime.py
+    async def _preview_result(db, *, inspection, runtime_session, status_before_view, step):
+        if step.get("type") != "result_screen":
+            return None
+        closing_policy = resolve_completion_policy(inspection.final_cargo_json)
+        score_percent = float(status_before_view.get("score_percent") or 0.0)
+        passed = score_percent >= float(closing_policy["passing_rate_percent"])
+        if passed:
+            runtime_session.completed_at = runtime_session.completed_at or utcnow()
+        await db.flush()
+        return {"score_percent": score_percent, "passed": passed}
+
+    ### file: app/services/inspection_scoring.py
+    def inspection_policy_can_pass(
+        state: dict[str, Any],
+        *,
+        policy: dict[str, Any] | None = None,
+        inspection: dict[str, Any] | None = None,
+    ) -> bool:
+        minimum_zone = zone_passing_rate_percent(policy)
+        zones_pass = inspection is None or categories_meet_minimum(
+            inspection,
+            state.get("answered_steps"),
+            minimum_percent=minimum_zone,
+        )
+        if policy is None:
+            return (
+                float(state.get("score_percent") or 0.0) >= DEFAULT_PASSING_SCORE_PERCENT
+                and zones_pass
+            )
+        answered_count = len(
+            [item for item in state.get("answered_steps", []) if isinstance(item, dict)]
+        )
+        return (
+            answered_count >= int(policy["effective_check_denominator"])
+            and float(score_percent_for_policy(state, policy=policy))
+            >= float(policy["passing_rate_percent"])
+            and zones_pass
+        )
+
+- id: C5-08
+  card: C5
+  expected: clean
+  path: app/services/report_readiness.py
+  why: The functions answer different questions, whether the page editor can be opened and whether the revision can be closed, so this is not one state.
+  source: Two readiness checks of one snapshot with a shared helper, answering different questions of different stages.
+  code: |
+    ### file: app/services/report_readiness.py
+    def _required_parts_ready(snapshot: dict[str, Any]) -> bool:
+        return (
+            bool(snapshot.get("title_is_ready"))
+            and bool(snapshot.get("summary_is_ready"))
+            and bool(snapshot.get("pages_generated"))
+        )
+
+
+    def report_outline_is_ready(snapshot: dict[str, Any]) -> bool:
+        """The author may open the page editor: parts are written and at least
+        one page exists. Says nothing about publication."""
+
+        if not _required_parts_ready(snapshot):
+            return False
+        pages = snapshot.get("pages") or []
+        return isinstance(pages, list) and len(pages) > 0
+
+    ### file: app/services/report_revision_gate.py
+    def report_revision_may_close(snapshot: dict[str, Any]) -> bool:
+        """The revision may be marked finished: the parts are ready and the
+        snapshot passes the publication contract."""
+
+        if not _required_parts_ready(snapshot):
+            return False
+        return _report_is_publishable(_to_publish_contract(snapshot))
+
+- id: C5-09
+  card: C5
+  expected: dirty
+  path: src/features/library/lib/boardItemKind.ts
+  why: Both functions answer whether the inspection checklist of one draft is ready, but one counts by the number of items and the other by status flags.
+  source: Two frontend functions in different layers that determine the readiness of one entity from different response fields.
+  code: |
+    ### file: src/features/library/lib/boardItemKind.ts
+    /**
+     * A check with a ready `actual_count` means the checklist already exists, and opening leads
+     * to the editor. The `generating` status on such a card is misleading.
+     */
+    export function isInspectionChecklistReady(item: CatalogItem): boolean {
+      if (!isBoardOrderItem(item)) return false;
+      if (boardItemServiceType(item) !== "inspection") return false;
+      const actual = item.size_projection?.actual_count;
+      return typeof actual === "number" && Number.isFinite(actual) && actual > 0;
+    }
+
+    ### file: src/shared/api/lib/orderStateMachine.ts
+    /** The structure is ready - wider than just phase=layout_review. */
+    export function isLayoutReady(draft: OrderStatusHolder): boolean {
+      return (
+        draft.layout_ready === true ||
+        draft.phase === ORDER_FLOW_PHASE.LAYOUT_REVIEW ||
+        draft.status === "review" ||
+        draft.can_generate === true
+      );
+    }
+
+    ### file: src/widgets/builder/lib/inspectionResume.ts
+    /**
+     * The inspection checklist is ready: the draft's public stage is `layout_ready`.
+     * No status response means not ready.
+     */
+    export function isInspectionChecklistReadyByStatus(
+      status: Parameters<typeof isLayoutReady>[0] | null | undefined,
+    ): boolean {
+      return Boolean(status) && isLayoutReady(status!);
+    }
+
+- id: C5-10
+  card: C5
+  expected: clean
+  path: app/api/shipments/handlers.py
+  why: Both handlers call the same function from a shared module and contain no calculation of their own.
+  source: Two handlers in different modules that import one shared state check function.
+  code: |
+    ### file: app/api/shipments/handlers.py
+    from app.services.shipment_state import shipment_is_delivered
+
+
+    async def confirm_receipt(db: AsyncSession, shipment_id: uuid.UUID) -> dict:
+        shipment = await db.get(Shipment, shipment_id)
+        if shipment is None:
+            raise HTTPException(status_code=404, detail="shipment_not_found")
+        was_delivered_before = shipment_is_delivered(shipment)
+        shipment.receipt_confirmed_at = utcnow()
+        await db.commit()
+        return {"shipment_id": str(shipment.id), "repeat": was_delivered_before}
+
+    ### file: app/api/couriers/handlers.py
+    from app.services.shipment_state import shipment_is_delivered
+
+
+    async def courier_shipments(db: AsyncSession, courier_id: uuid.UUID) -> list[dict]:
+        rows = (
+            await db.scalars(select(Shipment).where(Shipment.courier_id == courier_id))
+        ).all()
+        return [
+            {
+                "shipment_id": str(row.id),
+                "address": row.address,
+                "delivered": shipment_is_delivered(row),
+            }
+            for row in rows
+        ]
+
+- id: C5-11
+  card: C5
+  expected: clean
+  path: app/services/order_status.py
+  why: Functions with similar names compute the state of different entities, an order and a shipment, so one question is not decided in two ways.
+  source: Two functions with status names for different aggregates in different modules.
+  code: |
+    ### file: app/services/order_status.py
+    def order_payment_status(order: Order) -> str:
+        """Payment state of an order, from its payment rows."""
+
+        paid = sum(p.amount for p in order.payments if p.confirmed_at is not None)
+        if paid <= 0:
+            return "unpaid"
+        if paid < order.total_amount:
+            return "partially_paid"
+        return "paid"
+
+    ### file: app/services/shipment_status.py
+    def shipment_delivery_status(shipment: Shipment, now: datetime) -> str:
+        """Delivery state of a shipment, from its scans and the promised date."""
+
+        if shipment.delivered_at is not None:
+            return "delivered"
+        if shipment.last_scan_at is None:
+            return "not_picked_up"
+        if shipment.promised_at is not None and shipment.promised_at < now:
+            return "late"
+        return "in_transit"
+
+- id: C5-12
+  card: C5
+  expected: clean
+  path: app/services/charge_lifecycle.py
+  why: The functions are named alike but answer different questions, whether the payment is in force now and whether it was ever posted, and this is written in their descriptions.
+  source: A pair of payment state check functions designed as two different questions.
+  code: |
+    ### file: app/services/charge_lifecycle.py
+    def charge_was_posted_unlocked(payment: Any) -> bool:
+        """Whether the purchase was granted at any time, without a row lock."""
+        return (
+            payment.confirmed_at is not None
+            or _settlement_of(payment) == Fulfillment.APPLIED.value
+        )
+
+
+    def charge_was_voided(payment: Any) -> bool:
+        """Whether the stored fulfillment state is ``void``.
+
+        The one read of "the checkout was closed": a row the owner took off the
+        screen without a bank verdict is ``void`` with a stored reason.
+        """
+        return _settlement_of(payment) == Fulfillment.VOID.value
+
+
+    async def charge_is_currently_posted(db: Any, payment: Any) -> bool:
+        """Whether fulfillment is currently ``applied`` (a refund is not current)."""
+        return await charge_settlement(db, payment) == Fulfillment.APPLIED
+
+    ### file: app/services/payment_access.py
+    async def grants_access_now(db, payment) -> bool:
+        return await charge_is_currently_posted(db, payment)
+
+
+    def counts_toward_history(payment) -> bool:
+        return charge_was_posted_unlocked(payment)
+
+- id: C5-13
+  card: C5
+  expected: dirty
+  path: src/features/library/lib/libraryListStatus.ts
+  why: Both functions compute the same empty-list flags, and the list takes the search string into account while the tab does not.
+  source: Two frontend functions that compute the empty and loading-more list flags for the whole catalog and for its slice.
+  code: |
+    ### file: src/features/library/lib/libraryListStatus.ts
+    export function resolveLibraryListStatus(input: {
+      isLoading: boolean;
+      itemsCount: number;
+      visibleItemsCount: number;
+      hasMore: boolean;
+      isFetchingNextPage: boolean;
+      hasActiveFilter: boolean;
+      search: string;
+    }) {
+      const { isLoading, itemsCount, visibleItemsCount, hasMore, isFetchingNextPage } = input;
+      const isEmpty = !isLoading && itemsCount === 0;
+      const isPrefetchingFilteredResults =
+        !isLoading &&
+        itemsCount > 0 &&
+        visibleItemsCount === 0 &&
+        (hasMore || isFetchingNextPage) &&
+        (input.hasActiveFilter || input.search.trim().length > 0);
+      const isFilteredEmpty =
+        !isLoading && itemsCount > 0 && visibleItemsCount === 0 && !isPrefetchingFilteredResults;
+      return { isEmpty, isPrefetchingFilteredResults, isFilteredEmpty };
+    }
+
+    ### file: src/features/library/lib/libraryTabStatus.ts
+    export function resolveLibraryTabStatus(input: {
+      isLoading: boolean;
+      rawKindCount: number;
+      visibleKindCount: number;
+      hasMore: boolean;
+      isFetchingNextPage: boolean;
+      hasActiveFilter: boolean;
+    }) {
+      const { isLoading, rawKindCount, visibleKindCount, hasMore, isFetchingNextPage } = input;
+      const isEmpty = !isLoading && rawKindCount === 0;
+      const isPrefetchingFilteredResults =
+        !isLoading &&
+        rawKindCount > 0 &&
+        visibleKindCount === 0 &&
+        (hasMore || isFetchingNextPage) &&
+        input.hasActiveFilter;
+      const isFilteredEmpty =
+        !isLoading && rawKindCount > 0 && visibleKindCount === 0 && !isPrefetchingFilteredResults;
+      return { isEmpty, isPrefetchingFilteredResults, isFilteredEmpty };
+    }
+- id: C5-14
+  card: C5
+  expected: dirty
+  path: app/services/order_sla.py
+  why: Both functions answer whether the same order is overdue and compute it themselves, and the branches diverge; the half-hour allowance and the exclusion of cancelled orders exist only in the first.
+  source: Two order overdue functions in the service layer and in the panel handler, computing the same thing differently. By form.
+  code: |
+    ### file: app/services/order_sla.py
+    from datetime import datetime, timedelta
+
+    from app.models import Order, OrderStatus
+
+    GRACE = timedelta(minutes=30)
+
+
+    def order_is_overdue(order: Order, now: datetime) -> bool:
+        if order.status in (OrderStatus.DELIVERED, OrderStatus.CANCELLED):
+            return False
+        if order.promised_at is None:
+            return False
+        return now > order.promised_at + GRACE
+
+
+    def overdue_minutes(order: Order, now: datetime) -> int:
+        if not order_is_overdue(order, now):
+            return 0
+        return int((now - order.promised_at).total_seconds() // 60)
+
+    ### file: app/api/dashboard.py
+    def _is_late(order: Order, now: datetime) -> bool:
+        if order.status == OrderStatus.DELIVERED:
+            return False
+        return order.promised_at is not None and order.promised_at < now
+
+
+    @router.get("/dashboard/late-orders")
+    async def late_orders(db: AsyncSession = Depends(get_db)):
+        now = utcnow()
+        rows = (
+            await db.scalars(select(Order).where(Order.promised_at.is_not(None)))
+        ).all()
+        late = [order for order in rows if _is_late(order, now)]
+        return {"count": len(late), "order_ids": [str(order.id) for order in late]}
+
+- id: C5-15
+  card: C5
+  expected: clean
+  path: app/services/shift_actions.py
+  why: The functions answer different questions about one shift, whether it can be opened and whether it can be closed, so this is not one state.
+  source: A pair of checks of whether actions on a shift are allowed, in one module. By form.
+  code: |
+    from datetime import datetime, timedelta
+
+    from fastapi import HTTPException
+
+    from app.models import Shift, ShiftStatus
+    from app.services.shift_state import set_shift_status
+
+    OPEN_WINDOW = timedelta(minutes=15)
+
+
+    def shift_can_be_opened(shift: Shift, now: datetime) -> bool:
+        """Opening is allowed shortly before the planned start."""
+        if shift.status != ShiftStatus.PLANNED:
+            return False
+        return now >= shift.starts_at - OPEN_WINDOW
+
+
+    def shift_can_be_closed(shift: Shift) -> bool:
+        if shift.status != ShiftStatus.OPEN:
+            return False
+        return all(stop.finished_at is not None for stop in shift.stops)
+
+
+    async def open_shift(db, shift: Shift, now: datetime) -> None:
+        if not shift_can_be_opened(shift, now):
+            raise HTTPException(status_code=409, detail="shift_cannot_be_opened")
+        set_shift_status(shift, ShiftStatus.OPEN)
+        shift.opened_at = now
+        await db.commit()
+
+
+    async def close_shift(db, shift: Shift, now: datetime) -> None:
+        if not shift_can_be_closed(shift):
+            raise HTTPException(status_code=409, detail="shift_cannot_be_closed")
+        set_shift_status(shift, ShiftStatus.CLOSED)
+        shift.closed_at = now
+        await db.commit()
+
+- id: C5-16
+  card: C5
+  expected: dirty
+  path: src/features/tracking/lib/shipmentProgress.ts
+  why: Both functions answer whether the same shipment is delivered and compute it themselves, and the branches diverge; the handover status and the delivery time are taken into account only in the first, the signature only in the second.
+  source: Two frontend functions in different layers that determine whether a shipment is delivered from different fields. By form.
+  code: |
+    ### file: src/features/tracking/lib/shipmentProgress.ts
+    import type { Shipment } from "@/entities/shipment/model/types";
+
+    const DELIVERED_STATUSES = new Set(["delivered", "handed_over"]);
+
+    export function hasBeenDelivered(shipment: Shipment): boolean {
+      return DELIVERED_STATUSES.has(shipment.status) || shipment.deliveredAt != null;
+    }
+
+    export function deliveryStepIndex(shipment: Shipment): number {
+      if (hasBeenDelivered(shipment)) return 3;
+      if (shipment.status === "out_for_delivery") return 2;
+      if (shipment.status === "in_transit") return 1;
+      return 0;
+    }
+
+    ### file: src/widgets/courier-app/model/stopList.ts
+    import type { Shipment } from "@/entities/shipment/model/types";
+
+    export function isDelivered(shipment: Shipment): boolean {
+      return shipment.status === "delivered" && shipment.signature !== null;
+    }
+
+    export function splitStops(shipments: Shipment[]) {
+      const done = shipments.filter(isDelivered);
+      const pending = shipments.filter(item => !isDelivered(item));
+      return { done, pending };
+    }
+
+    export function stopCounter(shipments: Shipment[]): string {
+      const { done } = splitStops(shipments);
+      return `${done.length} / ${shipments.length}`;
+    }
+
+- id: C5-17
+  card: C5
+  expected: clean
+  path: src/features/promo/lib/promoState.ts
+  why: The functions answer different questions about one promotion, whether it was ever used and whether it is in force now, and the badge is built from both answers.
+  source: A pair of promotion state functions on the frontend designed as two different questions. By form.
+  code: |
+    import type { Promo } from "@/entities/promo/model/types";
+
+    export function wasEverRedeemed(promo: Promo): boolean {
+      return promo.redemptions.length > 0;
+    }
+
+    export function isPromoInEffect(promo: Promo, now: Date): boolean {
+      if (promo.revokedAt) return false;
+      const from = new Date(promo.startsAt);
+      const to = promo.endsAt ? new Date(promo.endsAt) : null;
+      return from <= now && (to === null || now < to);
+    }
+
+    export function promoBadge(promo: Promo, now: Date): "active" | "used" | "expired" {
+      if (isPromoInEffect(promo, now)) return "active";
+      return wasEverRedeemed(promo) ? "used" : "expired";
+    }
+
+    export function promoRows(promos: Promo[], now: Date) {
+      return promos.map(promo => ({
+        id: promo.id,
+        title: promo.title,
+        badge: promoBadge(promo, now),
+        redemptions: promo.redemptions.length,
+      }));
+    }
+
+- id: C5-18
+  card: C5
+  expected: dirty
+  path: app/services/dispatch.py
+  why: Both functions answer whether a pallet can be shipped and compute it themselves, and the branches diverge; the weight is checked only by the first, and the damage flag only by the second.
+  source: Two readiness checks of a pallet for shipment in one warehouse module. By form.
+  code: |
+    from app.models import Pallet
+
+
+    def pallet_ready_for_dispatch(pallet: Pallet) -> bool:
+        if pallet.sealed_at is None:
+            return False
+        if not pallet.label_printed:
+            return False
+        return pallet.weight_kg is not None and pallet.weight_kg > 0
+
+
+    def build_dispatch_batch(pallets: list[Pallet], limit: int) -> list[Pallet]:
+        ready = [item for item in pallets if pallet_ready_for_dispatch(item)]
+        ready.sort(key=lambda item: item.sealed_at)
+        return ready[:limit]
+
+
+    def pallet_is_dispatchable(pallet: Pallet) -> bool:
+        if not pallet.label_printed:
+            return False
+        if pallet.damage_reported:
+            return False
+        return pallet.sealed_at is not None
+
+
+    def release_from_dock(pallets: list[Pallet]) -> list[str]:
+        released = []
+        for pallet in pallets:
+            if pallet_is_dispatchable(pallet):
+                pallet.dock_released = True
+                released.append(str(pallet.id))
+        return released
+
+- id: C5-19
+  card: C5
+  expected: clean
+  path: app/services/order_cancel.py
+  why: The functions answer different questions about one order, whether it can be cancelled and whether the money can be refunded, and they differ by meaning, not by mistake.
+  source: Two checks of whether actions on an order are allowed, in different modules. By form.
+  code: |
+    ### file: app/services/order_cancel.py
+    from app.models import Order, OrderStatus
+
+
+    def order_can_be_cancelled(order: Order) -> bool:
+        if order.status in (OrderStatus.DELIVERED, OrderStatus.CANCELLED):
+            return False
+        return order.picked_up_at is None
+
+
+    async def cancel_order(db, order: Order) -> None:
+        if not order_can_be_cancelled(order):
+            raise OrderActionRefused("order_cannot_be_cancelled")
+        order.status = OrderStatus.CANCELLED
+        await db.commit()
+
+    ### file: app/services/order_refund.py
+    from datetime import datetime, timedelta
+
+    from app.models import Order, OrderStatus
+
+    REFUND_WINDOW = timedelta(days=14)
+
+
+    def order_can_be_refunded(order: Order, now: datetime) -> bool:
+        if order.status != OrderStatus.DELIVERED:
+            return False
+        if order.refunded_at is not None:
+            return False
+        return now - order.delivered_at <= REFUND_WINDOW
+
+- id: C5-20
+  card: C5
+  expected: dirty
+  path: app/services/courier_availability.py
+  why: The function and the SQL condition answer whether the same courier is free and compute it themselves, and the branches diverge; only the function takes the break into account.
+  source: A courier availability check in a service and a selection condition in a repository that compute availability by different rules. By form.
+  code: |
+    ### file: app/services/courier_availability.py
+    from datetime import datetime
+
+    from app.models import Courier, CourierStatus
+
+
+    def courier_is_available(courier: Courier, now: datetime) -> bool:
+        if courier.status != CourierStatus.ON_SHIFT:
+            return False
+        if courier.break_until is not None and courier.break_until > now:
+            return False
+        return courier.active_shipments < courier.capacity
+
+    ### file: app/repositories/couriers.py
+    import uuid
+
+    from sqlalchemy import and_, select
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.models import Courier, CourierStatus
+
+
+    def available_couriers_clause():
+        return and_(
+            Courier.status == CourierStatus.ON_SHIFT,
+            Courier.active_shipments < Courier.capacity,
+        )
+
+
+    async def list_available(db: AsyncSession, depot_id: uuid.UUID) -> list[Courier]:
+        stmt = select(Courier).where(
+            Courier.depot_id == depot_id, available_couriers_clause()
+        )
+        return list((await db.scalars(stmt)).all())
+
+- id: C5-21
+  card: C5
+  expected: clean
+  path: app/services/route_state.py
+  why: The function and the SQL condition read one declared set of final route statuses and compute nothing themselves, so the rules have nowhere to diverge.
+  source: A check and a query over routes, both parts of which take one declared set of statuses. By form.
+  code: |
+    import uuid
+    from datetime import datetime
+
+    from sqlalchemy import select
+
+    from app.models import Route, RouteStatus
+
+    FINAL_ROUTE_STATUSES = frozenset({RouteStatus.COMPLETED, RouteStatus.CANCELLED})
+
+
+    def route_is_final(route: Route) -> bool:
+        return route.status in FINAL_ROUTE_STATUSES
+
+
+    def open_routes_query(depot_id: uuid.UUID):
+        return select(Route).where(
+            Route.depot_id == depot_id,
+            Route.status.not_in(FINAL_ROUTE_STATUSES),
+        )
+
+
+    async def archive_final_routes(db, depot_id: uuid.UUID, now: datetime) -> int:
+        rows = (
+            await db.scalars(select(Route).where(Route.depot_id == depot_id))
+        ).all()
+        archived = 0
+        for route in rows:
+            if route_is_final(route) and route.archived_at is None:
+                route.archived_at = now
+                archived += 1
+        await db.commit()
+        return archived
+
+- id: C5-22
+  card: C5
+  expected: dirty
+  path: src/features/tariffs/lib/priceListState.ts
+  why: Both functions answer whether a price list is in force on a date and compute it themselves, and the branches diverge; an archived price list and the boundary of the last day are treated differently.
+  source: Two frontend functions in one module that determine whether a price list is in force by different rules. By form.
+  code: |
+    import type { PriceList } from "@/entities/price-list/model/types";
+
+    function startOfDay(value: string): number {
+      const date = new Date(value);
+      date.setHours(0, 0, 0, 0);
+      return date.getTime();
+    }
+
+    /** Whether the price list is in force on the given date. */
+    export function isPriceListActive(list: PriceList, today: Date): boolean {
+      if (list.archivedAt) return false;
+      const from = startOfDay(list.validFrom);
+      const to = list.validTo ? startOfDay(list.validTo) : Infinity;
+      return from <= today.getTime() && today.getTime() <= to;
+    }
+
+    export function currentPriceList(
+      lists: PriceList[],
+      today: Date,
+    ): PriceList | undefined {
+      return lists.find(list => isPriceListActive(list, today));
+    }
+
+    export function isPriceListInEffect(list: PriceList, now: number = Date.now()): boolean {
+      const from = new Date(list.validFrom).getTime();
+      const to = list.validTo ? new Date(list.validTo).getTime() : Infinity;
+      return from <= now && now < to;
+    }
+
+    export function priceCaption(list: PriceList, now: number = Date.now()): string {
+      return isPriceListInEffect(list, now) ? list.title : `${list.title} (not in force)`;
+    }
+
+- id: C5-23
+  card: C5
+  expected: clean
+  path: app/services/overdue.py
+  why: Functions with the same meaning of names compute the overdue state of different entities, an invoice and a shipment, so one question is not decided in two ways.
+  source: Two overdue functions for different aggregates in one module. By form.
+  code: |
+    from datetime import date, datetime
+
+    from app.models import Invoice, Shipment
+
+
+    def invoice_is_overdue(invoice: Invoice, today: date) -> bool:
+        """An invoice is overdue after its due date, until it is paid."""
+        return invoice.paid_at is None and invoice.due_date < today
+
+
+    def delivery_is_overdue(shipment: Shipment, now: datetime) -> bool:
+        if shipment.delivered_at is not None:
+            return False
+        return shipment.promised_at is not None and shipment.promised_at < now
+
+
+    def overdue_summary(
+        invoices: list[Invoice], shipments: list[Shipment], now: datetime
+    ) -> dict[str, int]:
+        return {
+            "invoices": sum(1 for item in invoices if invoice_is_overdue(item, now.date())),
+            "shipments": sum(1 for item in shipments if delivery_is_overdue(item, now)),
+        }

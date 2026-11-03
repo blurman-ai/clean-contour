@@ -1,0 +1,1027 @@
+# C13 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C13-01
+  card: C13
+  expected: dirty
+  path: src/features/price-import/ui/PriceRowsEditor.tsx
+  why: The parsed rows of the price list replace the table entirely in onSuccess while the table is available for cell editing (questions 1-3).
+  source: table editor into which the result of background parsing of a file is written over local edits
+  code: |
+    export function PriceRowsEditor({ priceListId }: { priceListId: string }) {
+      const [rows, setRows] = useState<PriceRow[]>([]);
+      const [fileName, setFileName] = useState<string | null>(null);
+      const parseMutation = useParsePriceFileMutation(priceListId);
+
+      const updateCell = (index: number, field: keyof PriceRow, value: string) =>
+        setRows(prev =>
+          prev.map((row, i) => (i === index ? { ...row, [field]: value } : row)),
+        );
+
+      const addRow = () => setRows(prev => [...prev, emptyPriceRow()]);
+
+      const handleFile = (file: File) => {
+        setFileName(file.name);
+        parseMutation.mutate(file, {
+          onSuccess: data => {
+            setRows(data.rows);
+          },
+        });
+      };
+
+      return (
+        <Stack>
+          <FileDrop onFile={handleFile} loading={parseMutation.isPending} />
+          {fileName ? <Text size="xs">{fileName}</Text> : null}
+          <Table>
+            <Table.Tbody>
+              {rows.map((row, index) => (
+                <Table.Tr key={index}>
+                  <Table.Td>
+                    <TextInput
+                      value={row.sku}
+                      onChange={e => updateCell(index, "sku", e.currentTarget.value)}
+                    />
+                  </Table.Td>
+                  <Table.Td>
+                    <TextInput
+                      value={row.price}
+                      onChange={e => updateCell(index, "price", e.currentTarget.value)}
+                    />
+                  </Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+          <Button variant="default" onClick={addRow}>Add row</Button>
+          <Button onClick={() => void savePriceRows(priceListId, rows)}>Save</Button>
+        </Stack>
+      );
+    }
+- id: C13-02
+  card: C13
+  expected: clean
+  path: src/features/warehouse-setup/ui/SectorSelection.tsx
+  why: The user's choice is stored in the draft and takes precedence over the saved value; the server response is only displayed and is not written into the choice.
+  source: catalog choice screen where the value equals the user's draft or the server data
+  code: |
+    export function SectorSelection({ onComplete }: { onComplete: () => void }) {
+      const catalogQuery = useSectorCatalogQuery();
+      const currentQuery = useCurrentSectorQuery();
+      const updateMutation = useUpdateSectorMutation();
+      const [draft, setDraft] = useState<SectorDraft | null>(null);
+      const [saveError, setSaveError] = useState<string | null>(null);
+
+      const options = catalogQuery.data?.items ?? [];
+      // The user's draft takes precedence over the value saved on the server.
+      const selectedKey = draft?.selectedKey ?? currentQuery.data?.primary_sector_id ?? null;
+      const otherText = draft?.otherText ?? currentQuery.data?.primary_sector_other_text ?? "";
+      const selectedOther = selectedKey === OTHER_SECTOR_KEY;
+      const trimmedOtherText = otherText.trim();
+      const canSave =
+        Boolean(selectedKey) &&
+        (!selectedOther || trimmedOtherText.length > 0) &&
+        !updateMutation.isPending;
+
+      function applyDraft(next: SectorDraft) {
+        setDraft(next);
+        setSaveError(null);
+      }
+
+      async function handleSave() {
+        if (!selectedKey || !canSave) return;
+        setSaveError(null);
+        try {
+          await updateMutation.mutateAsync({
+            primary_sector_id: selectedKey,
+            primary_sector_other_text: selectedOther ? trimmedOtherText : null,
+          });
+          onComplete();
+        } catch (error) {
+          setSaveError(getSectorErrorMessage(error));
+        }
+      }
+
+      if (catalogQuery.isPending || currentQuery.isPending) return <Loader />;
+      return (
+        <SectorCards
+          options={options}
+          selectedKey={selectedKey}
+          otherText={otherText}
+          onChange={applyDraft}
+          onSave={() => void handleSave()}
+          canSave={canSave}
+          error={saveError}
+        />
+      );
+    }
+- id: C13-03
+  card: C13
+  expected: dirty
+  path: src/features/invoice-form/ui/InvoiceFormScan.tsx
+  why: The waybill recognition result is written into form fields that the courier edits from the first second, and there is neither a lock nor a precedence rule (questions 1-3).
+  source: form with autofill of fields from the response of asynchronous recognition of an uploaded file
+  code: |
+    export function InvoiceFormScan() {
+      const [recipient, setRecipient] = useState("");
+      const [phone, setPhone] = useState("");
+      const [address, setAddress] = useState("");
+      const [scanning, setScanning] = useState(false);
+
+      const scan = useScanInvoiceMutation();
+
+      const handleFile = (file: File) => {
+        setScanning(true);
+        scan.mutate(file, {
+          onSuccess: parsed => {
+            setRecipient(parsed.recipient);
+            setPhone(parsed.phone);
+            setAddress(parsed.address);
+            setScanning(false);
+          },
+          onError: () => setScanning(false),
+        });
+      };
+
+      return (
+        <form onSubmit={e => void submitInvoice(e, { recipient, phone, address })}>
+          <FileDrop onFile={handleFile} loading={scanning} />
+          <TextInput
+            label="Recipient"
+            value={recipient}
+            onChange={e => setRecipient(e.currentTarget.value)}
+          />
+          <TextInput
+            label="Phone"
+            value={phone}
+            onChange={e => setPhone(e.currentTarget.value)}
+          />
+          <TextInput
+            label="Address"
+            value={address}
+            onChange={e => setAddress(e.currentTarget.value)}
+          />
+          <Button type="submit" disabled={scanning}>
+            Save waybill
+          </Button>
+        </form>
+      );
+    }
+- id: C13-04
+  card: C13
+  expected: dirty
+  path: src/widgets/shipment-builder/model/useHintExtract.ts
+  why: The server response unconditionally selects parameters through onSelect, although the user can select them while the request is running; only the create button is blocked (questions 1-3).
+  source: request text parsing hook that applies the found values to the parameter choice after the network response
+  code: |
+    export function useHintExtract({ prompt, onSelect }: UseHintExtractArgs) {
+      const [status, setStatus] = useState<"idle" | "pending" | "ready">("idle");
+      const seqRef = useRef(0);
+      const onSelectRef = useRef(onSelect);
+
+      useEffect(() => {
+        onSelectRef.current = onSelect;
+      }, [onSelect]);
+
+      const trimmed = prompt.trim();
+
+      useEffect(() => {
+        if (trimmed.length < 8) {
+          setStatus("idle");
+          return;
+        }
+        const seq = ++seqRef.current;
+        setStatus("pending");
+        const timer = window.setTimeout(async () => {
+          try {
+            const response = await extractShipmentHints({ prompt: trimmed });
+            if (seqRef.current !== seq) return;
+            for (const hint of response.hints) {
+              onSelectRef.current(hint.field, hint.value);
+            }
+          } finally {
+            if (seqRef.current === seq) setStatus("ready");
+          }
+        }, 650);
+        return () => window.clearTimeout(timer);
+      }, [trimmed]);
+
+      return { status, createBlocked: status === "pending" };
+    }
+
+    // Screen: the button waits for the parse, the parameter choice is always available
+    // <ParamChips value={params} onChange={setParam} />
+    // <Button disabled={hint.createBlocked}>Create shipment</Button>
+- id: C13-05
+  card: C13
+  expected: clean
+  path: src/widgets/inspection-builder/model/useInspectionReview.ts
+  why: The form is hidden behind an indicator until the response arrives, and after the first display later responses do not overwrite it, that is, the fields are locked until the response.
+  source: check screen hook with polling of the prefill and a first-display flag of the form
+  code: |
+    export function useInspectionReview(inspectionId: string | null | undefined) {
+      const [response, setResponse] = useState<InspectionContentResponse | null>(null);
+      const [draft, setDraft] = useState<InspectionContent | null>(null);
+      const [edited, setEdited] = useState(false);
+      // The form has been shown at least once: from now on server responses do not overwrite it.
+      const [settled, setSettled] = useState(false);
+      const settledRef = useRef(false);
+
+      const enabled = Boolean(inspectionId);
+
+      useEffect(() => {
+        settledRef.current = false;
+        setSettled(false);
+        return () => {
+          settledRef.current = false;
+        };
+      }, [inspectionId]);
+
+      const query = useQuery({
+        queryKey: queryKeys.inspectionReview(inspectionId ?? ""),
+        queryFn: () => getInspectionContent(inspectionId!),
+        enabled,
+        refetchInterval: q =>
+          !settledRef.current && isFillInProgress(q.state.data) ? 2_000 : false,
+      });
+
+      useEffect(() => {
+        const next = query.data;
+        if (!enabled || !next || settledRef.current) return;
+        if (isFillInProgress(next)) return;
+        settledRef.current = true;
+        setSettled(true);
+        setResponse(next);
+        setDraft(next.content);
+        setEdited(false);
+      }, [enabled, query.data]);
+
+      // While settled is false, the screen shows an indicator, not the fields.
+      const loading = enabled && !settled && !query.isError;
+
+      const updateDraft = useCallback(
+        (updater: (previous: InspectionContent) => InspectionContent) => {
+          setDraft(previous => (previous ? updater(previous) : previous));
+          setEdited(true);
+        },
+        [],
+      );
+
+      return { response, draft, edited, loading, updateDraft };
+    }
+- id: C13-06
+  card: C13
+  expected: clean
+  path: src/widgets/shipment-builder/model/useWizardAnswers.ts
+  why: The parse response fills only the unfilled fields and does not touch manual edits, that is, the precedence rule is declared (question 3 is no).
+  source: wizard hook that substitutes the answers of the text parse into the fields not yet filled by the user
+  code: |
+    export function useWizardAnswers(args: {
+      enabled: boolean;
+      format: WizardFormatId | null;
+      prefillResponse?: HintsExtractResponse | null;
+    }) {
+      const { enabled, format, prefillResponse } = args;
+      const [answers, setAnswers] = useState<WizardAnswers>({});
+      const [prefillKey, setPrefillKey] = useState<string | null>(null);
+      const [handEditedFields, setHandEditedFields] = useState<
+        ReadonlySet<WizardFieldId>
+      >(() => new Set());
+
+      // The parse of the application text returns the found answers. We substitute only
+      // the fields the author has not answered yet: a manual edit always wins.
+      // This is a state adjustment during render, not an effect.
+      if (enabled && format && prefillResponse) {
+        const key = hintsResponseKey(prefillResponse);
+        if (key !== prefillKey) {
+          setPrefillKey(key);
+          const seeded = seededAnswersFromResponse(format, prefillResponse);
+          if (Object.keys(seeded).length > 0) {
+            setAnswers(prev => mergeSeededAnswers(prev, seeded, handEditedFields));
+          }
+        }
+      }
+
+      const editField = useCallback((fieldId: WizardFieldId, value: AnswerValue) => {
+        setHandEditedFields(prev => {
+          if (prev.has(fieldId)) return prev;
+          return new Set([...prev, fieldId]);
+        });
+        setAnswers(prev => ({ ...prev, [fieldId]: value }));
+      }, []);
+
+      return { answers, editField };
+    }
+
+    export function mergeSeededAnswers(
+      existing: WizardAnswers,
+      seeded: WizardAnswers,
+      lockedFieldIds: ReadonlySet<WizardFieldId> = new Set(),
+    ): WizardAnswers {
+      const next = { ...existing };
+      for (const [fieldId, answer] of Object.entries(seeded)) {
+        const id = fieldId as WizardFieldId;
+        if (!lockedFieldIds.has(id) && !isFilled(next[id])) {
+          next[id] = answer;
+        }
+      }
+      return next;
+    }
+- id: C13-07
+  card: C13
+  expected: dirty
+  path: src/features/order-routing/model/useCourierSuggestions.ts
+  why: The hint response writes the courier selection, which the dispatcher changes right after opening, and the request is neither canceled nor reconciled with the edit (questions 1-3).
+  source: hook that sets the selection of list items from the response of a hints request when the screen opens
+  code: |
+    export function useCourierSuggestions(order: Order) {
+      const [selectedCouriers, setSelectedCouriers] = useState<string[]>([]);
+      const [loaded, setLoaded] = useState(false);
+
+      useEffect(() => {
+        setSelectedCouriers([]);
+        setLoaded(false);
+        suggestCouriers(order.id).then(list => {
+          setSelectedCouriers(list.map(courier => courier.id));
+          setLoaded(true);
+        });
+      }, [order.id]);
+
+      const toggle = useCallback((courierId: string) => {
+        setSelectedCouriers(prev =>
+          prev.includes(courierId)
+            ? prev.filter(id => id !== courierId)
+            : [...prev, courierId],
+        );
+      }, []);
+
+      return { selectedCouriers, toggle, loaded };
+    }
+
+    export function CourierPicker({ order }: { order: Order }) {
+      const { selectedCouriers, toggle, loaded } = useCourierSuggestions(order);
+      const couriers = useCouriersQuery(order.zoneId);
+
+      return (
+        <Stack>
+          {!loaded ? <Text size="xs">Looking for suitable couriers…</Text> : null}
+          {(couriers.data ?? []).map(courier => (
+            <Checkbox
+              key={courier.id}
+              label={courier.name}
+              checked={selectedCouriers.includes(courier.id)}
+              onChange={() => toggle(courier.id)}
+            />
+          ))}
+          <Button onClick={() => void assign(order.id, selectedCouriers)}>Assign</Button>
+        </Stack>
+      );
+    }
+- id: C13-08
+  card: C13
+  expected: clean
+  path: src/features/assignments/ui/ShipmentLinkPanel.tsx
+  why: The request response is written only into a displayed link that the user does not edit, and nothing is written into the user's choice.
+  source: assignment panel where the request response fills only the displayed link for copying
+  code: |
+    export function ShipmentLinkPanel({ shipment, active }: ShipmentLinkPanelProps) {
+      const [tab, setTab] = useState<PanelTab>("assign");
+      const [selectedGroups, setSelectedGroups] = useState<Set<string>>(() => new Set());
+      const [pickedCourierIds, setPickedCourierIds] = useState<string[]>([]);
+      const [trackingUrl, setTrackingUrl] = useState<string | null>(null);
+      const share = useShareShipmentMutation();
+
+      useEffect(() => {
+        if (!active) {
+          setTab("assign");
+          setSelectedGroups(new Set());
+          setPickedCourierIds([]);
+          setTrackingUrl(null);
+          return;
+        }
+
+        share.mutate(shipment.id, {
+          onSuccess: data => {
+            setTrackingUrl(buildTrackingUrl(data.tracking_hash));
+          },
+          onError: () => {
+            setTrackingUrl(null);
+          },
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [active, shipment.id]);
+
+      const plan = useMemo(
+        () => finalizePlan(selectedGroups, pickedCourierIds),
+        [selectedGroups, pickedCourierIds],
+      );
+
+      return (
+        <Tabs value={tab} onChange={value => setTab(value as PanelTab)}>
+          <Tabs.Panel value="assign">
+            <GroupPicker selected={selectedGroups} onChange={setSelectedGroups} />
+            <CourierPicker picked={pickedCourierIds} onChange={setPickedCourierIds} />
+            <Button disabled={!canSubmitPlan(plan)} onClick={() => void submitPlan(plan)}>
+              Assign
+            </Button>
+          </Tabs.Panel>
+          <Tabs.Panel value="share">
+            <CopyField value={trackingUrl ?? ""} readOnly />
+          </Tabs.Panel>
+        </Tabs>
+      );
+    }
+- id: C13-09
+  card: C13
+  expected: clean
+  path: src/widgets/shipment-builder/model/useServiceHints.ts
+  why: The server response is applied only to the settings that stayed at the default value, and what the user chose is not overwritten.
+  source: applying the request parse response to groups of settings with a check that the setting is not yet chosen
+  code: |
+    export function collectHintPatches(
+      selected: Record<ProfileKey, string>,
+      answered: readonly AnsweredItem[],
+    ): Array<{ key: ProfileKey; id: string }> {
+      const optionIdsByKey = new Map(
+        PROFILE_ORDER.map(key => [
+          key,
+          new Set(listProfileOptions(selected.deliveryType, key).map(option => option.id)),
+        ]),
+      );
+
+      const patches: Array<{ key: ProfileKey; id: string }> = [];
+      const seen = new Set<ProfileKey>();
+
+      for (const item of answered) {
+        if (!isProfileKey(item.question_id)) continue;
+        if (seen.has(item.question_id)) continue;
+        // The user's choice wins over the parse response.
+        if (selected[item.question_id] !== "default") continue;
+
+        const candidate = (item.value ?? "").trim();
+        const allowed = optionIdsByKey.get(item.question_id);
+        if (!candidate || !allowed?.has(candidate)) continue;
+
+        patches.push({ key: item.question_id, id: candidate });
+        seen.add(item.question_id);
+      }
+      return patches;
+    }
+
+    // In the hook, after the server response
+    const applyHints = (answered: readonly AnsweredItem[]) => {
+      const patches = collectHintPatches(selectedRef.current, answered);
+      for (const patch of patches) {
+        selectedRef.current = { ...selectedRef.current, [patch.key]: patch.id };
+        onPickProfileRef.current(patch.key, patch.id);
+      }
+    };
+- id: C13-10
+  card: C13
+  expected: dirty
+  path: src/widgets/order-builder/ui/OrderWizardStage.tsx
+  why: The wizard is open before the parse response, and the effect, when it arrives, lays the answers over the already entered values (questions 1-3).
+  source: wizard step mounted at once and receiving the parse result through a prop with an effect
+  code: |
+    export function OrderWizardStage({ extract }: { extract: UseOrderExtract }) {
+      return (
+        <section>
+          <ExtractBanner pending={extract.pending} />
+          <OrderWizard prefill={extract.lastResponse} />
+        </section>
+      );
+    }
+
+    function OrderWizard({ prefill }: { prefill: ExtractResponse | null }) {
+      const [answers, setAnswers] = useState<Record<string, string>>({});
+
+      useEffect(() => {
+        if (!prefill) return;
+        setAnswers(prev => ({ ...prev, ...answersFromResponse(prefill) }));
+      }, [prefill]);
+
+      const setAnswer = (fieldId: string, value: string) =>
+        setAnswers(prev => ({ ...prev, [fieldId]: value }));
+
+      return (
+        <Stack>
+          {WIZARD_FIELDS.map(field => (
+            <Select
+              key={field.id}
+              label={field.label}
+              data={field.options}
+              value={answers[field.id] ?? null}
+              onChange={value => setAnswer(field.id, value ?? "")}
+            />
+          ))}
+          <Button onClick={() => void submitOrder(answers)}>Place order</Button>
+        </Stack>
+      );
+    }
+- id: C13-11
+  card: C13
+  expected: clean
+  path: src/widgets/shipment-builder/model/useSavedProfiles.ts
+  why: The saved set is applied once on entry and only if the user has not yet chosen anything on the screen.
+  source: hook that restores a saved set of settings and does not overwrite a choice the user has already made
+  code: |
+    export function useSavedProfiles(userId: string | null, initialDeliveryType?: string) {
+      const [profileState, setProfileState] = useState<ProfileState>({
+        selected: { ...createDefaultSelection(), deliveryType: initialDeliveryType ?? "parcel" },
+        overrides: {},
+      });
+      const hydratedUserRef = useRef<string | null>(null);
+      const initialTypeRef = useRef(initialDeliveryType);
+
+      useEffect(() => {
+        if (!userId || hydratedUserRef.current === userId) return;
+        hydratedUserRef.current = userId;
+
+        const persistedType = readPersistedDeliveryType(userId);
+        const persistedProfiles = readPersistedProfiles(userId);
+        if (!persistedType && !persistedProfiles) return;
+
+        setProfileState(current => {
+          // The user has already chosen something on the screen: the saved value does not overwrite it.
+          if (Object.keys(current.overrides).length > 0) return current;
+
+          const deliveryType =
+            initialTypeRef.current ?? persistedType ?? persistedProfiles?.deliveryType ?? null;
+          if (!deliveryType) return current;
+          const profiles =
+            persistedProfiles && persistedProfiles.deliveryType === deliveryType
+              ? persistedProfiles
+              : null;
+
+          return {
+            selected: {
+              ...current.selected,
+              deliveryType,
+              speed: profiles?.speed ?? "default",
+              insurance: profiles?.insurance ?? "default",
+            },
+            overrides: { ...current.overrides, deliveryType: true },
+          };
+        });
+      }, [userId]);
+
+      return { profileState, setProfileState };
+    }
+- id: C13-12
+  card: C13
+  expected: dirty
+  path: src/pages/workspace/profile/ui/CourierProfileForm.tsx
+  why: The form is rewritten by every new response of the profile poll while the fields are available for editing, and there is no precedence order (questions 1-3).
+  source: profile form whose values are overwritten by an effect on every update of the request data
+  code: |
+    export function CourierProfileForm() {
+      const profileQuery = useQuery({
+        queryKey: ["courier-profile"],
+        queryFn: getCourierProfile,
+        refetchInterval: 15_000,
+      });
+      const updateMutation = useUpdateProfileMutation();
+
+      const form = useForm<ProfileFormValues>({
+        initialValues: { full_name: "", phone: "", vehicle: "" },
+      });
+      const { setValues, resetDirty } = form;
+
+      useEffect(() => {
+        if (!profileQuery.data) return;
+        const next = profileToFormValues(profileQuery.data);
+        setValues(next);
+        resetDirty(next);
+      }, [profileQuery.data, setValues, resetDirty]);
+
+      async function handleSave() {
+        const payload = buildProfilePatch(form.values, profileToFormValues(profileQuery.data));
+        if (Object.keys(payload).length === 0) return;
+        await updateMutation.mutateAsync(payload);
+      }
+
+      return (
+        <Stack>
+          <TextInput label="Name" {...form.getInputProps("full_name")} />
+          <TextInput label="Phone" {...form.getInputProps("phone")} />
+          <TextInput label="Vehicle" {...form.getInputProps("vehicle")} />
+          <Button
+            onClick={() => void handleSave()}
+            disabled={!form.isDirty() || updateMutation.isPending}
+          >
+            Save
+          </Button>
+        </Stack>
+      );
+    }
+- id: C13-13
+  card: C13
+  expected: dirty
+  path: src/features/pickup/ui/PickupAddressForm.tsx
+  why: The geocoder response in onSuccess writes the city, index and district into fields that the courier edits, and the fields are not locked and there is no precedence rule (questions 1-3).
+  source: pickup address form where the request response by street fills the other fields through setValue, by form
+  code: |
+    export function PickupAddressForm({ defaultValues, onSubmit }: PickupAddressFormProps) {
+      const { register, setValue, handleSubmit } = useForm<PickupAddress>({ defaultValues });
+      const geocode = useGeocodeAddressMutation();
+
+      // The geocoder picks the city, postal code and district by the entered street.
+      const handleStreetBlur = (street: string) => {
+        if (!street.trim()) return;
+        geocode.mutate(street, {
+          onSuccess: found => {
+            setValue("city", found.city);
+            setValue("postalCode", found.postal_code);
+            setValue("district", found.district);
+          },
+        });
+      };
+
+      return (
+        <form onSubmit={handleSubmit(onSubmit)}>
+          <Stack gap="sm">
+            <TextInput
+              label="Street, building"
+              {...register("street", {
+                required: true,
+                onBlur: e => handleStreetBlur(e.target.value),
+              })}
+            />
+            <TextInput label="City" {...register("city", { required: true })} />
+            <TextInput label="Postal code" {...register("postalCode")} />
+            <TextInput label="District" {...register("district")} />
+            <Button type="submit" loading={geocode.isPending}>
+              Save address
+            </Button>
+          </Stack>
+        </form>
+      );
+    }
+- id: C13-14
+  card: C13
+  expected: dirty
+  path: src/features/routes/ui/StopPicker.tsx
+  why: The hint from the server on opening replaces the set of checked stops, while the checkboxes are available from the first second and the request response is not reconciled with the courier's marks (questions 1-3).
+  source: route stop selection that is replaced by the hint request response on mount, by form
+  code: |
+    export function StopPicker({ routeId, onConfirm }: StopPickerProps) {
+      const { data: stops = [] } = useRouteStopsQuery(routeId);
+      const [selected, setSelected] = useState<Set<string>>(new Set());
+      const suggest = useSuggestStopsMutation(routeId);
+
+      // The hint picks the stops that are more convenient to visit together.
+      useEffect(() => {
+        suggest.mutate(undefined, {
+          onSuccess: res => setSelected(new Set(res.stop_ids)),
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [routeId]);
+
+      const toggle = (id: string) =>
+        setSelected(prev => {
+          const next = new Set(prev);
+          if (next.has(id)) next.delete(id);
+          else next.add(id);
+          return next;
+        });
+
+      return (
+        <Stack>
+          {stops.map(stop => (
+            <Checkbox
+              key={stop.id}
+              label={stop.address}
+              checked={selected.has(stop.id)}
+              onChange={() => toggle(stop.id)}
+            />
+          ))}
+          <Button disabled={selected.size === 0} onClick={() => onConfirm([...selected])}>
+            Confirm stops
+          </Button>
+        </Stack>
+      );
+    }
+- id: C13-15
+  card: C13
+  expected: dirty
+  path: src/features/parcels/ui/ParcelFilters.tsx
+  why: The saved set of filters that came from the server overwrites in an effect the statuses, carrier and period that the dispatcher has already set, and there is no precedence order (questions 1-3).
+  source: filter panel into which an effect writes the saved set on every update of the request data, by form
+  code: |
+    export function ParcelFilters({ onChange }: { onChange: (filters: ParcelFilterValue) => void }) {
+      const presetQuery = useSavedFilterPresetQuery();
+      const [statuses, setStatuses] = useState<ParcelStatus[]>([]);
+      const [carrierId, setCarrierId] = useState<string | null>(null);
+      const [period, setPeriod] = useState<[Date | null, Date | null]>([null, null]);
+
+      // The filter set is stored on the server separately for each dispatcher.
+      useEffect(() => {
+        const preset = presetQuery.data;
+        if (!preset) return;
+        setStatuses(preset.statuses);
+        setCarrierId(preset.carrier_id);
+        setPeriod([parseDate(preset.from), parseDate(preset.to)]);
+      }, [presetQuery.data]);
+
+      useEffect(() => {
+        onChange({ statuses, carrierId, period });
+      }, [statuses, carrierId, period, onChange]);
+
+      return (
+        <Group>
+          <Chip.Group multiple value={statuses} onChange={v => setStatuses(v as ParcelStatus[])}>
+            {PARCEL_STATUS_OPTIONS.map(option => (
+              <Chip key={option.value} value={option.value}>
+                {option.label}
+              </Chip>
+            ))}
+          </Chip.Group>
+          <CarrierSelect value={carrierId} onChange={setCarrierId} />
+          <DatePickerInput type="range" value={period} onChange={setPeriod} />
+        </Group>
+      );
+    }
+- id: C13-16
+  card: C13
+  expected: dirty
+  path: src/features/orders/ui/RepeatOrderDialog.tsx
+  why: When the previous order arrives, an effect writes the rows, the comment and the slot into dialog fields that are open for input, and there is no rule about who wins (questions 1-3).
+  source: order repeat dialog into which an effect substitutes the data of the previous order when it arrives, by form
+  code: |
+    export function RepeatOrderDialog({ opened, orderId, onClose, onCreate }: RepeatOrderDialogProps) {
+      const { data: previous } = usePreviousOrderQuery(orderId, opened);
+      const [lines, setLines] = useState<OrderLine[]>([]);
+      const [comment, setComment] = useState("");
+      const [slot, setSlot] = useState<string | null>(null);
+
+      // We take the rows and the slot from the previous order so as not to enter them again.
+      useEffect(() => {
+        if (!opened || !previous) return;
+        setLines(previous.lines);
+        setComment(previous.comment ?? "");
+        setSlot(previous.delivery_slot);
+      }, [opened, previous]);
+
+      const submit = () => {
+        onCreate({ lines, comment: comment.trim() || undefined, slot });
+        onClose();
+      };
+
+      return (
+        <Modal opened={opened} onClose={onClose} title="Repeat order">
+          <OrderLinesEditor lines={lines} onChange={setLines} />
+          <Textarea
+            label="Comment"
+            value={comment}
+            onChange={e => setComment(e.currentTarget.value)}
+          />
+          <SlotSelect value={slot} onChange={setSlot} />
+          <Button mt="md" onClick={submit} disabled={lines.length === 0}>
+            Create order
+          </Button>
+        </Modal>
+      );
+    }
+- id: C13-17
+  card: C13
+  expected: dirty
+  path: src/features/pallets/ui/PalletSizeFields.tsx
+  why: The then chain after the product card request writes the weight and dimensions into fields that the storekeeper enters himself, and the cancellation in the effect works only when the article changes (questions 1-3).
+  source: pallet fields filled by the product card request response through then, by form
+  code: |
+    export function PalletSizeFields({ sku }: { sku: string }) {
+      const [weightKg, setWeightKg] = useState("");
+      const [lengthCm, setLengthCm] = useState("");
+      const [widthCm, setWidthCm] = useState("");
+      const [heightCm, setHeightCm] = useState("");
+
+      // The pallet dimensions are taken from the product reference.
+      useEffect(() => {
+        if (sku.length < 6) return;
+        let cancelled = false;
+        // We postpone the request until the article is entered completely.
+        const timer = setTimeout(() => {
+          fetchSkuCard(sku)
+            .then(card => {
+              if (cancelled) return;
+              setWeightKg(String(card.unit_weight_kg));
+              setLengthCm(String(card.length_cm));
+              setWidthCm(String(card.width_cm));
+              setHeightCm(String(card.height_cm));
+            })
+            .catch(() => {
+              if (!cancelled) notifications.show({ message: "Product card not found" });
+            });
+        }, 400);
+        return () => {
+          cancelled = true;
+          clearTimeout(timer);
+        };
+      }, [sku]);
+
+      return (
+        <SimpleGrid cols={2}>
+          <NumberInput label="Weight, kg" value={weightKg} onChange={v => setWeightKg(String(v))} />
+          <NumberInput label="Length, cm" value={lengthCm} onChange={v => setLengthCm(String(v))} />
+          <NumberInput label="Width, cm" value={widthCm} onChange={v => setWidthCm(String(v))} />
+          <NumberInput label="Height, cm" value={heightCm} onChange={v => setHeightCm(String(v))} />
+        </SimpleGrid>
+      );
+    }
+- id: C13-18
+  card: C13
+  expected: clean
+  path: src/features/quotes/ui/ShippingQuoteForm.tsx
+  why: The calculation response is written only into the cost field with readOnly, which the user does not edit, and the response does not touch the weight and the zone.
+  source: delivery calculation form where the request response goes only into a non-editable cost field, by form
+  code: |
+    export function ShippingQuoteForm({ parcel }: { parcel: ParcelSummary }) {
+      const [weightKg, setWeightKg] = useState(String(parcel.weight_kg));
+      const [zone, setZone] = useState<string | null>(parcel.zone);
+      const [quote, setQuote] = useState("");
+      const quoteMutation = useQuoteMutation();
+
+      // The cost is calculated by the server from the weight and the delivery zone.
+      const requestQuote = () =>
+        quoteMutation.mutate(
+          { weightKg: Number(weightKg), zone },
+          {
+            onSuccess: res => setQuote(formatMoney(res.total, res.currency)),
+            onError: () => setQuote(""),
+          },
+        );
+
+      return (
+        <Stack>
+          <NumberInput label="Weight, kg" value={weightKg} onChange={v => setWeightKg(String(v))} />
+          <ZoneSelect value={zone} onChange={setZone} />
+          <Button onClick={requestQuote} loading={quoteMutation.isPending} disabled={!zone}>
+            Calculate
+          </Button>
+          <TextInput label="Cost" value={quote} readOnly />
+        </Stack>
+      );
+    }
+- id: C13-19
+  card: C13
+  expected: clean
+  path: src/features/dispatch/ui/DispatchSettingsForm.tsx
+  why: The values from the server serve as a base, and what the user changed lies in a separate edited object and stands last in the merge, that is, the user's choice wins over the response.
+  source: settings form where the form values are assembled from the defaults, the server response and the user's edits in that order, by form
+  code: |
+    const DEFAULT_SETTINGS: DispatchSettings = {
+      maxStopsPerRoute: 25,
+      autoAssign: true,
+      notifyBeforeMin: 15,
+    };
+
+    export function DispatchSettingsForm() {
+      const settingsQuery = useDispatchSettingsQuery();
+      const saveMutation = useSaveDispatchSettingsMutation();
+      const [edited, setEdited] = useState<Partial<DispatchSettings>>({});
+
+      // The user's edit overrides the server response, even if it arrived later.
+      const values: DispatchSettings = {
+        ...DEFAULT_SETTINGS,
+        ...settingsQuery.data,
+        ...edited,
+      };
+
+      const update = <K extends keyof DispatchSettings>(key: K, value: DispatchSettings[K]) =>
+        setEdited(prev => ({ ...prev, [key]: value }));
+
+      return (
+        <Stack>
+          <NumberInput
+            label="Stops per route"
+            value={values.maxStopsPerRoute}
+            onChange={v => update("maxStopsPerRoute", Number(v))}
+          />
+          <Switch
+            label="Assign couriers automatically"
+            checked={values.autoAssign}
+            onChange={e => update("autoAssign", e.currentTarget.checked)}
+          />
+          <Button
+            loading={saveMutation.isPending}
+            onClick={() => saveMutation.mutate(values, { onSuccess: () => setEdited({}) })}
+          >
+            Save
+          </Button>
+        </Stack>
+      );
+    }
+- id: C13-20
+  card: C13
+  expected: clean
+  path: src/features/couriers/ui/CourierDefaultsForm.tsx
+  why: While the request of default values is running, the fields are locked through disabled, and after the response the values are applied once, that is, the fields are locked until the response.
+  source: form whose fields are locked until the response with the defaults arrives and are filled after it, by form
+  code: |
+    export function CourierDefaultsForm({ courierId }: { courierId: string }) {
+      const defaultsQuery = useCourierDefaultsQuery(courierId);
+      const [vehicle, setVehicle] = useState<string | null>(null);
+      const [shiftStart, setShiftStart] = useState("");
+      const [zoneIds, setZoneIds] = useState<string[]>([]);
+      const appliedRef = useRef(false);
+
+      useEffect(() => {
+        const defaults = defaultsQuery.data;
+        if (!defaults || appliedRef.current) return;
+        appliedRef.current = true;
+        setVehicle(defaults.vehicle_type);
+        setShiftStart(defaults.shift_start);
+        setZoneIds(defaults.zone_ids);
+      }, [defaultsQuery.data]);
+
+      const locked = defaultsQuery.isPending;
+
+      return (
+        <Stack>
+          <Select
+            label="Vehicle"
+            data={VEHICLE_OPTIONS}
+            value={vehicle}
+            onChange={setVehicle}
+            disabled={locked}
+          />
+          <TimeInput
+            label="Shift start"
+            value={shiftStart}
+            onChange={e => setShiftStart(e.currentTarget.value)}
+            disabled={locked}
+          />
+          <MultiSelect label="Zones" data={ZONE_OPTIONS} value={zoneIds} onChange={setZoneIds} disabled={locked} />
+        </Stack>
+      );
+    }
+- id: C13-21
+  card: C13
+  expected: clean
+  path: src/features/drafts/model/useAutosave.ts
+  why: The autosave response writes only the revision number and the save time for display, and does not touch the form fields that the user enters.
+  source: form autosave hook where the request response is written into the revision and the save time label, by form
+  code: |
+    export function useAutosave(draftId: string, values: DraftValues) {
+      const [revision, setRevision] = useState<number | null>(null);
+      const [savedAt, setSavedAt] = useState<Date | null>(null);
+      const saveMutation = useSaveDraftMutation(draftId);
+
+      const debounced = useDebouncedValue(values, 1_200);
+
+      useEffect(() => {
+        saveMutation.mutate(
+          { values: debounced, baseRevision: revision },
+          {
+            onSuccess: res => {
+              setRevision(res.revision);
+              setSavedAt(new Date(res.saved_at));
+            },
+          },
+        );
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [debounced]);
+
+      return {
+        savedAt,
+        isSaving: saveMutation.isPending,
+        hasError: saveMutation.isError,
+      };
+    }
+- id: C13-22
+  card: C13
+  expected: clean
+  path: src/features/slots/ui/SlotBookingForm.tsx
+  why: The hint response is applied only to the keys the user has not touched yet, that is, what they changed is not overwritten and the precedence rule exists.
+  source: slot booking form where the server hint is applied only to fields without user edits, by form
+  code: |
+    const SUGGESTED_KEYS = ["dock", "timeFrom", "timeTo"] as const;
+
+    export function SlotBookingForm({ warehouseId }: { warehouseId: string }) {
+      const suggestion = useSlotSuggestionQuery(warehouseId).data;
+      const [form, setForm] = useState<SlotForm>(emptySlotForm);
+      const touchedRef = useRef(new Set<keyof SlotForm>());
+
+      const setField = <K extends keyof SlotForm>(key: K, value: SlotForm[K]) => {
+        touchedRef.current.add(key);
+        setForm(prev => ({ ...prev, [key]: value }));
+      };
+
+      // The hint offers a free gate and the nearest time.
+      useEffect(() => {
+        if (!suggestion) return;
+        setForm(prev => {
+          const next = { ...prev };
+          for (const key of SUGGESTED_KEYS) {
+            if (!touchedRef.current.has(key)) next[key] = suggestion[key];
+          }
+          return next;
+        });
+      }, [suggestion]);
+
+      return (
+        <Stack>
+          <DockSelect value={form.dock} onChange={v => setField("dock", v)} />
+          <TimeInput value={form.timeFrom} onChange={e => setField("timeFrom", e.currentTarget.value)} />
+          <TimeInput value={form.timeTo} onChange={e => setField("timeTo", e.currentTarget.value)} />
+        </Stack>
+      );
+    }

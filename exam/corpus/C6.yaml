@@ -1,0 +1,823 @@
+# C6 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C6-01
+  card: C6
+  expected: dirty
+  path: app/api/depots.py
+  why: A name conflict is determined by a substring in the database error text, and the result decides whether the handler returns 409 or rethrows the failure.
+  source: A uniqueness violation recognition function and a record creation handler.
+  code: |
+    def _depot_name_conflict_constraint(exc: IntegrityError) -> bool:
+        original = exc.orig
+        constraint_name = getattr(getattr(original, "diag", None), "constraint_name", None)
+        if constraint_name is None:
+            constraint_name = getattr(
+                getattr(original, "__cause__", None), "constraint_name", None
+            )
+        if constraint_name == "uq_depots_active_root_name":
+            return True
+        return (
+            "UNIQUE constraint failed: depots.region_id, "
+            "depots.depot_type, depots.normalized_name"
+        ) in str(exc.orig)
+
+
+    @router.post("")
+    async def create_depot(payload: DepotCreate, db: AsyncSession = Depends(get_db)):
+        depot = Depot(region_id=payload.region_id, name=payload.name)
+        db.add(depot)
+        try:
+            await db.commit()
+        except IntegrityError as exc:
+            await db.rollback()
+            if _depot_name_conflict_constraint(exc):
+                raise HTTPException(status_code=409, detail="depot_name_taken") from exc
+            raise
+        return depot
+
+- id: C6-02
+  card: C6
+  expected: clean
+  path: app/services/carrier_booking.py
+  why: The substring check in the error text only chooses a string for the log, and the behavior after it is the same, so this is a log write.
+  source: External service call failure handler that parses the error text only to write to the journal.
+  code: |
+    class CarrierBooking:
+        def __init__(self, client, log, clock) -> None:
+            self.client = client
+            self.log = log
+            self.clock = clock
+
+        async def push_to_carrier(self, shipment: Shipment, payload: dict) -> dict:
+            started = self.clock.monotonic()
+            try:
+                return await self.client.post(
+                    "/bookings", json=payload, timeout=CARRIER_TIMEOUT_S
+                )
+            except CarrierError as exc:
+                elapsed = self.clock.monotonic() - started
+                if "timeout" in str(exc).lower():
+                    self.log.warning(
+                        "carrier_booking_slow shipment_id=%s elapsed=%.1f",
+                        shipment.id,
+                        elapsed,
+                    )
+                else:
+                    self.log.error(
+                        "carrier_booking_failed shipment_id=%s error=%s", shipment.id, exc
+                    )
+                raise
+
+        async def push_many(self, shipments: list[Shipment]) -> list[dict]:
+            return [await self.push_to_carrier(s, build_booking(s)) for s in shipments]
+
+- id: C6-03
+  card: C6
+  expected: dirty
+  path: app/services/label_failure_codes.py
+  why: The refusal code is restored from the message by a string prefix and by cutting off the tail, not read from a field or a list.
+  source: Function that restores a refusal code from an old text message of a record.
+  code: |
+    LABEL_FAILURE_FALLBACK = "label_generation_failed"
+
+
+    def _batch_failure_code(batch: LabelBatch | None) -> str | None:
+        """Recover the normalized code from a legacy batch message.
+
+        The start failure is stored as a bare name, with no prose around it.
+        Parsing only the `Label service failed:` prefix would return `None` for
+        it, and the operator would read the generic text instead of the reason.
+        """
+
+        if batch is None:
+            return None
+        message = str(batch.error_message or "").strip()
+        if message in LABEL_FAILURE_CODES:
+            return message
+        prefix = "Label service failed:"
+        if not message.startswith(prefix):
+            return None
+        raw_code = message[len(prefix) :].split("(", 1)[0].strip()
+        if not raw_code:
+            return LABEL_FAILURE_FALLBACK
+        return _service_failure_code({"public_fault_code": raw_code}) or (
+            LABEL_FAILURE_FALLBACK
+        )
+
+- id: C6-04
+  card: C6
+  expected: clean
+  path: app/services/carrier_call.py
+  why: Every exception is reduced to a member of the code list by its class; the message text is not read anywhere.
+  source: External service call method where the exception class chooses the refusal code from the list.
+  code: |
+    class CarrierCall:
+        def __init__(self, client, failures) -> None:
+            self.client = client
+            self.failures = failures
+
+        async def send(self, request: CarrierRequest) -> CarrierResponse:
+            try:
+                response = await self.client.send(request)
+            except CarrierTimeout:
+                code = FailureCode.CARRIER_TIMEOUT
+            except CarrierRateLimited:
+                code = FailureCode.CARRIER_RATE_LIMITED
+            except CarrierAuthError:
+                code = FailureCode.CARRIER_AUTH_ERROR
+            except CarrierPayloadError:
+                code = FailureCode.CARRIER_PAYLOAD_INVALID
+            else:
+                return response
+            self.failures.record(request.shipment_id, code)
+            raise CarrierCallFailed(code)
+
+        def retryable(self, code: FailureCode) -> bool:
+            return code in RETRYABLE_CODES
+
+- id: C6-05
+  card: C6
+  expected: dirty
+  path: src/entities/depot/lib/depotErrors.ts
+  why: The 409 refusal parsing decides by a substring in the detail text, and the result decides which message the user sees.
+  source: Frontend function that recognizes the type of a response refusal by the detail text.
+  code: |
+    import axios from "axios";
+
+    import { readFault, readFaultMessage } from "@/shared/api/lib/apiError";
+
+    type Translate = (key: string) => string;
+
+    export function isDepotNameConflict(error: unknown): boolean {
+      if (!axios.isAxiosError(error) || error.response?.status !== 409) return false;
+      const url = String(error.config?.url ?? "");
+      if (!url.includes("/depots")) return false;
+      const detail = readFault(error);
+      if (typeof detail === "string") {
+        return detail.toLowerCase().includes("depot");
+      }
+      return true;
+    }
+
+    export function depotCreateErrorMessage(error: unknown, t: Translate): string {
+      if (isDepotNameConflict(error)) {
+        return t("depots.errors.nameTaken");
+      }
+      return readFaultMessage(error, t("depots.errors.generic"));
+    }
+
+- id: C6-06
+  card: C6
+  expected: clean
+  path: tests/test_depot_conflicts.py
+  why: The test checks the response message text, and a text check in a test does not count.
+  source: Handler test that compares the code and the text of the refusal in the response body.
+  code: |
+    import pytest
+
+
+    @pytest.mark.asyncio
+    async def test_duplicate_depot_name_is_rejected(client, admin_headers, depot):
+        response = await client.post(
+            "/depots",
+            json={"region_id": str(depot.region_id), "name": depot.name},
+            headers=admin_headers,
+        )
+        assert response.status_code == 409
+        body = response.json()
+        assert body["detail"]["code"] == "depot_name_taken"
+        assert "already exists" in body["detail"]["message"]
+
+
+    @pytest.mark.asyncio
+    async def test_unknown_region_is_rejected(client, admin_headers):
+        response = await client.post(
+            "/depots",
+            json={"region_id": "00000000-0000-0000-0000-000000000000", "name": "Warehouse"},
+            headers=admin_headers,
+        )
+        assert response.status_code == 404
+        assert "region not found" in response.json()["detail"]["message"].lower()
+
+- id: C6-07
+  card: C6
+  expected: dirty
+  path: app/services/label_job_worker.py
+  why: The last rung of the ladder chooses the refusal code by a substring in the exception text; the log write next to it does not cancel the fact that the choice is made by text.
+  source: Function that determines a task refusal code, where after the exception type comes a message substring parse.
+  code: |
+    _PUBLIC_FAULT_CODE_BY_TYPE: tuple[tuple[type[BaseException], str], ...] = (
+        (PoolTimeoutError, "database_connection_pool_timeout"),
+        (JobLeaseLostError, "label_job_lease_lost"),
+        (TimeoutError, "label_timeout"),
+    )
+
+    _SAFE_ERROR_CODE_BY_MESSAGE: tuple[tuple[str, str], ...] = (
+        ("shipment_not_found", "shipment_not_found"),
+        ("unsupported_job_type", "unsupported_job_type"),
+        ("lease_lost", "label_job_lease_lost"),
+        ("timeout", "label_timeout"),
+    )
+
+
+    def _public_fault_code(exc: Exception) -> str:
+        typed_code = str(getattr(exc, "public_fault_code", "") or "").strip().lower()
+        if re.fullmatch(r"[a-z0-9_.:-]{1,160}", typed_code):
+            return typed_code
+        for error_type, code in _PUBLIC_FAULT_CODE_BY_TYPE:
+            if isinstance(exc, error_type):
+                return code
+        message = str(exc).strip().lower()
+        for needle, code in _SAFE_ERROR_CODE_BY_MESSAGE:
+            if needle in message:
+                log.event(
+                    "label_job_safe_error_code_guessed",
+                    resolved_code=code,
+                    source="message_substring",
+                )
+                return code
+        return "label_job_failed"
+
+- id: C6-08
+  card: C6
+  expected: clean
+  path: src/entities/courier/lib/courierNotifyFeedback.ts
+  why: The branches are chosen by the code field from the structured detail and compared with known codes; the message text is not parsed.
+  source: Frontend function that shows known repeat-submission refusals, choosing the text by the code from detail.
+  code: |
+    import { notifications } from "@/shared/lib/notifications";
+
+    import { readFault, readFaultCode } from "@/shared/api/lib/apiError";
+
+    type Translate = (key: string, options?: Record<string, unknown>) => string;
+
+    export function readRetryDelaySec(error: unknown): number | undefined {
+      const detail = readFault(error);
+      if (detail == null || typeof detail === "string") return undefined;
+      return typeof detail.retry_after_sec === "number"
+        ? detail.retry_after_sec
+        : undefined;
+    }
+
+    export function tryNotifyCourierResendError(
+      error: unknown,
+      t: Translate,
+    ): boolean {
+      const code = readFaultCode(error);
+      if (code === "contact_already_verified") {
+        notifications.show({
+          title: t("couriers.notifications.alreadyVerifiedTitle"),
+          message: t("couriers.notifications.alreadyVerifiedMessage"),
+          color: "orange",
+        });
+        return true;
+      }
+      if (code === "resend_throttled") {
+        notifications.show({
+          title: t("couriers.notifications.rateLimitedTitle"),
+          message: t("couriers.notifications.rateLimitedMessage", {
+            seconds: readRetryDelaySec(error) ?? "—",
+          }),
+          color: "orange",
+        });
+        return true;
+      }
+      return false;
+    }
+
+- id: C6-09
+  card: C6
+  expected: dirty
+  path: src/shared/api/model/errorMessage.ts
+  why: The choice of the user message depends on whether a string with the code occurs in arbitrary detail text, that is, on text, not on the code.
+  source: Shared frontend function that builds a request error message from several sources.
+  code: |
+    import axios from "axios";
+
+    import { readFaultMessage } from "@/shared/api/lib/apiError";
+
+    export function getFaultMessage(
+      error: unknown,
+      fallback: string,
+      options?: { labelInvalidJsonMessage?: string },
+    ): string {
+      if (axios.isAxiosError(error)) {
+        const fromDetail = readFaultMessage(error, "");
+        if (
+          options?.labelInvalidJsonMessage &&
+          fromDetail.includes("label_generation_invalid_json")
+        ) {
+          return options.labelInvalidJsonMessage;
+        }
+        if (fromDetail.trim().length > 0) {
+          return fromDetail;
+        }
+        if (
+          typeof error.response?.data === "string" &&
+          error.response.data.trim().length > 0
+        ) {
+          return error.response.data;
+        }
+        if (error.message.trim().length > 0) {
+          return error.message;
+        }
+      }
+      if (error instanceof Error && error.message.trim().length > 0) {
+        return error.message;
+      }
+      return fallback;
+    }
+
+- id: C6-10
+  card: C6
+  expected: clean
+  path: app/services/depot_names.py
+  why: The startswith search refers to the Unicode category of a character when checking user input and does not read error text or a refusal code.
+  source: Check of user text for control characters in the service layer.
+  code: |
+    import unicodedata
+
+    MAX_OTHER_NAME_LENGTH = 120
+
+
+    def _public_other_text(value: str | None) -> str | None:
+        """Return bounded custom depot data, rejecting invisible control characters."""
+
+        if value is None:
+            return None
+        text = str(value)
+        if any(unicodedata.category(char).startswith("C") for char in text):
+            return None
+        return text if text.strip() else None
+
+
+    def normalize_other_name(value: str | None) -> str | None:
+        text = _public_other_text(value)
+        if text is None:
+            return None
+        text = " ".join(text.split())
+        if len(text) > MAX_OTHER_NAME_LENGTH:
+            raise DepotNameInvalid("depot_name_too_long")
+        return text
+
+- id: C6-11
+  card: C6
+  expected: dirty
+  path: app/services/label_job_status.py
+  why: Among ordinary response parsing, the task refusal code is changed to another code by the start of a string, that is, the decision is made by the code prefix.
+  source: Method that reads a task status, where one of the branches chooses the refusal code by a string prefix.
+  code: |
+    async def get_label_job_status(
+        self,
+        batch_id: int,
+        user_id: uuid.UUID,
+        *,
+        job_id: int | None = None,
+    ) -> LabelJobStatusResponse:
+        await self._get_owned_batch(batch_id, user_id)
+        job = (
+            await self.job_repo.get_by_id_for_batch(job_id, batch_id)
+            if job_id is not None
+            else await self.job_repo.latest_for_batch(batch_id)
+        )
+        if job is None:
+            return LabelJobStatusResponse(status="not_started")
+        selected_printer, manifest = self._extract_printer_admission(
+            getattr(job, "stop_plan_json", None)
+        )
+        if selected_printer is None:
+            selected_printer = self._resolved_printer_from_job(job)
+        job_public_fault_code = str(getattr(job, "public_fault_code", "") or "").strip()
+        if job_public_fault_code.lower().startswith("label_render_"):
+            job_public_fault_code = render_safe_error_code(job_public_fault_code) or (
+                "label_failed"
+            )
+        try:
+            job_type = JobType.from_wire(job.job_type)
+        except (TypeError, ValueError) as exc:
+            raise Refusal("unsupported_job_type", kind="internal") from exc
+        artifacts = await self.get_artifact_manifest(int(job.id), root_job=job)
+        return LabelJobStatusResponse(
+            status=job.status,
+            job_type=job_type,
+            public_fault_code=job_public_fault_code or None,
+            printer=selected_printer,
+            artifacts=artifacts,
+            manifest=manifest,
+        )
+
+- id: C6-12
+  card: C6
+  expected: clean
+  path: src/shared/lib/screenState.ts
+  why: The includes method checks whether a value is in an array of screen states and reads neither the error text nor the refusal code.
+  source: Frontend functions that reduce the states of several requests to a screen state.
+  code: |
+    export type ScreenState = "loading" | "error" | "empty" | "ready";
+
+    /** What the screen has from the main request; `isEmpty` means there is no data by the meaning of the screen. */
+    export type QueryViewInput = {
+      status: "pending" | "error" | "success";
+      isEmpty?: boolean;
+    };
+
+    /**
+     * `data-state` of the screen from the main request. A refresh error on top of already
+     * loaded data does not blank the screen: in react-query in this case
+     * `status === "success"` remains while the data exists.
+     */
+    export function queryViewState(query: QueryViewInput): ScreenState {
+      if (query.status === "pending") return "loading";
+      if (query.status === "error") return "error";
+      return query.isEmpty ? "empty" : "ready";
+    }
+
+    /**
+     * Screen state from several main requests: any error makes the screen
+     * `error`, otherwise any loading makes it `loading`, otherwise it is empty only when all are empty.
+     */
+    export function mergeViewStates(states: readonly ScreenState[]): ScreenState {
+      if (states.includes("error")) return "error";
+      if (states.includes("loading")) return "loading";
+      if (states.length > 0 && states.every(state => state === "empty")) return "empty";
+      return "ready";
+    }
+
+- id: C6-13
+  card: C6
+  expected: dirty
+  path: app/services/plan_validation.py
+  why: The safe refusal code is chosen by the first line of the exception text and by the start of that line, that is, by the message text.
+  source: Document check function that turns any validator exception into a refusal code by its message text.
+  code: |
+    def validate_delivery_plan(payload: Any) -> DeliveryPlan:
+        supplied_hash = (
+            str(payload.get("plan_hash") or "") if isinstance(payload, Mapping) else ""
+        )
+        parse_payload = dict(payload) if isinstance(payload, Mapping) else payload
+        if isinstance(parse_payload, dict):
+            parse_payload["plan_hash"] = ""
+        try:
+            plan = validate_contract(DeliveryPlan, parse_payload)
+        except Exception as exc:
+            code = str(exc).split("\n", 1)[0].strip() or "delivery_plan_schema_invalid"
+            safe_code = (
+                code if code.startswith("delivery_") else "delivery_plan_schema_invalid"
+            )
+            raise DeliveryPlanValidationError(safe_code) from None
+        expected = delivery_plan_hash(plan)
+        if supplied_hash != expected:
+            raise DeliveryPlanValidationError(
+                "delivery_plan_hash_mismatch", schema_path="plan_hash"
+            )
+        return plan.model_copy(update={"plan_hash": supplied_hash})
+
+- id: C6-14
+  card: C6
+  expected: clean
+  path: app/services/carrier_failures.py
+  why: The refusal code is reduced to a list member by the code or by the exception itself, and the check is by membership in a set, not by message text.
+  source: Check function that decides whether a refusal belongs to the class of hitting the ceiling, by the code or by an attribute of the exception.
+  code: |
+    CAPACITY_CEILING_FAILURES = frozenset(
+        {
+            FailureCode.OUTPUT_TOKEN_LIMIT,
+            FailureCode.OUTPUT_TRUNCATED_BY_PROVIDER,
+        }
+    )
+
+
+    def is_capacity_ceiling_failure(value: object) -> bool:
+        """Hitting the response size ceiling - by the refusal code or by the exception itself."""
+
+        code = value
+        if not isinstance(code, (FailureCode, str)):
+            code = getattr(value, "failure_code", None) or getattr(
+                value, "public_fault_code", None
+            )
+        try:
+            member = FailureCode(code)
+        except ValueError:
+            return False
+        return member in CAPACITY_CEILING_FAILURES
+
+
+    def retry_allowed(value: object, attempts: int) -> bool:
+        if is_capacity_ceiling_failure(value):
+            return False
+        return attempts < MAX_RETRY_ATTEMPTS
+- id: C6-15
+  card: C6
+  expected: dirty
+  path: app/integrations/carrier_booking.py
+  why: The decision to retry or give up is made by a substring in the carrier exception text; the exception class and the code are not read.
+  source: Carrier booking retry loop where the continuation is chosen by the error text. By form.
+  code: |
+    import asyncio
+    import logging
+
+    from app.integrations.carrier import CarrierClient, CarrierError
+
+    log = logging.getLogger(__name__)
+
+    # pauses between attempts, seconds
+    # the carrier accepts a limited number of bookings per minute
+    RETRY_PAUSE_S = (1, 4, 15)
+
+
+    async def book_with_retry(client: CarrierClient, payload: dict) -> dict:
+        last: CarrierError | None = None
+        for pause in (0, *RETRY_PAUSE_S):
+            if pause:
+                await asyncio.sleep(pause)
+            try:
+                return await client.create_booking(payload)
+            except CarrierError as exc:
+                last = exc
+                text = str(exc).lower()
+                if "rate limit" in text or "too many requests" in text:
+                    continue
+                if "connection reset" in text:
+                    continue
+                raise
+        assert last is not None
+        log.warning("carrier_booking_gave_up shipment=%s", payload.get("shipment_id"))
+        raise last
+
+- id: C6-16
+  card: C6
+  expected: clean
+  path: src/shared/lib/reportUploadFailure.ts
+  why: A substring in the error text chooses only the label of a log record; the function returns nothing and the application behavior does not depend on it.
+  source: Function that writes a loading failure to the log with a failure kind label. By form.
+  code: |
+    import { logger } from "@/shared/lib/logger";
+
+    type UploadContext = {
+      waybillId: string;
+      attempt: number;
+    };
+
+    /** Record of a waybill loading failure. */
+    export function reportUploadFailure(error: unknown, context: UploadContext): void {
+      const message = error instanceof Error ? error.message : String(error);
+      const kind = message.includes("Network Error") ? "network" : "other";
+      logger.warn("waybill_upload_failed", {
+        waybillId: context.waybillId,
+        attempt: context.attempt,
+        kind,
+        message,
+      });
+    }
+
+    export function reportUploadSuccess(context: UploadContext, sizeBytes: number): void {
+      logger.info("waybill_upload_ok", {
+        waybillId: context.waybillId,
+        attempt: context.attempt,
+        sizeBytes,
+      });
+    }
+
+- id: C6-17
+  card: C6
+  expected: dirty
+  path: src/entities/waybill/lib/uploadErrors.ts
+  why: The user message is chosen by substrings of the response text and the network error, not by the refusal code.
+  source: Frontend function that picks the waybill loading error text by the message text. By form.
+  code: |
+    import axios from "axios";
+
+    type Translate = (key: string) => string;
+
+    /** User text for a waybill loading error. */
+    export function uploadErrorMessage(error: unknown, t: Translate): string {
+      if (axios.isAxiosError(error)) {
+        const message = String(error.response?.data?.detail ?? error.message);
+        if (message.includes("Network Error")) {
+          return t("waybills.upload.offline");
+        }
+        if (message.toLowerCase().includes("file too large")) {
+          return t("waybills.upload.tooLarge");
+        }
+        if (message.includes("unsupported")) {
+          return t("waybills.upload.unsupportedFormat");
+        }
+      }
+      return t("waybills.upload.failed");
+    }
+
+    export async function uploadWaybill(file: File, t: Translate): Promise<string | null> {
+      try {
+        await sendWaybill(file);
+        return null;
+      } catch (error) {
+        return uploadErrorMessage(error, t);
+      }
+    }
+
+- id: C6-18
+  card: C6
+  expected: clean
+  path: app/services/label_failures.py
+  why: The decision is made by a member of the refusal code list that lies in an exception attribute; the message text is not read anywhere.
+  source: Label print failure handler where the continuation option is chosen by a list member. By form.
+  code: |
+    from enum import Enum
+
+
+    class LabelErrorCode(str, Enum):
+        PRINTER_OFFLINE = "printer_offline"
+        PAPER_OUT = "paper_out"
+        TEMPLATE_MISSING = "template_missing"
+        ADDRESS_TOO_LONG = "address_too_long"
+
+
+    TRANSIENT_CODES = frozenset({LabelErrorCode.PRINTER_OFFLINE, LabelErrorCode.PAPER_OUT})
+
+
+    class LabelError(Exception):
+        def __init__(self, code: LabelErrorCode, shipment_id: str) -> None:
+            super().__init__(code.value)
+            self.code = code
+            self.shipment_id = shipment_id
+
+
+    def next_action(exc: LabelError, attempts: int) -> str:
+        if exc.code in TRANSIENT_CODES:
+            return "retry_later" if attempts < 3 else "call_operator"
+        if exc.code is LabelErrorCode.ADDRESS_TOO_LONG:
+            return "shorten_address"
+        return "fail"
+
+- id: C6-19
+  card: C6
+  expected: dirty
+  path: src/shared/api/lib/failureCategory.ts
+  why: The refusal category, on which the offer to repeat the request depends, is determined by the start of the code string.
+  source: Frontend function that divides refusals into categories by the prefix of the code string. By form.
+  code: |
+    export type ApiFailure = { code: string; message: string };
+
+    /** Refusal category for display to the user. */
+    export type FailureCategory = "validation" | "conflict" | "server";
+
+    export function failureCategory(failure: ApiFailure): FailureCategory {
+      if (failure.code.startsWith("validation_")) return "validation";
+      if (failure.code.startsWith("conflict_")) return "conflict";
+      return "server";
+    }
+
+    export function shouldOfferRetry(failure: ApiFailure): boolean {
+      return failureCategory(failure) === "server";
+    }
+
+    export function failureToast(failure: ApiFailure, t: (key: string) => string) {
+      const category = failureCategory(failure);
+      return {
+        title: t(`errors.${category}.title`),
+        message: category === "validation" ? failure.message : t(`errors.${category}.body`),
+        retry: shouldOfferRetry(failure),
+      };
+    }
+
+- id: C6-20
+  card: C6
+  expected: clean
+  path: tests/test_label_failures.py
+  why: The fragment is a test, and a test that checks message text is not counted by the card.
+  source: Label print refusal handler test that checks the message text. By form.
+  code: |
+    import pytest
+
+    from app.services.label_failures import LabelError, LabelErrorCode, next_action
+
+
+    @pytest.mark.parametrize(
+        ("code", "attempts", "expected"),
+        [
+            (LabelErrorCode.PRINTER_OFFLINE, 1, "retry_later"),
+            (LabelErrorCode.PAPER_OUT, 3, "call_operator"),
+            (LabelErrorCode.ADDRESS_TOO_LONG, 1, "shorten_address"),
+            (LabelErrorCode.TEMPLATE_MISSING, 1, "fail"),
+        ],
+    )
+    def test_next_action(code, attempts, expected):
+        assert next_action(LabelError(code, "s-1"), attempts) == expected
+
+
+    def test_error_message_names_the_code():
+        exc = LabelError(LabelErrorCode.PAPER_OUT, "s-2")
+        assert "paper_out" in str(exc)
+        assert exc.shipment_id == "s-2"
+
+
+    async def test_api_returns_readable_text(client, auth_headers):
+        response = await client.post("/labels/print", json={"shipment_id": "s-3"}, headers=auth_headers)
+        assert response.status_code == 409
+        assert "Printer unavailable" in response.json()["detail"]["message"]
+
+- id: C6-21
+  card: C6
+  expected: dirty
+  path: app/api/carrier_errors.py
+  why: The response status of the handler is chosen by the start of the carrier refusal reason string and by the text after the prefix.
+  source: Function that maps a carrier refusal to an API response by the prefixes of the reason string. By form.
+  code: |
+    from fastapi import HTTPException
+
+    from app.integrations.carrier import CarrierRejected
+
+
+    def map_carrier_rejection(exc: CarrierRejected) -> HTTPException:
+        """Answer the API client with the status that fits the carrier's refusal."""
+        reason = str(exc.reason or "").strip()
+        if reason.startswith("ADDRESS_"):
+            return HTTPException(status_code=422, detail="address_rejected")
+        if reason.startswith("LIMIT_"):
+            return HTTPException(status_code=429, detail="carrier_limit_reached")
+        if reason.removeprefix("ERR:").strip().lower() == "service unavailable":
+            return HTTPException(status_code=503, detail="carrier_unavailable")
+        return HTTPException(status_code=502, detail="carrier_rejected")
+
+
+    @router.post("/shipments/{shipment_id}/book")
+    async def book_shipment(shipment_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+        shipment = await db.get(Shipment, shipment_id)
+        if shipment is None:
+            raise HTTPException(status_code=404, detail="shipment_not_found")
+        try:
+            return await carrier.book(shipment)
+        except CarrierRejected as exc:
+            raise map_carrier_rejection(exc) from exc
+
+- id: C6-22
+  card: C6
+  expected: clean
+  path: app/services/waybill_import.py
+  why: The start-of-string check refers to a file name in a directory and chooses which files to read; error text and refusal code take no part in it.
+  source: Function that selects waybill files in the upload directory. By form.
+  code: |
+    from pathlib import Path
+
+    ALLOWED_SUFFIXES = {".xlsx", ".csv"}
+
+
+    def collect_waybill_files(folder: Path) -> list[Path]:
+        """Files to read from the upload folder."""
+        files: list[Path] = []
+        for path in sorted(folder.iterdir()):
+            if path.name.startswith("~$") or path.name.startswith("."):
+                continue
+            if path.suffix.lower() not in ALLOWED_SUFFIXES:
+                continue
+            files.append(path)
+        return files
+
+
+    def import_folder(folder: Path, importer) -> dict[str, int]:
+        imported = 0
+        failed = 0
+        for path in collect_waybill_files(folder):
+            try:
+                importer.load(path)
+                imported += 1
+            except WaybillFormatError:
+                failed += 1
+        return {"imported": imported, "failed": failed}
+
+- id: C6-23
+  card: C6
+  expected: clean
+  path: src/shared/api/lib/retryPolicy.ts
+  why: The retry is chosen by the numeric response status and the client network error code, and the includes check goes over an array of statuses, not text.
+  source: Frontend function that decides on a request retry by the response status. By form.
+  code: |
+    import axios from "axios";
+
+    const RETRYABLE_STATUSES = [502, 503, 504];
+    const MAX_ATTEMPTS = 3;
+
+    export function shouldRetry(error: unknown, attempt: number): boolean {
+      if (attempt >= MAX_ATTEMPTS) return false;
+      if (!axios.isAxiosError(error)) return false;
+      if (error.code === "ECONNABORTED") return attempt < 2;
+      const status = error.response?.status;
+      return status !== undefined && RETRYABLE_STATUSES.includes(status);
+    }
+
+    // delay doubles with each attempt, capped at eight seconds
+    export function retryDelayMs(attempt: number): number {
+      return Math.min(1000 * 2 ** attempt, 8000);
+    }
+
+    export async function withRetry<T>(run: () => Promise<T>): Promise<T> {
+      let attempt = 0;
+      for (;;) {
+        try {
+          return await run();
+        } catch (error) {
+          if (!shouldRetry(error, attempt)) throw error;
+          await new Promise(resolve => setTimeout(resolve, retryDelayMs(attempt)));
+          attempt += 1;
+        }
+      }
+    }

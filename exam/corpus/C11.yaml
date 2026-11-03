@@ -1,0 +1,776 @@
+# C11 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C11-01
+  card: C11
+  expected: dirty
+  path: dispatch/worker.py
+  why: The task gets the dispatching state before the call to the external carrier, and the fragment has no path to failed on an exception, a timeout, or the death of the process, and no cleaner.
+  source: loop of a background task queue handler with a call to an external service
+  code: |
+    import asyncio
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    POLL_SECONDS = 2.0
+
+
+    async def run_dispatch_worker(session_factory, carrier_api) -> None:
+        while True:
+            async with session_factory() as db:
+                job = await claim_next_job(db)
+                if job is None:
+                    await asyncio.sleep(POLL_SECONDS)
+                    continue
+                job.status = "dispatching"
+                job.started_at = utcnow()
+                await db.commit()
+                logger.info("dispatch_started job=%s", job.id)
+                metrics.inc("dispatch_started")
+
+                response = await carrier_api.create_pickup(job.payload)
+
+                job.carrier_ref = response["ref"]
+                job.status = "dispatched"
+                job.finished_at = utcnow()
+                await db.commit()
+                metrics.inc("dispatch_done")
+
+- id: C11-02
+  card: C11
+  expected: clean
+  path: pricing/estimates.py
+  why: The estimate gets pending before the external call, but a timeout, a service refusal and a cancellation move it to failed with a code, that is, the way out of the wait is in the fragment.
+  source: service function requesting an estimate from an external service with a timeout and a failure state
+  code: |
+    import asyncio
+
+    ESTIMATE_TIMEOUT_SECONDS = 20
+
+
+    async def request_estimate(db, shipment_id, pricing_api) -> Estimate:
+        estimate = Estimate(shipment_id=shipment_id, status="pending")
+        db.add(estimate)
+        await db.commit()
+        try:
+            async with asyncio.timeout(ESTIMATE_TIMEOUT_SECONDS):
+                quote = await pricing_api.quote(shipment_id)
+        except TimeoutError:
+            estimate.status = "failed"
+            estimate.error_code = "estimate_timeout"
+        except PricingApiError as exc:
+            estimate.status = "failed"
+            estimate.error_code = exc.code
+        except asyncio.CancelledError:
+            estimate.status = "failed"
+            estimate.error_code = "estimate_cancelled"
+            await db.commit()
+            raise
+        else:
+            estimate.status = "ready"
+            estimate.amount = quote.amount
+        await db.commit()
+        return estimate
+
+- id: C11-03
+  card: C11
+  expected: clean
+  path: api/invoices.py
+  why: The recognition call does not set a waiting state on the entity, the error goes straight to the caller as a 502, and the result is written only after success.
+  source: request handler with an external call without writing a waiting state
+  code: |
+    @router.post("/invoices/{invoice_id}/rescan")
+    async def rescan_invoice(
+        invoice_id: UUID,
+        db: AsyncSession = Depends(get_db),
+    ) -> InvoiceScanResponse:
+        invoice = await db.get(Invoice, invoice_id)
+        if invoice is None:
+            raise HTTPException(404, detail={"code": "invoice_not_found"})
+        if not invoice.scan_path:
+            raise HTTPException(409, detail={"code": "invoice_scan_missing"})
+
+        try:
+            text = await recognize_scan(invoice.scan_path)
+        except ScanRecognitionError as exc:
+            raise HTTPException(502, detail={"code": exc.code}) from exc
+
+        invoice.scan_text = text.strip()
+        invoice.scan_status = "processed"
+        invoice.scan_error = None
+        await db.commit()
+        return InvoiceScanResponse.model_validate(invoice)
+
+- id: C11-04
+  card: C11
+  expected: dirty
+  path: api/invoice_scan.py
+  why: The waybill gets processing and is committed, then a long recognition runs without error handling, and on a failure or the death of the process the status stays processing forever.
+  source: file upload handler with recognition in the request itself
+  code: |
+    @router.post("/invoices/{invoice_id}/scan")
+    async def upload_scan(
+        invoice_id: UUID,
+        file: UploadFile,
+        db: AsyncSession = Depends(get_db),
+    ) -> InvoiceScanResponse:
+        invoice = await db.get(Invoice, invoice_id)
+        if invoice is None:
+            raise HTTPException(404, detail={"code": "invoice_not_found"})
+
+        path = await save_upload(file, invoice_id)
+        invoice.scan_path = str(path)
+        invoice.scan_status = "processing"
+        await db.commit()
+
+        text = await recognize_scan(path)
+
+        invoice.scan_text = text.strip()
+        invoice.scan_status = "processed"
+        invoice.scan_error = None
+        await db.commit()
+        return InvoiceScanResponse.model_validate(invoice)
+
+- id: C11-05
+  card: C11
+  expected: clean
+  path: background/voice_notes.py
+  why: The search fires on processing and waiting, but the record has a lease, a timeout and refusal codes, and a record with exhausted attempts or an expired lease goes to failed.
+  source: background handler with a lease and a limited number of attempts
+  code: |
+    LEASE_SECONDS = SCAN_TIMEOUT_SECONDS + 60
+    MAX_ATTEMPTS = 3
+
+
+    async def claim_one(session_factory):
+        now = utcnow()
+        async with session_factory() as db:
+            note = await db.scalar(
+                select(VoiceNote)
+                .where(
+                    VoiceNote.status == "processing",
+                    or_(VoiceNote.lease_until.is_(None), VoiceNote.lease_until <= now),
+                )
+                .order_by(VoiceNote.created_at)
+                .with_for_update(skip_locked=True)
+                .limit(1)
+            )
+            if note is None:
+                await db.rollback()
+                return None
+            if note.attempts >= MAX_ATTEMPTS:
+                note.status = "failed"
+                note.error_code = "transcription_attempts_exhausted"
+                note.lease_id = None
+                note.lease_until = None
+                await db.commit()
+                return None
+            lease_id = uuid.uuid4()
+            note.attempts += 1
+            note.lease_id = lease_id
+            note.lease_until = now + timedelta(seconds=LEASE_SECONDS)
+            await db.commit()
+            return note.id, lease_id, note.storage_path, note.attempts
+
+
+    async def transcribe_one(session_factory, claim) -> None:
+        note_id, lease_id, path, attempts = claim
+        text, error_code = None, None
+        try:
+            text = await asyncio.wait_for(
+                run_transcriber(path), timeout=SCAN_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            error_code = "transcription_timeout"
+        except TranscriptionError as exc:
+            error_code = exc.code
+        await store_result(session_factory, note_id, lease_id, text, error_code, attempts)
+
+- id: C11-06
+  card: C11
+  expected: dirty
+  path: pricing/import_job.py
+  why: The upload gets processing, on an exception it only writes to the log, rolls back the transaction and rethrows the error, and the fragment has no move to failed, no retry and no cleaner.
+  source: upload task handler with locking and error logging
+  code: |
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+
+    async def process_price_import(db, job_id, storage) -> None:
+        """Runs once from the queue handler; there is no retry and no background sweep."""
+        job = await db.get(PriceImport, job_id)
+        job.status = "processing"
+        job.started_at = utcnow()
+        await db.commit()
+
+        lock = await acquire_import_lock(job.supplier_id)
+        try:
+            raw = await storage.read(job.file_key)
+            rows = parse_rows(raw)
+            await upsert_prices(db, job.supplier_id, rows)
+            job.status = "done"
+            job.rows_count = len(rows)
+            await db.commit()
+        except Exception:
+            logger.exception("price_import_failed job=%s supplier=%s", job_id, job.supplier_id)
+            await db.rollback()
+            raise
+        finally:
+            await lock.release()
+
+- id: C11-07
+  card: C11
+  expected: clean
+  path: shifts/swaps.py
+  why: The request gets pending, but this is waiting for a manager's decision, not for an external call, so by the card no call-waiting state is set on the entity.
+  source: service functions of a shift swap request that waits for a human decision
+  code: |
+    async def request_shift_swap(db, shift_id, requester_id, partner_id) -> ShiftSwap:
+        shift = await db.get(Shift, shift_id)
+        if shift is None or shift.employee_id != requester_id:
+            raise SwapRefused("shift_not_found")
+        existing = await db.scalar(
+            select(ShiftSwap).where(
+                ShiftSwap.shift_id == shift_id, ShiftSwap.status == "pending"
+            )
+        )
+        if existing is not None:
+            raise SwapRefused("swap_already_requested")
+        swap = ShiftSwap(
+            shift_id=shift_id,
+            requester_id=requester_id,
+            partner_id=partner_id,
+            status="pending",
+            requested_at=utcnow(),
+        )
+        db.add(swap)
+        await db.commit()
+        return swap
+
+
+    async def decide_shift_swap(db, swap_id, supervisor_id, approve: bool) -> ShiftSwap:
+        swap = await db.get(ShiftSwap, swap_id, with_for_update=True)
+        if swap.status != "pending":
+            raise SwapRefused("swap_already_decided")
+        swap.status = "approved" if approve else "rejected"
+        swap.decided_by = supervisor_id
+        swap.decided_at = utcnow()
+        await db.commit()
+        return swap
+
+- id: C11-08
+  card: C11
+  expected: dirty
+  path: src/jobs/generateLabel.ts
+  why: The shipment gets labelStatus generating before the call to the label service, and on a refusal or the death of the process the fragment has no path to failed and no cleaner.
+  source: server task handler in TypeScript with a call to an external service
+  code: |
+    export async function generateLabel(db: Db, shipmentId: string): Promise<void> {
+      const shipment = await db.shipments.get(shipmentId);
+      if (!shipment || shipment.labelStatus !== "queued") {
+        return;
+      }
+
+      await db.shipments.update(shipmentId, {
+        labelStatus: "generating",
+        labelStartedAt: new Date(),
+      });
+      logger.info({ shipmentId }, "label generation started");
+
+      const pdf = await labelService.render({
+        address: shipment.address,
+        parcels: shipment.parcels,
+      });
+      const url = await storage.put(`labels/${shipmentId}.pdf`, pdf);
+
+      await db.shipments.update(shipmentId, {
+        labelStatus: "ready",
+        labelUrl: url,
+        labelFinishedAt: new Date(),
+      });
+      logger.info({ shipmentId, url }, "label generation finished");
+    }
+
+- id: C11-09
+  card: C11
+  expected: clean
+  path: pickups/queue.py
+  why: The request moves to queued before publishing to the queue, but the same module names the cleaner expire_stale_pickups that moves overdue queued and dispatching to failed.
+  source: putting a request in a queue and a periodic cleaner of overdue states
+  code: |
+    STALE_AFTER = timedelta(minutes=15)
+
+
+    async def enqueue_pickup(db, queue, request_id) -> PickupRequest:
+        pickup = PickupRequest(id=request_id, status="queued", queued_at=utcnow())
+        db.add(pickup)
+        await db.commit()
+        await queue.publish("pickup.dispatch", {"pickup_id": str(pickup.id)})
+        return pickup
+
+
+    async def expire_stale_pickups(db) -> int:
+        """Run by the scheduler once a minute."""
+        stale = (
+            await db.scalars(
+                select(PickupRequest)
+                .where(
+                    PickupRequest.status.in_(("queued", "dispatching")),
+                    PickupRequest.updated_at < utcnow() - STALE_AFTER,
+                )
+                .with_for_update(skip_locked=True)
+                .limit(100)
+            )
+        ).all()
+        for pickup in stale:
+            pickup.status = "failed"
+            pickup.error_code = "pickup_expired"
+            pickup.finished_at = utcnow()
+        await db.commit()
+        return len(stale)
+
+- id: C11-10
+  card: C11
+  expected: dirty
+  path: chat/courier_assistant.py
+  why: The assistant's reply is reserved with the status pending and committed, then the call to the external model runs without refusal handling, and on a failure the message stays pending and blocks the next questions.
+  source: chat message handler with reserving a reply and a call to an external service
+  code: |
+    async def answer_courier_question(db, chat, text: str, client_id) -> ChatMessage:
+        busy = await db.scalar(
+            select(ChatMessage).where(
+                ChatMessage.chat_id == chat.id,
+                ChatMessage.role == "assistant",
+                ChatMessage.status == "pending",
+            )
+        )
+        if busy is not None:
+            raise TurnInProgress()
+
+        question = ChatMessage(
+            chat_id=chat.id,
+            role="user",
+            content=text,
+            client_id=client_id,
+            status="completed",
+        )
+        reply = ChatMessage(chat_id=chat.id, role="assistant", content=None, status="pending")
+        db.add_all([question, reply])
+        await db.commit()
+
+        history = await recent_history(db, chat.id)
+        answer = await assistant_client.ask(question=text, history=history)
+
+        reply.content = answer.text
+        reply.status = "completed"
+        reply.completed_at = utcnow()
+        await db.commit()
+        return reply
+
+- id: C11-11
+  card: C11
+  expected: clean
+  path: src/jobs/exportReport.ts
+  why: The document gets exporting before the service call, but a timeout and any error move it to failed with a code.
+  source: server task handler in TypeScript with a timeout and a failure state
+  code: |
+    const RENDER_TIMEOUT_MS = 30_000;
+
+    function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+      return new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("render_timeout")), ms);
+        promise.then(
+          value => {
+            clearTimeout(timer);
+            resolve(value);
+          },
+          error => {
+            clearTimeout(timer);
+            reject(error);
+          },
+        );
+      });
+    }
+
+    export async function exportReport(db: Db, documentId: string): Promise<void> {
+      await db.documents.update(documentId, { exportStatus: "exporting" });
+      try {
+        const file = await withTimeout(reportRenderer.render(documentId), RENDER_TIMEOUT_MS);
+        const url = await storage.put(`exports/${documentId}.pdf`, file);
+        await db.documents.update(documentId, { exportStatus: "ready", exportUrl: url });
+      } catch (error) {
+        const timedOut = error instanceof Error && error.message === "render_timeout";
+        await db.documents.update(documentId, {
+          exportStatus: "failed",
+          exportError: timedOut ? "export_timeout" : "export_failed",
+        });
+        logger.warn({ documentId, error }, "report export failed");
+      }
+    }
+
+- id: C11-12
+  card: C11
+  expected: dirty
+  path: tickets/submit.py
+  why: The request gets queued and is committed, then publishing to the queue runs without error handling, and on a publishing failure the request stays queued, and the fragment has no path to failed or a cleaner.
+  source: service function that puts a request in the queue of an external broker
+  code: |
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+
+    async def submit_ticket(db, queue, ticket_id) -> dict[str, str]:
+        ticket = await db.get(Ticket, ticket_id)
+        if ticket is None:
+            raise TicketNotFound(ticket_id)
+        if ticket.status != "draft":
+            raise TicketAlreadySubmitted(ticket_id)
+        validate_ticket(ticket)
+
+        ticket.status = "queued"
+        ticket.queued_at = utcnow()
+        await db.commit()
+        logger.info("ticket_queued ticket=%s", ticket.id)
+
+        await queue.publish("ticket.triage", {"ticket_id": str(ticket.id)})
+        metrics.inc("ticket_submitted")
+        return {"id": str(ticket.id), "status": ticket.status}
+- id: C11-13
+  card: C11
+  expected: dirty
+  path: exports/runner.py
+  why: The export gets the state generating and is committed, then the work goes in a thread without error handling, and on a failure or the death of the process the export stays generating; there is no path to failed and no cleaner.
+  source: Starting an export in a background thread with writing the state before long work, by form
+  code: |
+    import threading
+
+    from exports.models import Export
+    from exports.render import load_rows, render_xlsx
+    from exports.storage import upload
+    from db import SessionLocal
+
+
+    def start_export(db, export_id: int) -> None:
+        """Marks the export and starts building the file in a separate thread."""
+        export = db.get(Export, export_id)
+        export.status = "generating"
+        db.commit()
+        thread = threading.Thread(target=_run_export, args=(export_id,), daemon=True)
+        thread.start()
+
+
+    def _run_export(export_id: int) -> None:
+        with SessionLocal() as db:
+            export = db.get(Export, export_id)
+            rows = load_rows(db, export.filters)
+            # the finished file is put into external storage
+            url = upload(render_xlsx(rows), name=f"export-{export_id}.xlsx")
+            export.status = "ready"
+            export.file_url = url
+            export.rows_count = len(rows)
+            db.commit()
+- id: C11-14
+  card: C11
+  expected: dirty
+  path: bookings/carrier_wait.py
+  why: The booking gets the state awaiting_carrier and is committed, then polling the carrier goes without a limit on time and number of attempts; there is no move to failed or timeout.
+  source: Waiting for a booking confirmation from an external carrier with a polling loop, by form
+  code: |
+    import asyncio
+    import logging
+
+    from bookings.models import Booking
+    from carriers.client import CarrierClient
+
+    logger = logging.getLogger(__name__)
+
+    POLL_SECONDS = 5
+
+
+    async def wait_for_carrier(db, booking: Booking, carrier: CarrierClient) -> None:
+        """Waits until the carrier confirms the booking."""
+        booking.status = "awaiting_carrier"
+        booking.requested_at = utcnow()
+        await db.commit()
+        # we poll the carrier every POLL_SECONDS
+        while True:
+            reply = await carrier.get_booking(booking.external_id)
+            logger.info("carrier_poll booking=%s state=%s", booking.id, reply.state)
+            if reply.state == "confirmed":
+                booking.status = "confirmed"
+                booking.confirmed_at = utcnow()
+                await db.commit()
+                return
+            await asyncio.sleep(POLL_SECONDS)
+- id: C11-15
+  card: C11
+  expected: clean
+  path: approvals/discounts.py
+  why: The request gets pending, but this is waiting for a manager's decision; there is no external call.
+  source: A discount request that waits for a manager's decision, with a decision function, by form
+  code: |
+    from approvals.errors import ApprovalRefused
+    from approvals.models import DiscountRequest
+
+
+    async def request_discount(db, shipment_id: int, manager_id: int, percent: int) -> DiscountRequest:
+        if not 1 <= percent <= 30:
+            raise ApprovalRefused("discount_out_of_range")
+        request = DiscountRequest(
+            shipment_id=shipment_id,
+            manager_id=manager_id,
+            percent=percent,
+            status="pending",
+            requested_at=utcnow(),
+        )
+        db.add(request)
+        await db.commit()
+        return request
+
+
+    async def decide_discount(db, request_id: int, approve: bool, comment: str | None) -> DiscountRequest:
+        request = await db.get(DiscountRequest, request_id, with_for_update=True)
+        if request.status != "pending":
+            raise ApprovalRefused("discount_already_decided")
+        request.status = "approved" if approve else "rejected"
+        request.decision_comment = comment
+        request.decided_at = utcnow()
+        await db.commit()
+        return request
+- id: C11-16
+  card: C11
+  expected: dirty
+  path: src/jobs/syncRouteOptimizer.ts
+  why: The route gets optimizationStatus optimizing before the call to the external optimizer, the call has no error handling, and on a refusal the route stays optimizing with no path to failed and no cleaner.
+  source: Starting the external route optimizer with writing the state before the call, by form
+  code: |
+    export function startRouteOptimization(db: Db, routeId: string): void {
+      void db.routes.update(routeId, { optimizationStatus: "optimizing" });
+      logger.info({ routeId }, "route optimization started");
+
+      // we write the optimization result into the route
+      optimizerClient.optimize(routeId).then(async result => {
+        await db.routes.update(routeId, {
+          optimizationStatus: "done",
+          stops: result.stops,
+          distanceKm: result.distanceKm,
+        });
+        logger.info({ routeId }, "route optimization finished");
+      });
+    }
+
+    export async function requestOptimization(db: Db, routeId: string): Promise<void> {
+      const route = await db.routes.get(routeId);
+      if (!route) {
+        throw new NotFoundError("route_not_found");
+      }
+      if (route.optimizationStatus === "optimizing") {
+        return;
+      }
+      startRouteOptimization(db, routeId);
+    }
+- id: C11-17
+  card: C11
+  expected: clean
+  path: api/geocode.py
+  why: The geocoder call does not set a waiting state on the address, the error goes straight to the caller as a 502, and the result is written only after success.
+  source: Request handler with an external call without writing a waiting state, by form
+  code: |
+    @router.post("/addresses/{address_id}/geocode")
+    async def geocode_address(
+        address_id: UUID,
+        db: AsyncSession = Depends(get_db),
+    ) -> AddressOut:
+        address = await db.get(Address, address_id)
+        if address is None:
+            raise HTTPException(404, detail={"code": "address_not_found"})
+
+        try:
+            point = await geocoder.lookup(address.full_text)
+        except GeocoderUnavailable as exc:
+            raise HTTPException(502, detail={"code": "geocoder_unavailable"}) from exc
+        except GeocoderNotFound as exc:
+            raise HTTPException(422, detail={"code": "address_not_resolved"}) from exc
+
+        # the coordinates are needed for the courier map
+        address.lat = point.lat
+        address.lon = point.lon
+        address.geocoded_at = utcnow()
+        await db.commit()
+        return AddressOut.model_validate(address)
+- id: C11-18
+  card: C11
+  expected: dirty
+  path: sync/invoices.py
+  why: The invoice gets syncing and is committed, then on an exception the send to the accounting system only writes to the log and rolls back, and there is no move to failed; the invoice stays syncing.
+  source: Sending an invoice to an external accounting system with error logging, by form
+  code: |
+    import logging
+
+    import requests
+
+    from invoices.models import Invoice
+    from invoices.payload import invoice_payload
+    from settings import ERP_ENDPOINT
+
+    logger = logging.getLogger(__name__)
+
+
+    def sync_invoice(session, invoice_id: int) -> None:
+        invoice = session.get(Invoice, invoice_id)
+        invoice.sync_status = "syncing"
+        session.commit()
+        try:
+            response = requests.post(ERP_ENDPOINT, json=invoice_payload(invoice), timeout=30)
+            response.raise_for_status()
+            # the number from the accounting system is written into the invoice
+            invoice.erp_number = response.json()["number"]
+            invoice.sync_status = "synced"
+            session.commit()
+        except requests.RequestException:
+            logger.exception("invoice_sync_error invoice=%s", invoice_id)
+            session.rollback()
+- id: C11-19
+  card: C11
+  expected: clean
+  path: printing/spooler.py
+  why: The print task gets printing before the call to the external print program, but a timeout and a refusal of the program move it to failed with a code.
+  source: Printing a label with an external program with a timeout and a move to failed, by form
+  code: |
+    import subprocess
+
+    PRINT_TIMEOUT_SECONDS = 20
+
+
+    def print_label(session, job_id: int) -> None:
+        job = session.get(PrintJob, job_id)
+        job.status = "printing"
+        session.commit()
+        try:
+            # the printer name is taken from the task
+            subprocess.run(
+                ["lp", "-d", job.printer, job.file_path],
+                check=True,
+                timeout=PRINT_TIMEOUT_SECONDS,
+                capture_output=True,
+            )
+        except subprocess.TimeoutExpired:
+            job.status = "failed"
+            job.error_code = "printer_timeout"
+        except subprocess.CalledProcessError as exc:
+            job.status = "failed"
+            job.error_code = "printer_refused"
+            job.error_detail = exc.stderr.decode("utf-8", "replace")[:200]
+        else:
+            job.status = "printed"
+            job.printed_at = utcnow()
+        session.commit()
+- id: C11-20
+  card: C11
+  expected: dirty
+  path: batch/route_recalc.py
+  why: The route gets calculating before the call to the external solver, the solver error is not handled, and on a failure the route stays calculating; the fragment has no path to failed and no cleaner.
+  source: Route recalculation queue task with a call to an external solver, by form
+  code: |
+    from batch.app import celery_app
+    from db import SessionLocal
+    from routing.models import Route
+    from routing.solver import solver_client
+
+
+    @celery_app.task(name="routes.recalculate")
+    def recalculate_route(route_id: int) -> None:
+        """Recalculates the order of the route stops."""
+        with SessionLocal() as db:
+            route = db.get(Route, route_id)
+            route.calc_status = "calculating"
+            route.calc_started_at = utcnow()
+            db.commit()
+
+            plan = solver_client.solve(route.stops, vehicle=route.vehicle_id)
+
+            route.stops_order = plan.order
+            route.distance_km = plan.distance_km
+            route.calc_status = "calculated"
+            route.calc_finished_at = utcnow()
+            db.commit()
+- id: C11-21
+  card: C11
+  expected: clean
+  path: src/shifts/vacations.ts
+  why: The request gets pending, but this is waiting for a manager's decision; there is no external call.
+  source: Server functions of a courier vacation request that waits for a manager's decision, by form
+  code: |
+    export async function requestVacation(
+      db: Db,
+      courierId: string,
+      from: string,
+      to: string,
+    ): Promise<VacationRequest> {
+      const overlap = await db.vacations.findOverlapping(courierId, from, to);
+      if (overlap) {
+        throw new RefusalError("vacation_overlaps");
+      }
+      return db.vacations.create({
+        courierId,
+        from,
+        to,
+        approvalStatus: "pending",
+        requestedAt: new Date(),
+      });
+    }
+
+    export async function decideVacation(
+      db: Db,
+      requestId: string,
+      supervisorId: string,
+      approved: boolean,
+    ): Promise<VacationRequest> {
+      const request = await db.vacations.get(requestId);
+      if (request.approvalStatus !== "pending") {
+        throw new RefusalError("vacation_already_decided");
+      }
+      return db.vacations.update(requestId, {
+        approvalStatus: approved ? "approved" : "rejected",
+        decidedBy: supervisorId,
+        decidedAt: new Date(),
+      });
+    }
+- id: C11-22
+  card: C11
+  expected: clean
+  path: src/jobs/syncStops.ts
+  why: The stops get syncing before the call to the external system, but the same module names the cleanup reapStalledSyncs that moves overdue syncing to failed.
+  source: Starting stop synchronization and a periodic cleanup of overdue states, by form
+  code: |
+    const STALE_AFTER_MS = 10 * 60 * 1000;
+    const REAP_EVERY_MS = 60 * 1000;
+
+    export async function startStopsSync(db: Db, routeId: string): Promise<void> {
+      await db.routes.update(routeId, { syncStatus: "syncing", syncStartedAt: new Date() });
+      await syncQueue.add("stops-sync", { routeId });
+    }
+
+    export async function reapStalledSyncs(db: Db): Promise<number> {
+      const cutoff = new Date(Date.now() - STALE_AFTER_MS);
+      const stalled = await db.routes.findMany({
+        syncStatus: "syncing",
+        syncStartedAt: { lt: cutoff },
+      });
+      for (const route of stalled) {
+        await db.routes.update(route.id, {
+          syncStatus: "failed",
+          syncError: "sync_expired",
+        });
+      }
+      return stalled.length;
+    }
+
+    export function scheduleReaper(db: Db): NodeJS.Timeout {
+      // the sweep runs once a minute
+      return setInterval(() => {
+        void reapStalledSyncs(db);
+      }, REAP_EVERY_MS);
+    }

@@ -1,0 +1,666 @@
+# C15 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C15-01
+  card: C15
+  expected: dirty
+  path: src/features/order-save/model/useSaveOrder.ts
+  why: The server refuses to save the order with different codes, and the error handler does not read the code and shows one text for all reasons.
+  source: Order save hook with a mutation error handler.
+  code: |
+    import { useMutation, useQueryClient } from "@tanstack/react-query";
+    import { useTranslation } from "react-i18next";
+    import { notifications } from "@mantine/notifications";
+    import { api } from "@/shared/api";
+    import type { OrderDraft } from "@/entities/order";
+
+    export function useSaveOrder(orderId: string) {
+      const { t } = useTranslation();
+      const queryClient = useQueryClient();
+
+      return useMutation({
+        mutationFn: (draft: OrderDraft) =>
+          api.PUT("/orders/{order_id}", {
+            params: { path: { order_id: orderId } },
+            body: draft,
+          }),
+        onSuccess: () => {
+          queryClient.invalidateQueries({ queryKey: ["order", orderId] });
+          notifications.show({ color: "green", message: t("orders.saved") });
+        },
+        onError: () => {
+          notifications.show({ color: "red", message: t("orders.saveFailed") });
+        },
+      });
+    }
+
+- id: C15-02
+  card: C15
+  expected: clean
+  path: src/features/shipment-create/model/useCreateShipment.ts
+  why: The handler reads the refusal code from the response and takes the text from a table typed by the code list from the generated contract.
+  source: Shipment creation hook and a table of refusal texts.
+  code: |
+    import { useMutation } from "@tanstack/react-query";
+    import { useTranslation } from "react-i18next";
+    import { notifications } from "@mantine/notifications";
+    import { api, readApiErrorCode } from "@/shared/api";
+    import type { components } from "@/shared/api/generated/schema";
+
+    type ShipmentRefusalCode = components["schemas"]["ShipmentRefusalCode"];
+
+    const refusalText = {
+      shipment_weight_exceeded: "shipments.refusal.weightExceeded",
+      shipment_route_closed: "shipments.refusal.routeClosed",
+      shipment_depot_inactive: "shipments.refusal.depotInactive",
+      shipment_duplicate_reference: "shipments.refusal.duplicateReference",
+    } as const satisfies Record<ShipmentRefusalCode, string>;
+
+    export function useCreateShipment() {
+      const { t } = useTranslation();
+      return useMutation({
+        mutationFn: (body: components["schemas"]["ShipmentCreate"]) =>
+          api.POST("/shipments", { body }),
+        onError: (error) => {
+          const code = readApiErrorCode<ShipmentRefusalCode>(error);
+          notifications.show({ color: "red", message: t(refusalText[code]) });
+        },
+      });
+    }
+
+- id: C15-03
+  card: C15
+  expected: dirty
+  path: src/shared/api/lib/refusalText.ts
+  why: The refusal text table is declared as Record<string, string>, so a contract code without text is not caught by the compiler and falls to the generic text.
+  source: Shared function that chooses the refusal text by the response code.
+  code: |
+    import i18n from "@/shared/i18n";
+    import { readApiErrorCode } from "./apiError";
+
+    const REFUSAL_TEXT: Record<string, string> = {
+      depot_not_found: "refusal.depotNotFound",
+      depot_name_taken: "refusal.depotNameTaken",
+      route_closed: "refusal.routeClosed",
+      carrier_unavailable: "refusal.carrierUnavailable",
+      manifest_locked: "refusal.manifestLocked",
+    };
+
+    export function refusalMessage(error: unknown): string {
+      const code = readApiErrorCode(error);
+      if (code && code in REFUSAL_TEXT) {
+        return i18n.t(REFUSAL_TEXT[code]);
+      }
+      return i18n.t("refusal.generic");
+    }
+
+    export function isKnownRefusal(error: unknown): boolean {
+      const code = readApiErrorCode(error);
+      return code != null && code in REFUSAL_TEXT;
+    }
+
+- id: C15-04
+  card: C15
+  expected: clean
+  path: src/features/depot-rename/ui/DepotRenameForm.tsx
+  why: The branch shows its own text for the single code chosen by a member of the list, and passes the other refusals by code to the common handler.
+  source: Warehouse rename form with a field error for an occupied name.
+  code: |
+    import { useForm } from "@mantine/form";
+    import { TextInput, Button } from "@mantine/core";
+    import { useTranslation } from "react-i18next";
+    import { DepotRefusalCode, readApiErrorCode } from "@/shared/api";
+    import { showRefusal } from "@/shared/api/lib/showRefusal";
+    import { useRenameDepot } from "../model/useRenameDepot";
+
+    export function DepotRenameForm({ depotId, name }: { depotId: string; name: string }) {
+      const { t } = useTranslation();
+      const form = useForm({ initialValues: { name } });
+      const rename = useRenameDepot(depotId);
+
+      const submit = form.onSubmit(async (values) => {
+        try {
+          await rename.mutateAsync(values.name);
+        } catch (error) {
+          if (readApiErrorCode(error) === DepotRefusalCode.NAME_TAKEN) {
+            form.setFieldError("name", t("depots.refusal.nameTaken"));
+            return;
+          }
+          showRefusal(error);
+        }
+      });
+
+      return (
+        <form onSubmit={submit}>
+          <TextInput label={t("depots.name")} {...form.getInputProps("name")} />
+          <Button type="submit" loading={rename.isPending}>{t("common.save")}</Button>
+        </form>
+      );
+    }
+
+- id: C15-05
+  card: C15
+  expected: dirty
+  path: app/api/manifests.py
+  why: Parsing the manifest file refuses for different reasons (encoding, columns, size), and the catch of all exceptions gives the user one code.
+  source: Shipment manifest upload handler.
+  code: |
+    @router.post("/{depot_id}/manifests", status_code=201)
+    async def upload_manifest(
+        depot_id: UUID,
+        file: UploadFile,
+        db: AsyncSession = Depends(get_db),
+        user: User = Depends(current_dispatcher),
+    ):
+        depot = await load_depot(db, depot_id, user)
+        raw = await file.read()
+        try:
+            rows = parse_manifest_csv(raw, max_rows=MANIFEST_MAX_ROWS)
+            shipments = [shipment_from_row(row, depot) for row in rows]
+        except Exception as exc:
+            log.warning("manifest_parse_failed depot_id=%s error=%s", depot_id, exc)
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "manifest_import_failed"},
+            ) from exc
+        manifest = Manifest(depot_id=depot.id, uploaded_by=user.id)
+        db.add(manifest)
+        for shipment in shipments:
+            shipment.manifest = manifest
+            db.add(shipment)
+        await db.commit()
+        return ManifestOut.model_validate(manifest)
+
+- id: C15-06
+  card: C15
+  expected: clean
+  path: app/api/bookings.py
+  why: Each failure class of the external carrier is mapped to its own member of the code list, there is no common code, and an unknown failure is rethrown.
+  source: Carrier booking handler.
+  code: |
+    @router.post("/{shipment_id}/booking")
+    async def book_shipment(
+        shipment_id: UUID,
+        db: AsyncSession = Depends(get_db),
+        carrier: CarrierClient = Depends(get_carrier),
+    ):
+        shipment = await load_shipment(db, shipment_id)
+        try:
+            booking = await carrier.book(shipment.to_carrier_payload())
+        except CarrierTimeout as exc:
+            raise HTTPException(
+                status_code=504,
+                detail={"code": BookingRefusalCode.CARRIER_TIMEOUT.value},
+            ) from exc
+        except CarrierRejected as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": BookingRefusalCode(exc.reason).value},
+            ) from exc
+        except CarrierQuotaExceeded as exc:
+            raise HTTPException(
+                status_code=429,
+                detail={"code": BookingRefusalCode.CARRIER_QUOTA_EXCEEDED.value},
+            ) from exc
+        shipment.booking_ref = booking.reference
+        await db.commit()
+        return BookingOut.model_validate(booking)
+
+- id: C15-07
+  card: C15
+  expected: dirty
+  path: app/services/route_import.py
+  why: The refusal goes to the user as a string in detail without a code, and the client cannot tell this reason from any other.
+  source: Check of the size and contents of a route file before import.
+  code: |
+    ROUTE_FILE_MAX_BYTES = 5 * 1024 * 1024
+    ROUTE_MAX_STOPS = 400
+
+
+    async def read_route_file(file: UploadFile) -> list[dict]:
+        raw = await file.read()
+        if len(raw) > ROUTE_FILE_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="Route file is too large",
+            )
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="Failed to read the route file",
+            ) from exc
+        stops = data.get("stops")
+        if not isinstance(stops, list):
+            raise HTTPException(status_code=422, detail="The file has no stops")
+        if len(stops) > ROUTE_MAX_STOPS:
+            raise HTTPException(status_code=422, detail="Too many stops")
+        return stops
+
+- id: C15-08
+  card: C15
+  expected: clean
+  path: app/services/route_import.py
+  why: Each reason for a route import refusal is its own member of the list in detail, and the client chooses the text for the user by the code.
+  source: Check of the size and contents of a route file before import.
+  code: |
+    class RouteImportRefusal(StrEnum):
+        FILE_TOO_LARGE = "route_file_too_large"
+        FILE_UNREADABLE = "route_file_unreadable"
+        STOPS_MISSING = "route_stops_missing"
+        STOPS_LIMIT_EXCEEDED = "route_stops_limit_exceeded"
+
+
+    def refuse(status_code: int, code: RouteImportRefusal) -> HTTPException:
+        return HTTPException(status_code=status_code, detail={"code": code.value})
+
+
+    async def read_route_file(file: UploadFile) -> list[dict]:
+        raw = await file.read()
+        if len(raw) > ROUTE_FILE_MAX_BYTES:
+            raise refuse(413, RouteImportRefusal.FILE_TOO_LARGE)
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise refuse(422, RouteImportRefusal.FILE_UNREADABLE) from exc
+        stops = data.get("stops")
+        if not isinstance(stops, list):
+            raise refuse(422, RouteImportRefusal.STOPS_MISSING)
+        if len(stops) > ROUTE_MAX_STOPS:
+            raise refuse(422, RouteImportRefusal.STOPS_LIMIT_EXCEEDED)
+        return stops
+
+- id: C15-09
+  card: C15
+  expected: dirty
+  path: app/background/label_rendering.py
+  why: The background handler writes into the stored failure field that the user sees one code for any reason (font, size, unavailable template).
+  source: Background rendering of shipment labels.
+  code: |
+    async def render_labels(job_id: UUID) -> None:
+        async with session_scope() as db:
+            job = await db.get(LabelJob, job_id)
+            if job is None:
+                log.warning("label_job_missing job_id=%s", job_id)
+                return
+            try:
+                template = await load_label_template(job.template_id)
+                pages = [
+                    render_label(template, shipment)
+                    for shipment in await job.awaitable_attrs.shipments
+                ]
+                pdf = merge_pages(pages, max_bytes=LABEL_PDF_MAX_BYTES)
+                job.file_key = await storage.put(pdf, content_type="application/pdf")
+                transition_label_job(job, LabelJobState.READY)
+            except Exception as exc:
+                log.exception("label_render_failed job_id=%s", job_id)
+                job.failure_code = "label_render_failed"
+                transition_label_job(job, LabelJobState.FAILED)
+            await db.commit()
+
+- id: C15-10
+  card: C15
+  expected: clean
+  path: app/background/label_rendering.py
+  why: The rendering refusal is written into the failure field as its own member of the list taken from the exception, and an unexpected failure is not recorded with a common code but goes to a retry.
+  source: Background rendering of shipment labels.
+  code: |
+    async def render_labels(job_id: UUID) -> None:
+        async with session_scope() as db:
+            job = await db.get(LabelJob, job_id)
+            if job is None:
+                log.warning("label_job_missing job_id=%s", job_id)
+                return
+            try:
+                template = await load_label_template(job.template_id)
+                pages = [
+                    render_label(template, shipment)
+                    for shipment in await job.awaitable_attrs.shipments
+                ]
+                pdf = merge_pages(pages, max_bytes=LABEL_PDF_MAX_BYTES)
+            except LabelRefused as exc:
+                job.failure_code = exc.code
+                transition_label_job(job, LabelJobState.FAILED)
+                await db.commit()
+                return
+            except Exception:
+                log.exception("label_render_crashed job_id=%s", job_id)
+                raise
+            job.file_key = await storage.put(pdf, content_type="application/pdf")
+            transition_label_job(job, LabelJobState.READY)
+            await db.commit()
+
+- id: C15-11
+  card: C15
+  expected: dirty
+  path: src/widgets/manifest-list/ui/ManifestRow.tsx
+  why: The server returns the manifest failure code, and the list row shows one text for any failure and does not read the code.
+  source: Row of the list of uploaded manifests.
+  code: |
+    import { Badge, Group, Text, Tooltip } from "@mantine/core";
+    import { useTranslation } from "react-i18next";
+    import type { components } from "@/shared/api/generated/schema";
+
+    type ManifestOut = components["schemas"]["ManifestOut"];
+
+    export function ManifestRow({ manifest }: { manifest: ManifestOut }) {
+      const { t } = useTranslation();
+
+      return (
+        <Group justify="space-between" data-failure-code={manifest.failure_code ?? undefined}>
+          <Text>{manifest.file_name}</Text>
+          {manifest.state === "processed" && (
+            <Badge color="green">{t("manifests.state.processed")}</Badge>
+          )}
+          {manifest.state === "processing" && (
+            <Badge color="blue">{t("manifests.state.processing")}</Badge>
+          )}
+          {manifest.state === "failed" && (
+            <Tooltip label={t("manifests.failedHint")}>
+              <Badge color="red">{t("manifests.state.failed")}</Badge>
+            </Tooltip>
+          )}
+        </Group>
+      );
+    }
+
+- id: C15-12
+  card: C15
+  expected: clean
+  path: src/widgets/manifest-list/ui/ManifestRow.tsx
+  why: The row shows the failure reason by the code from the server response through a table typed by the list from the contract.
+  source: Row of the list of uploaded manifests.
+  code: |
+    import { Badge, Group, Text, Tooltip } from "@mantine/core";
+    import { useTranslation } from "react-i18next";
+    import type { components } from "@/shared/api/generated/schema";
+
+    type ManifestOut = components["schemas"]["ManifestOut"];
+    type ManifestFailureCode = components["schemas"]["ManifestFailureCode"];
+
+    const failureText = {
+      manifest_encoding_invalid: "manifests.failure.encodingInvalid",
+      manifest_columns_missing: "manifests.failure.columnsMissing",
+      manifest_rows_limit_exceeded: "manifests.failure.rowsLimitExceeded",
+      manifest_depot_mismatch: "manifests.failure.depotMismatch",
+    } as const satisfies Record<ManifestFailureCode, string>;
+
+    export function ManifestRow({ manifest }: { manifest: ManifestOut }) {
+      const { t } = useTranslation();
+      return (
+        <Group justify="space-between">
+          <Text>{manifest.file_name}</Text>
+          {manifest.failure_code != null && (
+            <Tooltip label={t(failureText[manifest.failure_code])}>
+              <Badge color="red">{t("manifests.state.failed")}</Badge>
+            </Tooltip>
+          )}
+        </Group>
+      );
+    }
+
+- id: C15-13
+  card: C15
+  expected: dirty
+  path: src/features/carrier-connect/lib/connectErrorText.ts
+  why: The function reads the refusal code but reduces three different codes to one common text.
+  source: Choosing the refusal text when connecting a carrier.
+  code: |
+    import i18n from "@/shared/i18n";
+    import { readApiErrorCode } from "@/shared/api";
+
+    export function connectErrorText(error: unknown): string {
+      const code = readApiErrorCode(error);
+
+      if (code === "carrier_credentials_invalid") {
+        return i18n.t("carriers.connect.credentialsInvalid");
+      }
+      if (
+        code === "carrier_account_suspended" ||
+        code === "carrier_region_unsupported" ||
+        code === "carrier_contract_expired"
+      ) {
+        return i18n.t("carriers.connect.failed");
+      }
+      if (code === "carrier_already_connected") {
+        return i18n.t("carriers.connect.alreadyConnected");
+      }
+      return i18n.t("carriers.connect.failed");
+    }
+
+    export function isRetryable(error: unknown): boolean {
+      return readApiErrorCode(error) === "carrier_timeout";
+    }
+
+- id: C15-14
+  card: C15
+  expected: clean
+  path: src/shared/api/lib/apiLogging.ts
+  why: The catch only writes the request failure to the log and rethrows the error; it shows no text to the user.
+  source: API call wrapper that writes failures to the frontend log.
+  code: |
+    import { logger } from "@/shared/lib/logger";
+    import { readApiErrorCode, readApiStatus } from "./apiError";
+
+    export async function withRequestLog<T>(
+      name: string,
+      request: () => Promise<T>,
+    ): Promise<T> {
+      const started = performance.now();
+      try {
+        const result = await request();
+        logger.debug("api_request_ok", { name, ms: performance.now() - started });
+        return result;
+      } catch (error) {
+        logger.warn("api_request_failed", {
+          name,
+          ms: performance.now() - started,
+          status: readApiStatus(error),
+          code: readApiErrorCode(error),
+        });
+        throw error;
+      }
+    }
+
+    export function requestName(method: string, path: string): string {
+      return `${method.toUpperCase()} ${path}`;
+    }
+
+- id: C15-15
+  card: C15
+  expected: dirty
+  path: src/features/route-optimize/ui/OptimizeButton.tsx
+  why: Route optimization can get a refusal with different codes, and the component shows one text by an error flag.
+  source: Route optimization button with an error block.
+  code: |
+    import { Alert, Button, Stack } from "@mantine/core";
+    import { useMutation } from "@tanstack/react-query";
+    import { useTranslation } from "react-i18next";
+    import { api } from "@/shared/api";
+
+    export function OptimizeButton({ routeId }: { routeId: string }) {
+      const { t } = useTranslation();
+      const optimize = useMutation({
+        mutationFn: () =>
+          api.POST("/routes/{route_id}/optimize", {
+            params: { path: { route_id: routeId } },
+          }),
+      });
+
+      return (
+        <Stack>
+          <Button onClick={() => optimize.mutate()} loading={optimize.isPending}>
+            {t("routes.optimize")}
+          </Button>
+          {optimize.isError && (
+            <Alert color="red">{t("routes.optimizeFailed")}</Alert>
+          )}
+        </Stack>
+      );
+    }
+
+- id: C15-16
+  card: C15
+  expected: clean
+  path: src/features/route-optimize/ui/OptimizeButton.tsx
+  why: The error block takes the text by the refusal code from the response through a table typed by the list of contract codes.
+  source: Route optimization button with an error block.
+  code: |
+    import { Alert, Button, Stack } from "@mantine/core";
+    import { useMutation } from "@tanstack/react-query";
+    import { useTranslation } from "react-i18next";
+    import { api, readApiErrorCode } from "@/shared/api";
+    import type { components } from "@/shared/api/generated/schema";
+
+    type OptimizeRefusalCode = components["schemas"]["OptimizeRefusalCode"];
+
+    const refusalText = {
+      route_stops_limit_exceeded: "routes.refusal.stopsLimitExceeded",
+      route_has_no_vehicle: "routes.refusal.noVehicle",
+      route_window_infeasible: "routes.refusal.windowInfeasible",
+    } as const satisfies Record<OptimizeRefusalCode, string>;
+
+    export function OptimizeButton({ routeId }: { routeId: string }) {
+      const { t } = useTranslation();
+      const optimize = useMutation({
+        mutationFn: () =>
+          api.POST("/routes/{route_id}/optimize", { params: { path: { route_id: routeId } } }),
+      });
+      const code = optimize.isError ? readApiErrorCode<OptimizeRefusalCode>(optimize.error) : null;
+
+      return (
+        <Stack>
+          <Button onClick={() => optimize.mutate()} loading={optimize.isPending}>
+            {t("routes.optimize")}
+          </Button>
+          {code != null && <Alert color="red">{t(refusalText[code])}</Alert>}
+        </Stack>
+      );
+    }
+
+- id: C15-17
+  card: C15
+  expected: dirty
+  path: src/shared/api/lib/knownCodes.ts
+  why: The client keeps its own copy of the code list as strings, and a code that is not in the copy gets the generic text.
+  source: List of known refusal codes and the choice of text.
+  code: |
+    import i18n from "@/shared/i18n";
+    import { readApiErrorCode } from "./apiError";
+
+    export const BOOKING_ERROR_CODES = [
+      "carrier_timeout",
+      "carrier_quota_exceeded",
+      "shipment_already_booked",
+      "shipment_weight_exceeded",
+    ] as const;
+
+    type BookingErrorCode = (typeof BOOKING_ERROR_CODES)[number];
+
+    function isBookingErrorCode(code: string | null): code is BookingErrorCode {
+      return code != null && (BOOKING_ERROR_CODES as readonly string[]).includes(code);
+    }
+
+    export function bookingErrorText(error: unknown): string {
+      const code = readApiErrorCode(error);
+      if (isBookingErrorCode(code)) {
+        return i18n.t(`bookings.refusal.${code}`);
+      }
+      return i18n.t("bookings.refusal.generic");
+    }
+
+- id: C15-18
+  card: C15
+  expected: clean
+  path: app/services/depot_sync.py
+  why: The catch of all exceptions only writes the failure to the log and rethrows it; no refusal goes to the user from here.
+  source: Synchronization of the warehouse reference with an external registry.
+  code: |
+    async def sync_depots(db: AsyncSession, registry: RegistryClient) -> int:
+        updated = 0
+        cursor: str | None = None
+        while True:
+            try:
+                page = await registry.list_depots(cursor=cursor, limit=200)
+            except Exception:
+                log.exception("depot_sync_page_failed cursor=%s", cursor)
+                raise
+            for item in page.items:
+                depot = await db.scalar(
+                    select(Depot).where(Depot.registry_id == item.id)
+                )
+                if depot is None:
+                    db.add(Depot.from_registry(item))
+                else:
+                    depot.apply_registry(item)
+                updated += 1
+            await db.commit()
+            if page.next_cursor is None:
+                return updated
+            cursor = page.next_cursor
+
+- id: C15-19
+  card: C15
+  expected: dirty
+  path: src/features/invoice-pay/model/usePayInvoice.ts
+  why: Payment gets a bank refusal with different codes, and the catch sets one text for the user and does not read the code.
+  source: Invoice payment hook with a message state.
+  code: |
+    import { useState } from "react";
+    import { useTranslation } from "react-i18next";
+    import { api } from "@/shared/api";
+
+    export function usePayInvoice(invoiceId: string) {
+      const { t } = useTranslation();
+      const [message, setMessage] = useState<string | null>(null);
+      const [pending, setPending] = useState(false);
+
+      async function pay(cardToken: string) {
+        setPending(true);
+        setMessage(null);
+        try {
+          await api.POST("/invoices/{invoice_id}/pay", {
+            params: { path: { invoice_id: invoiceId } },
+            body: { card_token: cardToken },
+          });
+          setMessage(t("invoices.paid"));
+        } catch {
+          setMessage(t("invoices.payDeclined"));
+        } finally {
+          setPending(false);
+        }
+      }
+
+      return { pay, pending, message };
+    }
+
+- id: C15-20
+  card: C15
+  expected: clean
+  path: app/schemas/manifests.py
+  why: The failure field in the response schema is declared as a list of codes, and the contract gives the client the full list of reasons.
+  source: Manifest response schema and the list of failure codes.
+  code: |
+    class ManifestFailureCode(StrEnum):
+        ENCODING_INVALID = "manifest_encoding_invalid"
+        COLUMNS_MISSING = "manifest_columns_missing"
+        ROWS_LIMIT_EXCEEDED = "manifest_rows_limit_exceeded"
+        DEPOT_MISMATCH = "manifest_depot_mismatch"
+
+
+    class ManifestState(StrEnum):
+        PROCESSING = "processing"
+        PROCESSED = "processed"
+        FAILED = "failed"
+
+
+    class ManifestOut(BaseModel):
+        model_config = ConfigDict(from_attributes=True)
+
+        id: UUID
+        depot_id: UUID
+        file_name: str
+        state: ManifestState
+        failure_code: ManifestFailureCode | None
+        rows_total: int
+        rows_accepted: int
+        created_at: datetime

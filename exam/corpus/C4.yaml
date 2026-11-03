@@ -1,0 +1,934 @@
+# C4 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C4-01
+  card: C4
+  expected: clean
+  path: app/services/courier_status.py
+  why: This is the write function of the courier state field itself; it checks the transition against the table, so the assignment inside it does not count.
+  source: Entity module with a state write function and a helper function for the first sign-in.
+  code: |
+    def active_couriers_filter():
+        """
+        The one filter for reports and flows that mean "everyone who has not
+        been deactivated", including a courier who has never signed in.
+        """
+
+        return Courier.status != CourierStatus.INACTIVE
+
+
+    def is_deactivated(courier: Courier) -> bool:
+        return courier.status == CourierStatus.INACTIVE
+
+
+    def set_courier_status(courier: Courier, new: CourierStatus) -> None:
+        """The one place a courier row changes its stored status."""
+
+        new = CourierStatus(new)
+        # Writing the stored value again is not a move.
+        if courier.status == new:
+            return
+        if not courier_status_transition_allowed(courier.status, new):
+            reject_unlisted_transition(
+                f"courier_transition_not_allowed:{_name(courier.status)}->{new.value}"
+            )
+        courier.status = new
+
+
+    def mark_courier_signed_in(courier: Courier) -> None:
+        """First sign-in: ``invited`` -> ``active``.
+
+        A switched-off courier stays ``inactive``; an active one stays active.
+        """
+
+        if courier.status == CourierStatus.INVITED:
+            set_courier_status(courier, CourierStatus.ACTIVE)
+
+- id: C4-02
+  card: C4
+  expected: dirty
+  path: app/background/price_import_parser.py
+  why: The background handler assigns processing_status of the price list version directly in two branches and does not call the write function with the transition check.
+  source: Saving the parse result in a background handler with a retry by lease.
+  code: |
+    async def _store_result(
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        version_id: uuid.UUID,
+        import_id: uuid.UUID,
+        lease_id: uuid.UUID,
+        rows: list[dict] | None,
+        error_code: str | None,
+        retryable: bool,
+        attempts: int,
+    ) -> None:
+        async with session_factory() as db:
+            version = await db.scalar(
+                select(PriceImportVersion).where(
+                    PriceImportVersion.id == version_id,
+                    PriceImportVersion.import_id == import_id,
+                    PriceImportVersion.processing_status == "processing",
+                    PriceImportVersion.handling_lease_id == lease_id,
+                )
+            )
+            if version is None:
+                await db.rollback()
+                return
+            version.handling_lease_id = None
+            version.handling_lease_until = None
+            if error_code is None:
+                version.parsed_rows = rows
+                version.handling_retry_at = None
+                version.processing_error = None
+                version.processing_status = PriceImportStatus.PROCESSED.value
+                state = "processed"
+            elif retryable and attempts < PARSE_MAX_ATTEMPTS:
+                delay = PARSE_RETRY_DELAY_SECONDS * (2 ** (attempts - 1))
+                version.handling_retry_at = _now() + timedelta(seconds=delay)
+                version.processing_error = error_code
+                state = "processing"
+            else:
+                version.handling_retry_at = None
+                version.processing_error = error_code
+                version.processing_status = PriceImportStatus.FAILED.value
+                state = "failed"
+            await db.commit()
+            logger.info(
+                "price_import_parse_finished import_id=%s state=%s attempt=%s error_code=%s",
+                import_id,
+                state,
+                attempts,
+                error_code,
+            )
+
+- id: C4-03
+  card: C4
+  expected: clean
+  path: migrations/versions/8c41d2e7a903_normalize_courier_status.py
+  why: This is a data migration; it brings the field values to the new list once and does not count as writing state around the writer.
+  source: Schema migration with a one-off recomputation of state field values from the signs of the row.
+  code: |
+    """Normalize courier status from the sign-in markers.
+
+    Revision ID: 8c41d2e7a903
+    Revises: 5b7e19f0c2aa
+    """
+
+    import sqlalchemy as sa
+    from alembic import op
+
+    revision = "8c41d2e7a903"
+    down_revision = "5b7e19f0c2aa"
+
+    _couriers = sa.table(
+        "couriers",
+        sa.column("id"),
+        sa.column("status", sa.String),
+        sa.column("deleted_at"),
+        sa.column("user_id"),
+        sa.column("device_id"),
+    )
+
+
+    def upgrade() -> None:
+        conn = op.get_bind()
+        entered = sa.or_(
+            _couriers.c.user_id.is_not(None), _couriers.c.device_id.is_not(None)
+        )
+        live = _couriers.c.deleted_at.is_(None)
+        conn.execute(
+            sa.update(_couriers)
+            .where(_couriers.c.deleted_at.is_not(None), _couriers.c.status != "inactive")
+            .values(status="inactive")
+        )
+        conn.execute(
+            sa.update(_couriers)
+            .where(live, entered, _couriers.c.status.notin_(["inactive", "active"]))
+            .values(status="active")
+        )
+        conn.execute(
+            sa.update(_couriers)
+            .where(live, sa.not_(entered), _couriers.c.status.notin_(["inactive", "invited"]))
+            .values(status="invited")
+        )
+
+
+    def downgrade() -> None:
+        pass
+
+- id: C4-04
+  card: C4
+  expected: dirty
+  path: app/dispatch/service.py
+  why: Trip cancellation assigns status as a string inside the service although a transition table is declared nearby, and it does not call a write function with a check.
+  source: Entity cancellation method in a service layer that declares a transition table.
+  code: |
+    ALLOWED_TRANSITIONS = {
+        "queued": {"running", "cancelled"},
+        "running": {"completed", "failed", "cancelled"},
+        "completed": set(),
+        "failed": set(),
+        "cancelled": set(),
+    }
+
+
+    class DispatchService:
+        def __init__(self, router, clock, store) -> None:
+            self.router = router
+            self.clock = clock
+            self.store = store
+
+        def status(self, dispatch_id: str) -> dict:
+            dispatch = self._require(dispatch_id)
+            return {
+                "dispatch_id": dispatch.dispatch_id,
+                "status": dispatch.status,
+                "failure_stage": dispatch.failure_stage,
+                "failure_rule": dispatch.failure_rule,
+            }
+
+        def cancel(self, dispatch_id: str) -> dict:
+            """Stop the trip. The cancellation names a reason even without a culprit segment."""
+
+            dispatch = self._require(dispatch_id)
+            dispatch.cancel_requested = True
+            if dispatch.status in {"queued", "running"}:
+                self._release_remaining_stops(dispatch, cause="dispatch:cancel_requested")
+                dispatch.status = "cancelled"
+            self._save(dispatch)
+            return self.status(dispatch_id)
+
+- id: C4-05
+  card: C4
+  expected: clean
+  path: tests/factories/shipments.py
+  why: This is a factory in tests; it builds the shipment directly in the needed state and does not count as writing around the writer.
+  source: Test data factory functions that set the entity state directly.
+  code: |
+    import itertools
+    import uuid
+    from datetime import datetime, timezone
+
+    from app.models import Courier, Shipment
+
+    _counter = itertools.count(1)
+
+
+    def make_shipment(db, *, status="created", courier=None, **overrides) -> Shipment:
+        shipment = Shipment(
+            id=overrides.pop("id", uuid.uuid4()),
+            tracking_number=overrides.pop("tracking_number", f"TN{next(_counter):08d}"),
+            recipient_name=overrides.pop("recipient_name", "John Smith"),
+            address=overrides.pop("address", "12 Warehouse St."),
+            weight_grams=overrides.pop("weight_grams", 1500),
+        )
+        shipment.status = status
+        shipment.courier_id = courier.id if courier is not None else None
+        shipment.created_at = overrides.pop("created_at", datetime.now(timezone.utc))
+        for key, value in overrides.items():
+            setattr(shipment, key, value)
+        db.add(shipment)
+        return shipment
+
+
+    def make_delivered_shipment(db, courier: Courier, **overrides) -> Shipment:
+        shipment = make_shipment(db, status="delivered", courier=courier, **overrides)
+        shipment.delivered_at = datetime.now(timezone.utc)
+        return shipment
+
+- id: C4-06
+  card: C4
+  expected: dirty
+  path: app/services/report_publication.py
+  why: On repeated publication of a report label_print_status is assigned the string "ready" directly, while a list of field values is declared nearby.
+  source: Handler of repeated document publication with an assignment of a state field among ordinary updates.
+  code: |
+    TEXT_STATUS_PENDING = "pending"
+    TEXT_STATUS_GENERATING = "generating"
+    TEXT_STATUS_READY = "ready"
+    TEXT_STATUS_FAILED = "failed"
+
+
+    async def republish_report(
+        db: AsyncSession,
+        *,
+        draft: ReportDraft,
+        current_user: CurrentUser,
+        final_cargo: dict,
+        source_batch: ReportRevision,
+    ) -> PublishedReport:
+        title = str(final_cargo.get("title") or "Report without title")
+        try:
+            publish_options = _published_revision_options(draft, source_batch)
+        except LayoutContractError as exc:
+            raise _layout_contract_http_error(exc) from exc
+
+        existing = await _get_published_report_for_draft(db, draft.id, current_user.user_id)
+        if existing is not None:
+            if existing.final_cargo_json != final_cargo:
+                existing.title = title
+                existing.final_cargo_json = final_cargo
+                existing.options_json = publish_options
+                existing.label_print_status = "ready"
+                await _pin_published_revision(
+                    db,
+                    report=existing,
+                    source_batch=source_batch,
+                    title=title,
+                    final_cargo=final_cargo,
+                    options=publish_options,
+                )
+                await reset_voice_summary_for_text_change(db, existing)
+                await enqueue_voice_summary(db, existing)
+            elif existing.options_json != publish_options:
+                existing.options_json = publish_options
+            await db.flush()
+            return existing
+        return await _create_published_report(db, draft, current_user, final_cargo)
+
+- id: C4-07
+  card: C4
+  expected: clean
+  path: app/services/carrier_client.py
+  why: A status word from the carrier response is assigned to a call result object; this is not a state field of an entity with a lifecycle.
+  source: Result classes of an external service call that store the status word from the response.
+  code: |
+    class CarrierBookResult:
+        __slots__ = ("booking_id", "tracking_url", "status", "raw")
+
+        def __init__(
+            self, *, booking_id: str, tracking_url: str, status: str, raw: dict[str, Any]
+        ) -> None:
+            self.booking_id = booking_id
+            self.tracking_url = tracking_url
+            self.status = status
+            self.raw = raw
+
+
+    class CarrierCancelResult:
+        __slots__ = ("booking_id", "status", "raw")
+
+        def __init__(self, *, booking_id: str, status: str, raw: dict[str, Any]) -> None:
+            self.booking_id = booking_id
+            self.status = status
+            self.raw = raw
+
+
+    class CarrierStateResult:
+        __slots__ = ("booking_id", "shipment_ref", "amount_kopecks", "status", "raw", "success")
+
+        def __init__(
+            self,
+            *,
+            booking_id: str,
+            shipment_ref: str,
+            amount_kopecks: int,
+            status: str,
+            raw: dict[str, Any],
+            success: bool = False,
+        ) -> None:
+            self.booking_id = booking_id
+            self.shipment_ref = shipment_ref
+            self.amount_kopecks = amount_kopecks
+            self.status = status
+            self.raw = raw
+            self.success = success
+
+- id: C4-08
+  card: C4
+  expected: dirty
+  path: app/transport/stop_state.py
+  why: A bulk update moves stop rows to failed and cancelled through values(state=...) bypassing the transition check, whose table is imported in the module.
+  source: Completion method of a background event writer with a bulk update of the state field.
+  code: |
+    import asyncio
+    from contextlib import contextmanager
+    from contextvars import ContextVar
+    from datetime import UTC, datetime
+
+    from sqlalchemy import delete, select, update
+
+    from app.contracts.route_stop_states import STOP_TRANSITIONS, StopState
+    from app.db.route_stop.model import RouteStop
+
+    _active_writer: ContextVar[object | None] = ContextVar("active_stop_writer", default=None)
+
+
+    class StopWriter:
+        async def _close_unfinished(self):
+            async with self.factory() as session:
+                await session.execute(
+                    update(RouteStop)
+                    .where(
+                        RouteStop.route_id == self.route_id,
+                        RouteStop.state == StopState.RUNNING,
+                    )
+                    .values(state=StopState.FAILED.value, finished_at=datetime.now(UTC))
+                )
+                await session.execute(
+                    update(RouteStop)
+                    .where(
+                        RouteStop.route_id == self.route_id,
+                        RouteStop.state == StopState.QUEUED,
+                    )
+                    .values(state=StopState.CANCELLED.value, finished_at=datetime.now(UTC))
+                )
+                await session.commit()
+
+        @contextmanager
+        def scope(self):
+            self.thread.start()
+            token = _active_writer.set(self)
+            try:
+                yield self
+            finally:
+                _active_writer.reset(token)
+
+- id: C4-09
+  card: C4
+  expected: clean
+  path: app/background/price_import_parser.py
+  why: The price list version status is changed by a call of the write function that checks the transition; there are no direct assignments of the field.
+  source: Claiming the next record by a background handler with attempts exhausted through the write function.
+  code: |
+    async def _claim_next(
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> tuple | None:
+        now = _now()
+        async with session_factory() as db:
+            version = await db.scalar(
+                select(PriceImportVersion)
+                .where(
+                    PriceImportVersion.processing_status == "processing",
+                    or_(
+                        PriceImportVersion.handling_retry_at.is_(None),
+                        PriceImportVersion.handling_retry_at <= now,
+                    ),
+                )
+                .order_by(PriceImportVersion.created_at, PriceImportVersion.id)
+                .with_for_update(skip_locked=True)
+                .limit(1)
+            )
+            if version is None:
+                await db.rollback()
+                return None
+            if int(version.parse_attempts or 0) >= PARSE_MAX_ATTEMPTS:
+                version.processing_error = "parse_attempts_exhausted"
+                version.handling_retry_at = None
+                version.handling_lease_id = None
+                version.handling_lease_until = None
+                set_price_import_version_status(version, PriceImportStatus.FAILED)
+                await db.commit()
+                return None
+            lease_id = uuid.uuid4()
+            version.parse_attempts = int(version.parse_attempts or 0) + 1
+            version.handling_lease_id = lease_id
+            version.handling_lease_until = now + timedelta(seconds=_LEASE_SECONDS)
+            await db.commit()
+            return (version.id, lease_id, version.storage_path, version.parse_attempts)
+
+- id: C4-10
+  card: C4
+  expected: dirty
+  path: app/jobs/ticket_sweep.py
+  why: The nightly sweep closes requests by assigning ticket.status as a string inside a loop; there is no write function with a transition check in the sweep.
+  source: Periodic sweep of records where the state assignment is hidden in a loop among ordinary checks.
+  code: |
+    STALE_TICKET_DAYS = 14
+    SWEEP_BATCH = 200
+
+
+    async def close_stale_tickets(db: AsyncSession, *, now: datetime) -> int:
+        """Nightly sweep: tickets nobody answered for two weeks are closed."""
+
+        cutoff = now - timedelta(days=STALE_TICKET_DAYS)
+        rows = (
+            await db.scalars(
+                select(Ticket)
+                .where(
+                    Ticket.status.in_(("open", "waiting_customer")),
+                    Ticket.last_activity_at < cutoff,
+                    Ticket.deleted_at.is_(None),
+                )
+                .order_by(Ticket.last_activity_at)
+                .with_for_update(skip_locked=True)
+                .limit(SWEEP_BATCH)
+            )
+        ).all()
+        closed = 0
+        for ticket in rows:
+            if await _has_pending_courier_visit(db, ticket.id):
+                continue
+            if ticket.assignee_id is None:
+                log.warning("ticket_without_assignee ticket_id=%s", ticket.id)
+            ticket.status = "closed"
+            ticket.closed_at = now
+            ticket.close_reason = "stale"
+            closed += 1
+            log.info("ticket_closed_stale ticket_id=%s", ticket.id)
+        await db.commit()
+        return closed
+
+- id: C4-11
+  card: C4
+  expected: clean
+  path: app/services/ticket_state.py
+  why: The request is created with an initial state from the list declared in this same module, and creation with an initial state does not count.
+  source: Entity module with a list of states and a function that assigns the initial state to a new record.
+  code: |
+    from datetime import datetime
+    from enum import Enum
+
+    from app.models import Ticket
+
+
+    class TicketStatus(str, Enum):
+        OPEN = "open"
+        WAITING_CUSTOMER = "waiting_customer"
+        CLOSED = "closed"
+
+
+    TICKET_TRANSITIONS = {
+        TicketStatus.OPEN: {TicketStatus.WAITING_CUSTOMER, TicketStatus.CLOSED},
+        TicketStatus.WAITING_CUSTOMER: {TicketStatus.OPEN, TicketStatus.CLOSED},
+        TicketStatus.CLOSED: {TicketStatus.OPEN},
+    }
+
+
+    def initial_ticket_status() -> TicketStatus:
+        return TicketStatus.OPEN
+
+
+    def init_ticket_status(ticket: Ticket) -> None:
+        """Give a new, not yet stored ticket its first status."""
+
+        ticket.status = initial_ticket_status().value
+
+
+    def open_ticket(*, subject: str, courier_id: int, now: datetime) -> Ticket:
+        ticket = Ticket(
+            subject=subject,
+            courier_id=courier_id,
+            created_at=now,
+            last_activity_at=now,
+        )
+        init_ticket_status(ticket)
+        return ticket
+
+- id: C4-12
+  card: C4
+  expected: clean
+  path: app/db/route_lifecycle_guard.py
+  why: The status comparisons inside the database trigger text guard a transition and assign nothing to an entity field; besides, this is a schema declaration.
+  source: Text of a database trigger function that checks the allowed transitions of the state field.
+  code: |
+    _FUNCTION_SQL = f"""
+    CREATE OR REPLACE FUNCTION {FUNCTION_NAME}() RETURNS trigger AS $$
+    BEGIN
+      IF NEW.id IS DISTINCT FROM OLD.id
+         OR NEW.version IS DISTINCT FROM OLD.version
+         OR NEW.route_name IS DISTINCT FROM OLD.route_name
+         OR NEW.schema_version IS DISTINCT FROM OLD.schema_version
+         OR NEW.config_sha256 IS DISTINCT FROM OLD.config_sha256
+         OR NEW.created_by IS DISTINCT FROM OLD.created_by
+         OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+        RAISE EXCEPTION 'route payload is immutable';
+      END IF;
+
+      IF OLD.status = 'draft' AND NEW.status = 'active' THEN
+        IF NEW.activated_at IS NULL
+           OR NEW.superseded_at IS DISTINCT FROM OLD.superseded_at THEN
+          RAISE EXCEPTION 'invalid route activation transition';
+        END IF;
+        RETURN NEW;
+      END IF;
+
+      IF OLD.status = 'draft' AND NEW.status = 'expired' THEN
+        IF NEW.activated_at IS DISTINCT FROM OLD.activated_at
+           OR NEW.superseded_at IS NULL THEN
+          RAISE EXCEPTION 'invalid route draft expiry transition';
+        END IF;
+        RETURN NEW;
+      END IF;
+
+      IF OLD.status = 'active' AND NEW.status IN ('superseded', 'expired') THEN
+        IF NEW.activated_at IS DISTINCT FROM OLD.activated_at
+           OR NEW.superseded_at IS NULL THEN
+          RAISE EXCEPTION 'invalid route retirement transition';
+        END IF;
+        RETURN NEW;
+      END IF;
+
+      RAISE EXCEPTION 'invalid route lifecycle transition';
+    END;
+    $$ LANGUAGE plpgsql
+    """
+
+- id: C4-13
+  card: C4
+  expected: dirty
+  path: app/api/manifests.py
+  why: The waybill submission handler assigns manifest.status and bulk-updates Shipment.status through values(status=...) without calling the write function.
+  source: Request handler that changes the state of two related entities by direct writes.
+  code: |
+    @router.post("/manifests/{manifest_id}/dispatch")
+    async def dispatch_manifest(
+        manifest_id: uuid.UUID,
+        db: AsyncSession = Depends(get_db),
+        user: CurrentUser = Depends(require_dispatcher),
+    ) -> dict:
+        manifest = await db.get(Manifest, manifest_id)
+        if manifest is None or manifest.depot_id != user.depot_id:
+            raise HTTPException(status_code=404, detail="manifest_not_found")
+        if manifest.status != "sealed":
+            raise HTTPException(status_code=409, detail="manifest_not_sealed")
+        unpacked = await db.scalar(
+            select(func.count())
+            .select_from(Shipment)
+            .where(Shipment.manifest_id == manifest.id, Shipment.status == "created")
+        )
+        if unpacked:
+            raise HTTPException(status_code=409, detail="manifest_has_unpacked_shipments")
+        await db.execute(
+            update(Shipment)
+            .where(Shipment.manifest_id == manifest.id, Shipment.status == "packed")
+            .values(status="in_transit", dispatched_at=func.now())
+        )
+        manifest.status = "dispatched"
+        manifest.dispatched_by = user.id
+        manifest.dispatched_at = datetime.now(timezone.utc)
+        await db.commit()
+        return {"manifest_id": str(manifest.id), "status": manifest.status}
+- id: C4-14
+  card: C4
+  expected: dirty
+  path: app/background/shift_close.py
+  why: The background shift closing task assigns shift.status directly and does not call the write function with the transition check.
+  source: background shift closing task with a direct assignment of the state field among ordinary operations
+  code: |
+    import logging
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    from app.shifts.models import Shift, ShiftStatus
+    from app.shifts.payroll import accrue_shift_pay
+
+    log = logging.getLogger(__name__)
+
+
+    def close_finished_shifts(session: Session, now: datetime | None = None) -> int:
+        """Closes shifts whose time has run out and accrues pay."""
+        now = now or datetime.now(timezone.utc)
+        shifts = session.scalars(
+            select(Shift).where(Shift.status == ShiftStatus.ACTIVE, Shift.ends_at <= now)
+        ).all()
+        for shift in shifts:
+            accrue_shift_pay(session, shift)
+            shift.status = ShiftStatus.CLOSED
+            shift.closed_at = now
+            log.info("shift %s closed", shift.id)
+        session.commit()
+        return len(shifts)
+- id: C4-15
+  card: C4
+  expected: clean
+  path: app/services/pallet_state.py
+  why: This is the write function of the pallet state itself; it checks the transition against the table, so the assignment inside it does not count.
+  source: pallet state write function with a transition table
+  code: |
+    from enum import Enum
+
+    from sqlalchemy.orm import Session
+
+    from app.warehouse.models import Pallet
+
+
+    class PalletStatus(str, Enum):
+        EXPECTED = "expected"
+        RECEIVED = "received"
+        STORED = "stored"
+        SHIPPED = "shipped"
+
+
+    TRANSITIONS = {
+        PalletStatus.EXPECTED: {PalletStatus.RECEIVED},
+        PalletStatus.RECEIVED: {PalletStatus.STORED},
+        PalletStatus.STORED: {PalletStatus.SHIPPED},
+        PalletStatus.SHIPPED: set(),
+    }
+
+
+    class InvalidTransition(Exception):
+        pass
+
+
+    def transition_pallet_status(session: Session, pallet: Pallet, new: PalletStatus) -> Pallet:
+        current = PalletStatus(pallet.status)
+        if new not in TRANSITIONS[current]:
+            raise InvalidTransition(f"{current.value} -> {new.value}")
+        # the transition table check is above, the write is in one place
+        pallet.status = new.value
+        session.add(pallet)
+        return pallet
+- id: C4-16
+  card: C4
+  expected: dirty
+  path: app/pricing/upload_handler.py
+  why: In the price list upload error branch status is assigned as a string directly; the write function with a transition check is not called.
+  source: price list upload handler where the upload state is assigned as a string in the result branches
+  code: |
+    import logging
+
+    from sqlalchemy.orm import Session
+
+    from app.pricing.models import PriceListUpload
+    from app.pricing.parser import PriceListError, parse_price_list
+
+    log = logging.getLogger(__name__)
+
+
+    def handle_upload(session: Session, upload_id: int, raw: bytes) -> PriceListUpload:
+        """Parses the uploaded price list and saves the parse result."""
+        upload = session.get(PriceListUpload, upload_id)
+        if upload is None:
+            raise LookupError("upload_not_found")
+        try:
+            rows = parse_price_list(raw)
+        except PriceListError as exc:
+            log.warning("price list %s rejected: %s", upload_id, exc.code)
+            upload.status = "failed"
+            upload.error_code = exc.code
+            session.commit()
+            return upload
+        upload.rows_count = len(rows)
+        upload.status = "parsed"
+        # tariff rows are saved in a separate step
+        session.commit()
+        return upload
+- id: C4-17
+  card: C4
+  expected: clean
+  path: tests/factories/routes.py
+  why: This is a factory in tests; it builds the route directly in the needed state and does not count as writing around the writer.
+  source: test data factory functions that set the route state directly
+  code: |
+    from datetime import datetime, timedelta
+
+    from app.dispatch.models import Route, RouteStop
+
+
+    def make_route(session, courier, status="planned", stops=3):
+        route = Route(courier_id=courier.id, planned_date=datetime(2026, 1, 12).date())
+        route.status = status
+        session.add(route)
+        session.flush()
+        for number in range(stops):
+            session.add(RouteStop(route_id=route.id, position=number, address=f"Warehouse {number}"))
+        session.flush()
+        return route
+
+
+    def make_started_route(session, courier):
+        route = make_route(session, courier, status="started")
+        route.started_at = datetime(2026, 1, 12, 8, 0)
+        route.expected_end = route.started_at + timedelta(hours=6)
+        return route
+
+
+    def make_closed_route(session, courier):
+        route = make_route(session, courier)
+        route.status = "closed"
+        return route
+- id: C4-18
+  card: C4
+  expected: dirty
+  path: app/services/order_packing.py
+  why: A bulk update moves orders to packed through values(status=...) bypassing the write function with a transition check.
+  source: service-layer method with a bulk update of the order state field
+  code: |
+    from sqlalchemy import select, update
+    from sqlalchemy.orm import Session
+
+    from app.orders.models import Order
+    from app.warehouse.models import PackingTask
+
+
+    class OrderPackingService:
+        def __init__(self, session: Session) -> None:
+            self.session = session
+
+        def pending_orders(self, depot_id: int) -> list[Order]:
+            return list(
+                self.session.scalars(
+                    select(Order).where(Order.depot_id == depot_id, Order.status == "picked")
+                )
+            )
+
+        def mark_packed(self, order_ids: list[int], packer_id: int) -> int:
+            """Marks orders as packed in one operation."""
+            result = self.session.execute(
+                update(Order)
+                .where(Order.id.in_(order_ids), Order.status == "picked")
+                .values(status="packed", packed_by=packer_id)
+            )
+            for order_id in order_ids:
+                self.session.add(PackingTask(order_id=order_id, packer_id=packer_id))
+            self.session.commit()
+            return result.rowcount
+- id: C4-19
+  card: C4
+  expected: clean
+  path: app/services/request_create.py
+  why: The request is created with an initial state from the list declared in this same module, and creation with an initial state does not count as writing around the writer.
+  source: entity module with a list of states and a function that creates a new request
+  code: |
+    from datetime import datetime
+    from enum import Enum
+
+    from sqlalchemy.orm import Session
+
+    from app.requests.models import PickupRequest
+
+
+    class RequestStatus(str, Enum):
+        NEW = "new"
+        ASSIGNED = "assigned"
+        DONE = "done"
+        CANCELLED = "cancelled"
+
+
+    def create_request(session: Session, address: str, window_from: datetime, window_to: datetime):
+        """Creates a pickup request in the initial state."""
+        request = PickupRequest(address=address, window_from=window_from, window_to=window_to)
+        request.status = RequestStatus.NEW.value
+        request.created_at = datetime.utcnow()
+        session.add(request)
+        session.commit()
+        session.refresh(request)
+        return request
+- id: C4-20
+  card: C4
+  expected: dirty
+  path: app/webhooks/invoice_sent.py
+  why: The incoming event handler assigns processing_status of the invoice as a string directly and does not call the write function with a transition check.
+  source: incoming external system event handler with an assignment of the invoice state field
+  code: |
+    from fastapi import APIRouter, Depends, HTTPException
+    from sqlalchemy.orm import Session
+
+    from app.db import get_session
+    from app.finance.models import Invoice
+    from app.finance.schemas import InvoiceSentEvent
+
+    router = APIRouter(prefix="/hooks")
+
+
+    @router.post("/invoice-sent")
+    def invoice_sent(event: InvoiceSentEvent, db: Session = Depends(get_session)) -> dict:
+        invoice = db.get(Invoice, event.invoice_id)
+        if invoice is None:
+            raise HTTPException(status_code=404, detail="invoice_not_found")
+        if event.carrier_ref != invoice.carrier_ref:
+            raise HTTPException(status_code=409, detail="carrier_mismatch")
+        # the sending time comes from the external system
+        invoice.processing_status = "sent"
+        invoice.sent_at = event.sent_at
+        db.commit()
+        return {"invoice_id": invoice.id, "processing_status": invoice.processing_status}
+- id: C4-21
+  card: C4
+  expected: clean
+  path: app/health/probes.py
+  why: A status word is assigned to a check result object; this is not a state field of an entity with a lifecycle.
+  source: result class of an external system availability check that stores a status word
+  code: |
+    import time
+    from dataclasses import dataclass, field
+
+    import httpx
+
+
+    @dataclass
+    class ProbeResult:
+        name: str
+        status: str = "unknown"
+        latency_ms: float = 0.0
+        details: dict = field(default_factory=dict)
+
+
+    def probe_carrier_api(client: httpx.Client, url: str) -> ProbeResult:
+        # check of the carrier API availability
+        result = ProbeResult(name="carrier_api")
+        started = time.monotonic()
+        try:
+            response = client.get(url, timeout=3.0)
+            result.status = "ok" if response.status_code == 200 else "degraded"
+            result.details["http"] = response.status_code
+        except httpx.HTTPError as exc:
+            result.status = "down"
+            result.details["error"] = type(exc).__name__
+        result.latency_ms = (time.monotonic() - started) * 1000
+        return result
+- id: C4-22
+  card: C4
+  expected: dirty
+  path: app/bots/courier_commands.py
+  why: The courier command handler assigns courier.status directly among ordinary operations and does not call the write function with a transition check.
+  source: courier bot command handler with a direct assignment of the state field
+  code: |
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    from app.bots.replies import reply
+    from app.couriers.models import Courier
+    from app.shifts.models import Shift
+
+
+    def handle_break_command(session: Session, chat_id: int, minutes: int) -> str:
+        """Courier command "break" with a number of minutes."""
+        courier = session.scalars(select(Courier).where(Courier.chat_id == chat_id)).first()
+        if courier is None:
+            return reply("unknown_courier")
+        shift = session.scalars(
+            select(Shift).where(Shift.courier_id == courier.id, Shift.closed_at.is_(None))
+        ).first()
+        if shift is None:
+            return reply("no_open_shift")
+        if minutes > 30:
+            return reply("break_too_long", limit=30)
+        # the break is counted within the current shift
+        courier.status = "on_break"
+        shift.break_minutes += minutes
+        session.commit()
+        return reply("break_started", minutes=minutes)
+- id: C4-23
+  card: C4
+  expected: clean
+  path: app/api/shift_close.py
+  why: The shift state is changed by a call of the write function that checks the transition; there are no direct assignments of the field; the shift.status comparison only reads.
+  source: shift closing handler that calls the state write function
+  code: |
+    from fastapi import APIRouter, Depends, HTTPException
+    from sqlalchemy.orm import Session
+
+    from app.db import get_session
+    from app.shifts.models import Shift
+    from app.shifts.state import InvalidTransition, ShiftStatus, set_shift_status
+
+    router = APIRouter(prefix="/shifts")
+
+
+    @router.post("/{shift_id}/close")
+    def close_shift(shift_id: int, db: Session = Depends(get_session)) -> dict:
+        """Closes the shift at the supervisor's request."""
+        shift = db.get(Shift, shift_id)
+        if shift is None:
+            raise HTTPException(status_code=404, detail="shift_not_found")
+        if shift.status == ShiftStatus.CLOSED:
+            return {"shift_id": shift.id, "status": shift.status}
+        try:
+            set_shift_status(db, shift, ShiftStatus.CLOSED)
+        except InvalidTransition as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        db.commit()
+        return {"shift_id": shift.id, "status": shift.status}

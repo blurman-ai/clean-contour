@@ -1,0 +1,1088 @@
+# C12 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C12-01
+  card: C12
+  expected: dirty
+  path: src/shared/api/lib/shipmentPhase.ts
+  why: The shipment stage is assembled in the browser from the phase field and the revision status together, instead of one field of the server response (question 2).
+  source: function that derives the entity stage from several list fields and the revision status on the client side
+  code: |
+    const BATCH_STATUS = {
+      PACKING: "packing",
+      DONE: "done",
+      FAILED: "failed",
+      TIMEOUT: "timeout",
+    } as const;
+
+    const FLOW_PHASE = {
+      ROUTE_BUILDING: "route_building",
+      PACKING: "packing",
+      READY_TO_SEND: "ready_to_send",
+      DELIVERED: "delivered",
+    } as const;
+
+    export type ShipmentPhase =
+      | "initial"
+      | "delivered"
+      | "failed"
+      | "packing"
+      | "route_pending"
+      | "route_ready";
+
+    export function computeShipmentPhase(input: {
+      listItem?: ShipmentListItem | ShipmentStatusDetail | null;
+      activeBatch?: PackingRevision | null;
+    }): ShipmentPhase {
+      const item = input.listItem;
+      if (!item) return "initial";
+
+      const revision = input.activeBatch;
+      const listItem = item as ShipmentListItem & {
+        active_batch_status?: string | null;
+      };
+      const revStatus = revision?.status ?? listItem.active_batch_status ?? null;
+
+      if (item.phase === FLOW_PHASE.DELIVERED) return "delivered";
+      if (
+        isTerminalError(item as StatusCarrier) ||
+        revStatus === BATCH_STATUS.FAILED ||
+        revStatus === BATCH_STATUS.TIMEOUT
+      ) {
+        return "failed";
+      }
+      if (
+        item.phase === FLOW_PHASE.PACKING ||
+        (item.phase !== FLOW_PHASE.READY_TO_SEND &&
+          revStatus === BATCH_STATUS.PACKING)
+      ) {
+        return "packing";
+      }
+      if (isRouteBuilding(item as StatusCarrier)) return "route_pending";
+      if (isRouteReady(item as StatusCarrier)) return "route_ready";
+      return "route_pending";
+    }
+- id: C12-02
+  card: C12
+  expected: clean
+  path: src/shared/lib/useTickerText.ts
+  why: The state and phase fields describe a text typing animation in the interface; there is no such entity on the server.
+  source: hook of a phrase typing animation driven by a timer
+  code: |
+    export function useTickerText({
+      phrases,
+      enabled = true,
+      typingSpeed = 48,
+      deletingSpeed = 22,
+      pauseAfterType = 1800,
+      pauseAfterDelete = 400,
+    }: UseTickerTextOptions): TickerState {
+      const [state, setState] = useState<TickerInternal>(initialTickerState);
+
+      useEffect(() => {
+        if (!enabled || phrases.length === 0) return;
+
+        const current = phrases[state.phraseIndex] ?? "";
+        let delay = typingSpeed;
+        let nextState: typeof state | null = null;
+
+        if (state.phase === "typing") {
+          const nextChar = state.charIndex + 1;
+          nextState = {
+            ...state,
+            charIndex: nextChar,
+            text: current.slice(0, nextChar),
+            phase: nextChar >= current.length ? "pausing" : "typing",
+          };
+        } else if (state.phase === "pausing") {
+          nextState = { ...state, phase: "deleting", isTyping: false };
+          delay = pauseAfterType;
+        } else if (state.phase === "deleting") {
+          const nextChar = state.charIndex - 1;
+          nextState = {
+            ...state,
+            charIndex: nextChar,
+            text: current.slice(0, nextChar),
+            phase: nextChar <= 0 ? "waiting" : "deleting",
+          };
+          delay = deletingSpeed;
+        } else if (state.phase === "waiting") {
+          nextState = {
+            ...state,
+            phraseIndex: (state.phraseIndex + 1) % phrases.length,
+            charIndex: 0,
+            text: "",
+            phase: "typing",
+            isTyping: true,
+          };
+          delay = pauseAfterDelete;
+        }
+
+        if (!nextState) return;
+        const captured = nextState;
+        const id = setTimeout(() => setState(captured), delay);
+        return () => clearTimeout(id);
+      }, [enabled, state, phrases, typingSpeed, deletingSpeed, pauseAfterType, pauseAfterDelete]);
+
+      return { text: state.text, isTyping: state.isTyping };
+    }
+- id: C12-03
+  card: C12
+  expected: dirty
+  path: src/shared/api/lib/runStatus.ts
+  why: The launch failure is computed in the browser from seven conditions over different fields instead of one failure state in the server response (questions 1 and 2).
+  source: function that determines a launch failure from a set of status response fields
+  code: |
+    export const RUN_STATUS = {
+      QUEUED: "queued",
+      RUNNING: "running",
+      DONE: "done",
+      FAILED: "failed",
+      TIMEOUT: "timeout",
+      CANCELLED: "cancelled",
+    } as const;
+
+    export const FLOW_PHASE = {
+      LOADING: "loading",
+      DISPATCH: "dispatch",
+      FAILED: "failed",
+      DELIVERED: "delivered",
+    } as const;
+
+    export function isRunTerminalFailure(status: string | null | undefined) {
+      return (
+        status === RUN_STATUS.FAILED ||
+        status === RUN_STATUS.TIMEOUT ||
+        status === RUN_STATUS.CANCELLED
+      );
+    }
+
+    export function isDispatchRunFailure(status: ShipmentStatusDetail) {
+      return Boolean(
+        status.phase === FLOW_PHASE.FAILED ||
+          status.status === RUN_STATUS.FAILED ||
+          status.status === RUN_STATUS.TIMEOUT ||
+          status.status === RUN_STATUS.CANCELLED ||
+          isRunTerminalFailure(status.active_run_status) ||
+          isRunTerminalFailure(status.completed_run_status) ||
+          (!status.dispatch_in_progress && status.error),
+      );
+    }
+- id: C12-04
+  card: C12
+  expected: dirty
+  path: src/widgets/photo-check/model/useReviewHold.ts
+  why: The flag "the check awaits manual review" is recomputed in an effect from attempt_status and check_result.status and reset by a set of conditions, not taken as one server field (question 2).
+  source: hook that derives in an effect the check stage from several fields of the state snapshot
+  code: |
+    type CheckSnapshot = {
+      current_step_id?: string | null;
+      completed?: boolean;
+      attempt_status?: "active" | "pending_check" | "closed";
+      check_result?: { status: "passed" | "failed" | "needs_review" } | null;
+    };
+
+    export function useReviewHold(
+      snapshot: CheckSnapshot | null,
+      clarification: Clarification | null,
+      activeActionStepId: string | null,
+    ) {
+      const [reviewPending, setReviewPending] = useState<{ stepId: string } | null>(null);
+
+      useEffect(() => {
+        const stepId = snapshot?.current_step_id ?? null;
+        const stuck =
+          Boolean(stepId) &&
+          !clarification &&
+          snapshot?.attempt_status === "pending_check" &&
+          snapshot?.check_result?.status === "needs_review";
+
+        setReviewPending(prev => {
+          if (stuck) {
+            if (prev?.stepId === stepId) return prev;
+            return { stepId: stepId as string };
+          }
+          if (!prev) return prev;
+          if (activeActionStepId && activeActionStepId !== prev.stepId) {
+            return null;
+          }
+          if (clarification || snapshot?.completed) return null;
+          const checkStatus = snapshot?.check_result?.status;
+          if (
+            checkStatus &&
+            checkStatus !== "needs_review" &&
+            snapshot?.attempt_status !== "pending_check"
+          ) {
+            return null;
+          }
+          return prev;
+        });
+      }, [activeActionStepId, clarification, snapshot]);
+
+      return reviewPending;
+    }
+- id: C12-05
+  card: C12
+  expected: clean
+  path: src/shared/ui/RouteStopsNav.tsx
+  why: The highlighted navigation item depends on the page scroll and is not stored on the server; this is the state of the interface itself.
+  source: page table of contents with highlighting of the current section by scroll
+  code: |
+    export function RouteStopsNav({ contentRef, contentKey, maxLevel = 2 }: RouteStopsNavProps) {
+      const [items, setItems] = useState<StopItem[]>([]);
+      const [activeKey, setActiveKey] = useState<string | null>(null);
+
+      const refresh = useCallback(() => {
+        const next = collectStops(contentRef.current, maxLevel);
+        setItems(next);
+        setActiveKey(prev =>
+          prev && next.some(item => item.key === prev) ? prev : next[0]?.key ?? null,
+        );
+      }, [contentRef, maxLevel]);
+
+      useEffect(() => {
+        refresh();
+        const root = contentRef.current;
+        if (!root || typeof MutationObserver === "undefined") return;
+        const observer = new MutationObserver(() => refresh());
+        observer.observe(root, { childList: true, subtree: true });
+        return () => observer.disconnect();
+      }, [contentKey, contentRef, refresh]);
+
+      useEffect(() => {
+        const anchor = items[0]?.element;
+        const scrollRoot = anchor ? findScrollContainer(anchor) : null;
+        if (!scrollRoot) return;
+
+        let frame = 0;
+        const update = () => {
+          frame = 0;
+          setActiveKey(
+            pickActiveStopKey(items, scrollRoot.getBoundingClientRect().top),
+          );
+        };
+        const onScroll = () => {
+          if (frame) return;
+          frame = window.requestAnimationFrame(update);
+        };
+
+        update();
+        scrollRoot.addEventListener("scroll", onScroll, { passive: true });
+        return () => {
+          if (frame) window.cancelAnimationFrame(frame);
+          scrollRoot.removeEventListener("scroll", onScroll);
+        };
+      }, [items]);
+
+      if (items.length === 0) return null;
+      return <StopsList items={items} activeKey={activeKey} onPick={setActiveKey} />;
+    }
+- id: C12-06
+  card: C12
+  expected: dirty
+  path: src/widgets/shipment-builder/model/useShipmentResume.ts
+  why: The flag that a shipment is still being packed is assembled in the browser from a queue in localStorage and several list fields (question 2).
+  source: hook for resuming a draft by a link with a mix of flags from browser storage and the list response
+  code: |
+    export function useShipmentResume(activeShipmentId: string | null, ownerId: string) {
+      // The packing queue lives in the browser: a localStorage key per user.
+      const [queueJobs] = useState(() => readQueueJobs(ownerId));
+      const listQuery = useShipmentListQuery();
+      const layoutQuery = useShipmentStructureQuery(activeShipmentId);
+
+      const listShipment = listQuery.items.find(item => item.shipment_id === activeShipmentId);
+      const resumeStructure = layoutQuery.data;
+
+      const resumeStillPacking = Boolean(
+        (activeShipmentId && hasActiveQueueJob(queueJobs, activeShipmentId)) ||
+          (listShipment &&
+            (isShipmentPacking(listShipment) ||
+              listShipment.packing_in_progress === true)),
+      );
+
+      const resumeRouteReady = Boolean(
+        resumeStructure?.route_ready || (listShipment && isRouteReady(listShipment)),
+      );
+
+      const resumeDeliveredId =
+        resumeStructure?.delivery_id?.trim() || listShipment?.delivery_id?.trim() || null;
+
+      const resumeAlreadyDelivered = Boolean(
+        resumeDeliveredId ||
+          resumeStructure?.phase === "delivered" ||
+          resumeStructure?.status === "delivered" ||
+          listShipment?.status === "delivered",
+      );
+
+      const shouldShowDispatchReview =
+        resumeRouteReady &&
+        !resumeStillPacking &&
+        !resumeAlreadyDelivered &&
+        !listShipment?.has_completed_batch;
+
+      return {
+        resumeStillPacking,
+        resumeAlreadyDelivered,
+        shouldShowDispatchReview,
+        resumeDeliveredId,
+      };
+    }
+- id: C12-07
+  card: C12
+  expected: clean
+  path: src/features/imports/ui/ImportInProgressCard.tsx
+  why: The card draws by the status and stage fields from the server response, computing nothing from flags and timers.
+  source: list card for an entity being built, by the fields of the server response
+  code: |
+    export function ImportInProgressCard({
+      item,
+      isMobile = false,
+    }: {
+      item: PriceImportInProgressResponse;
+      isMobile?: boolean;
+    }) {
+      const t = useThemeTokens();
+      const { t: tr } = useTranslation();
+      // A failed import (status equals failed) is shown as "Did not load",
+      // without the step bar.
+      const failed = item.status === "failed";
+
+      return (
+        <Box
+          data-testid="import-in-progress-card"
+          style={{
+            border: `1px dashed ${t.border}`,
+            borderRadius: 16,
+            position: "relative",
+            width: "100%",
+            display: "flex",
+            flexDirection: "column",
+            padding: isMobile ? "12px 16px" : "16px 20px",
+          }}
+        >
+          <Stack gap={10} pl={isMobile ? 0 : 4} style={{ flex: 1, minHeight: 0 }}>
+            <Text fw={700} size={isMobile ? "sm" : "md"} c={t.textPrimary}>
+              {failed
+                ? tr("priceImports.inProgress.failedTitle")
+                : tr("priceImports.inProgress.title")}
+            </Text>
+            {failed ? null : (
+              <ImportBuildStrip
+                format={item.format}
+                stage={item.stage}
+                progressPercent={item.progress_percent}
+                showProgress
+                isBusy
+              />
+            )}
+            {item.retrying && !failed ? (
+              <Text size="xs" c={t.textMuted} data-testid="import-in-progress-retrying">
+                {tr("priceImports.retrying")}
+              </Text>
+            ) : null}
+          </Stack>
+        </Box>
+      );
+    }
+- id: C12-08
+  card: C12
+  expected: dirty
+  path: src/widgets/photo-check/model/usePhotoInspection.ts
+  why: The manual review state of a check is stored on the server, and the hook sets it by a browser timer of 90 seconds (questions 1 and 2).
+  source: screen hook with polling and a timer waiting for a decision on a submitted answer
+  code: |
+    type InspectionState = {
+      step_id: string;
+      status: "pending" | "needs_review" | "passed" | "failed";
+    };
+
+    type PendingPhotoCheck = {
+      stepId: string;
+      startedAt: number;
+      resubmit: () => Promise<InspectionState>;
+    };
+
+    export function usePhotoInspection(sessionKey: string) {
+      const [pendingCheck, setPendingCheck] = useState<PendingPhotoCheck | null>(null);
+      const [reviewPending, setReviewPending] = useState<{ stepId: string } | null>(null);
+
+      useEffect(() => {
+        setPendingCheck(null);
+        setReviewPending(null);
+      }, [sessionKey]);
+
+      // The photo is accepted, the decision on it comes later: we ask the server again
+      // every 10 seconds, and after 90 seconds we consider that the check went to manual review.
+      useEffect(() => {
+        if (!pendingCheck) return;
+        let cancelled = false;
+        let timer: ReturnType<typeof setTimeout>;
+        const POLL_MS = 10_000;
+        const MAX_WAIT_MS = 90_000;
+
+        const tick = async () => {
+          if (cancelled) return;
+          if (Date.now() - pendingCheck.startedAt >= MAX_WAIT_MS) {
+            setReviewPending({ stepId: pendingCheck.stepId });
+            setPendingCheck(null);
+            return;
+          }
+          try {
+            await pendingCheck.resubmit();
+          } catch {
+            // We will retry on the next tick: the photo is already accepted and does not change.
+          }
+          if (cancelled) return;
+          timer = setTimeout(() => void tick(), POLL_MS);
+        };
+
+        timer = setTimeout(() => void tick(), POLL_MS);
+        return () => {
+          cancelled = true;
+          clearTimeout(timer);
+        };
+      }, [pendingCheck]);
+
+      const controlsLocked = Boolean(pendingCheck) || Boolean(reviewPending);
+      return { pendingCheck, reviewPending, controlsLocked, startCheck: setPendingCheck };
+    }
+- id: C12-09
+  card: C12
+  expected: dirty
+  path: src/features/dispatch/model/pollReportUntilDone.ts
+  why: The report outcome by deadline is determined by the browser clock with its own limit of 15 minutes, although the report state is stored on the server (questions 1 and 2).
+  source: status polling loop with a local deadline that moves the entity to a failure by the browser time
+  code: |
+    const REPORT_QUEUE_TIMEOUT_MS = 15 * 60 * 1000;
+    const REPORT_POLL_MS = 2_500;
+
+    export async function pollReportUntilDone(args: {
+      queryClient: QueryClient;
+      reportId: string;
+      runId?: string | null;
+    }): Promise<{ runId: string | null; readyToSend: boolean }> {
+      const { queryClient, reportId } = args;
+      let runId: string | null = args.runId ?? null;
+      const deadline = Date.now() + REPORT_QUEUE_TIMEOUT_MS;
+
+      while (true) {
+        if (Date.now() >= deadline) {
+          throw new ReportQueueFailure("reportQueue.runTimeout", RUN_STATUS.TIMEOUT);
+        }
+        const status = await queryClient.fetchQuery<ReportStatusDetail>({
+          queryKey: queryKeys.report.status(reportId),
+          queryFn: () => getReportStatus(reportId),
+          staleTime: 0,
+        });
+        runId = status.active_run_id ?? status.completed_run_id ?? runId;
+
+        if (isReportRunFailure(status)) {
+          throw new ReportQueueFailure(
+            "reportQueue.runFailed",
+            status.error_code ?? undefined,
+          );
+        }
+
+        if (status.phase === FLOW_PHASE.SENT) {
+          return { runId, readyToSend: false };
+        }
+
+        const runCompleted =
+          status.completed_run_status === RUN_STATUS.DONE ||
+          status.active_run_status === RUN_STATUS.DONE;
+        if (isReadyToSend(status) || runCompleted) {
+          return { runId, readyToSend: true };
+        }
+
+        await sleep(REPORT_POLL_MS);
+      }
+    }
+- id: C12-10
+  card: C12
+  expected: clean
+  path: src/pages/workspace/prices/ui/PriceListViewerPage.tsx
+  why: The screen state is taken from the single status field of the task that came from the server, through one mapping function; the loading and the request error belong to the interface itself.
+  source: background task result view page with server polling
+  code: |
+    export function PriceListViewerPage() {
+      const { jobId } = useParams<{ jobId: string }>();
+      const [state, setState] = useState<ViewerState>({ status: "loading" });
+
+      const trimmedJobId = jobId?.trim() || null;
+
+      useEffect(() => {
+        if (!trimmedJobId) return;
+        let cancelled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        setState({ status: "loading" });
+
+        // The price list upload goes on in the background: while the task is queued or running,
+        // we ask the server with the same interval as the import screen.
+        const poll = () => {
+          getPriceImportJob(trimmedJobId)
+            .then(job => {
+              if (cancelled) return;
+              setState({ status: "ready", job });
+              if (job.status === "queued" || job.status === "running") {
+                timer = setTimeout(poll, PRICE_IMPORT_POLL_MS);
+              }
+            })
+            .catch((error: unknown) => {
+              if (cancelled) return;
+              const notFound =
+                error instanceof PriceImportApiError && error.status === 404;
+              setState({ status: "error", kind: notFound ? "not_found" : "other" });
+            });
+        };
+        poll();
+
+        return () => {
+          cancelled = true;
+          if (timer) clearTimeout(timer);
+        };
+      }, [trimmedJobId]);
+
+      const effectiveState: ViewerState = trimmedJobId
+        ? state
+        : { status: "error", kind: "not_found" };
+
+      const screenState: ScreenState =
+        effectiveState.status === "ready"
+          ? resolveJobScreenState(effectiveState.job.status)
+          : effectiveState.status;
+
+      return <ViewerShell screenState={screenState} state={effectiveState} />;
+    }
+- id: C12-11
+  card: C12
+  expected: clean
+  path: src/features/verify/ui/ResendCodeBlock.tsx
+  why: The state of the resend email button belongs to the interface; the entity on the server has no such field.
+  source: confirmation form with a resend email button and a local button state
+  code: |
+    export function ResendCodeBlock({ token }: { token: string }) {
+      const { t } = useTranslation();
+      const [resendState, setResendState] = useState<"idle" | "sending" | "sent">("idle");
+      const [resendError, setResendError] = useState<string | null>(null);
+
+      const handleResend = async () => {
+        if (!token || resendState === "sending") return;
+        setResendState("sending");
+        setResendError(null);
+        try {
+          await resendCourierEmail(token);
+          setResendState("sent");
+        } catch (err: unknown) {
+          setResendState("idle");
+          if (err instanceof CourierEmailApiError && err.status === 429) {
+            setResendError(
+              t("courierEmail.errors.resendTooOften", {
+                minutes: Math.max(1, Math.ceil((err.retryAfterSec ?? 300) / 60)),
+              }),
+            );
+            return;
+          }
+          setResendError(t("courierEmail.errors.resendFailed"));
+        }
+      };
+
+      return (
+        <Stack gap="xs">
+          <Button
+            variant="light"
+            loading={resendState === "sending"}
+            disabled={resendState === "sent"}
+            onClick={() => void handleResend()}
+          >
+            {resendState === "sent"
+              ? t("courierEmail.resendSent")
+              : t("courierEmail.resend")}
+          </Button>
+          {resendError ? <Text c="red" size="sm">{resendError}</Text> : null}
+        </Stack>
+      );
+    }
+- id: C12-12
+  card: C12
+  expected: clean
+  path: src/shared/ui/MapBackdrop.tsx
+  why: The failed flag means the browser could not create a graphics context; there is no server entity behind it.
+  source: background canvas component with a render unavailability flag
+  code: |
+    export function MapBackdrop() {
+      const canvasRef = useRef<HTMLCanvasElement | null>(null);
+      const [snapshot, setSnapshot] = useState<TileSnapshot | null>(null);
+      const [now, setNow] = useState(() => new Date());
+      const [failed, setFailed] = useState(false);
+
+      useEffect(() => {
+        let cancelled = false;
+        void loadMapTiles().then(next => {
+          if (!cancelled) setSnapshot(next);
+        });
+        return () => {
+          cancelled = true;
+        };
+      }, []);
+
+      useEffect(() => {
+        const id = window.setInterval(() => setNow(new Date()), TIME_TICK_MS);
+        return () => window.clearInterval(id);
+      }, []);
+
+      useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas || failed) return;
+
+        const gl = canvas.getContext("webgl", { alpha: true, depth: false });
+        if (!gl) {
+          setFailed(true);
+          return;
+        }
+
+        const vertex = buildShader(gl, gl.VERTEX_SHADER, VERT);
+        const fragment = buildShader(gl, gl.FRAGMENT_SHADER, FRAG);
+        const program = gl.createProgram();
+        if (!vertex || !fragment || !program) {
+          setFailed(true);
+          return;
+        }
+        gl.attachShader(program, vertex);
+        gl.attachShader(program, fragment);
+        gl.linkProgram(program);
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+          setFailed(true);
+          return;
+        }
+        return startRenderLoop(gl, program, snapshot, now);
+      }, [failed, snapshot, now]);
+
+      if (failed) return <StaticMapFallback />;
+      return <canvas ref={canvasRef} aria-hidden />;
+    }
+- id: C12-13
+  card: C12
+  expected: dirty
+  path: src/entities/receiving/lib/receivingStage.ts
+  why: The manifest receiving stage is stored on the server, and the function assembles it in the browser from four response fields (questions 1 and 2).
+  source: pure function that derives the receiving stage from several fields of the manifest response, by form
+  code: |
+    import type { ReceivingManifest } from "@/shared/api/types";
+
+    export type ReceivingStage =
+      | "loading"
+      | "counting"
+      | "ready_to_seal"
+      | "sealed"
+      | "handed_over";
+
+    type ManifestFields = Pick<
+      ReceivingManifest,
+      "pallets_expected" | "pallets_scanned" | "sealed_at" | "carrier_signed_at"
+    >;
+
+    // The stage is shown in the manifest header and on the card in the receiving list.
+    export function resolveReceivingStage(
+      manifest: ManifestFields | null | undefined,
+    ): ReceivingStage {
+      if (!manifest) return "loading";
+      if (manifest.carrier_signed_at) return "handed_over";
+      if (manifest.sealed_at) return "sealed";
+      if (
+        manifest.pallets_expected > 0 &&
+        manifest.pallets_scanned >= manifest.pallets_expected
+      ) {
+        return "ready_to_seal";
+      }
+      return "counting";
+    }
+
+    export function stageLabelKey(stage: ReceivingStage): string {
+      return `receiving.stage.${stage}`;
+    }
+
+    // A pallet can be added until the receiving reaches the seal.
+    export function canAddPallet(stage: ReceivingStage): boolean {
+      return stage === "counting" || stage === "ready_to_seal";
+    }
+- id: C12-14
+  card: C12
+  expected: dirty
+  path: src/features/tariffs/model/recalcStore.ts
+  why: The tariff recalculation state is stored on the server, and the failure is set by the browser clock after two minutes of waiting, not by a response (questions 1 and 2).
+  source: store with a polling loop of the recalculation task that declares a failure by the local time, not a hook, by form
+  code: |
+    import { create } from "zustand";
+    import { fetchRecalcJob } from "@/shared/api/tariffs";
+
+    const POLL_MS = 3_000;
+    const GIVE_UP_MS = 120_000;
+
+    type RecalcStatus = "idle" | "running" | "done" | "failed";
+
+    type RecalcStore = {
+      jobId: string | null;
+      status: RecalcStatus;
+      watch: (jobId: string) => void;
+      reset: () => void;
+    };
+
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    function stopTimer() {
+      if (timer) clearInterval(timer);
+      timer = null;
+    }
+
+    export const useRecalcStore = create<RecalcStore>(set => ({
+      jobId: null,
+      status: "idle",
+      // The recalculation runs on the server; here we only wait for its end.
+      watch: jobId => {
+        stopTimer();
+        const startedAt = Date.now();
+        set({ jobId, status: "running" });
+        timer = setInterval(async () => {
+          if (Date.now() - startedAt > GIVE_UP_MS) {
+            stopTimer();
+            set({ status: "failed" });
+            return;
+          }
+          try {
+            const job = await fetchRecalcJob(jobId);
+            if (job.finished) {
+              stopTimer();
+              set({ status: "done" });
+            }
+          } catch {
+            // the next tick will repeat the request
+          }
+        }, POLL_MS);
+      },
+      reset: () => {
+        stopTimer();
+        set({ jobId: null, status: "idle" });
+      },
+    }));
+- id: C12-15
+  card: C12
+  expected: dirty
+  path: src/features/routes/model/useRouteBuildPhase.ts
+  why: The route building stage is stored on the server, and the hook sets it in an effect from a flag in localStorage and two response fields (question 2).
+  source: hook with a useState stage set in useEffect from browser storage and route fields, by form
+  code: |
+    import { useCallback, useEffect, useState } from "react";
+    import { requestRouteBuild } from "@/shared/api/routes";
+    import { useRouteQuery } from "@/entities/route/api/useRouteQuery";
+
+    type BuildPhase = "idle" | "building" | "ready";
+
+    export function useRouteBuildPhase(routeId: string) {
+      const { data: route } = useRouteQuery(routeId);
+      const storageKey = `route-build-started:${routeId}`;
+      const [phase, setPhase] = useState<BuildPhase>("idle");
+
+      // The flag in localStorage is needed so as not to lose the wait after a page reload.
+      useEffect(() => {
+        const startedHere = localStorage.getItem(storageKey) === "1";
+        if (route?.optimized_at) {
+          localStorage.removeItem(storageKey);
+          setPhase("ready");
+        } else if (startedHere || route?.build_requested_at) {
+          setPhase("building");
+        } else {
+          setPhase("idle");
+        }
+      }, [route?.optimized_at, route?.build_requested_at, storageKey]);
+
+      const start = useCallback(async () => {
+        localStorage.setItem(storageKey, "1");
+        setPhase("building");
+        await requestRouteBuild(routeId);
+      }, [routeId, storageKey]);
+
+      return { phase, start };
+    }
+- id: C12-16
+  card: C12
+  expected: dirty
+  path: src/pages/orders/ui/OrderTracking.tsx
+  why: The order screen chooses the view by a ladder of five conditions over different response fields, and the order state is stored on the server (questions 1 and 2).
+  source: order tracking page with a ladder of conditions over response fields that chooses the screen, by form
+  code: |
+    import { useOrderQuery } from "@/entities/order/api/useOrderQuery";
+    import {
+      CancelledNotice,
+      CourierAssigned,
+      CourierOnTheWay,
+      DeliveredReceipt,
+      OrderSkeleton,
+      SearchingCourier,
+    } from "./tracking";
+
+    export function OrderTracking({ orderId }: { orderId: string }) {
+      const { data: order, isLoading } = useOrderQuery(orderId);
+
+      if (isLoading || !order) return <OrderSkeleton />;
+
+      // We show the view that corresponds to the last known delivery step.
+      if (order.cancelled_at) {
+        return <CancelledNotice reason={order.cancel_reason} />;
+      }
+      if (order.delivered_at && order.receipt_url) {
+        return (
+          <DeliveredReceipt url={order.receipt_url} deliveredAt={order.delivered_at} />
+        );
+      }
+      if (order.courier_id && order.picked_up_at) {
+        return <CourierOnTheWay courierId={order.courier_id} eta={order.eta} />;
+      }
+      if (order.courier_id) {
+        return <CourierAssigned courierId={order.courier_id} />;
+      }
+      return <SearchingCourier createdAt={order.created_at} />;
+    }
+- id: C12-17
+  card: C12
+  expected: dirty
+  path: src/entities/dock/model/useDockSlotStage.ts
+  why: The unloading slot stage is stored on the server, and the hook assembles it in useMemo from five fields of two responses (question 2).
+  source: hook that assembles the slot stage from the fields of two requests in useMemo, by form
+  code: |
+    import { useMemo } from "react";
+    import { useDockSlotQuery } from "../api/useDockSlotQuery";
+    import { useTruckArrivalQuery } from "../api/useTruckArrivalQuery";
+
+    export type DockSlotStage = "unknown" | "booked" | "unloading" | "unloaded" | "left" | "released";
+
+    export function useDockSlotStage(slotId: string) {
+      const slotQuery = useDockSlotQuery(slotId);
+      const arrivalQuery = useTruckArrivalQuery(slotId);
+      const slot = slotQuery.data;
+      const arrival = arrivalQuery.data;
+
+      // The stage is needed by the gate table and by the notification for the warehouse dispatcher.
+      const stage = useMemo<DockSlotStage>(() => {
+        if (!slot) return "unknown";
+        if (slot.released_at) return "released";
+        if (arrival?.gate_out_at) return "left";
+        if (arrival?.gate_in_at && !arrival.unloading_finished_at) return "unloading";
+        if (arrival?.gate_in_at) return "unloaded";
+        return "booked";
+      }, [slot, arrival]);
+
+      return {
+        stage,
+        isLoading: slotQuery.isLoading || arrivalQuery.isLoading,
+      };
+    }
+- id: C12-18
+  card: C12
+  expected: clean
+  path: src/features/price-import/ui/PriceFileDrop.tsx
+  why: The status field describes only the state of the upload zone itself (dragging, file sending); there is no server entity behind it.
+  source: file upload zone with a local interface state, by form
+  code: |
+    type DropStatus = "idle" | "dragging" | "uploading" | "failed";
+
+    export function PriceFileDrop({ onUploaded }: { onUploaded: (priceListId: string) => void }) {
+      const { t } = useTranslation();
+      const [status, setStatus] = useState<DropStatus>("idle");
+      const [fileName, setFileName] = useState<string | null>(null);
+
+      // The file goes to the server right after the choice or the drag.
+      const upload = async (file: File) => {
+        setFileName(file.name);
+        setStatus("uploading");
+        try {
+          const { price_list_id } = await uploadPriceFile(file);
+          setStatus("idle");
+          onUploaded(price_list_id);
+        } catch {
+          setStatus("failed");
+        }
+      };
+
+      return (
+        <Box
+          onDragOver={e => {
+            e.preventDefault();
+            if (status === "idle") setStatus("dragging");
+          }}
+          onDragLeave={() => setStatus(s => (s === "dragging" ? "idle" : s))}
+          onDrop={e => {
+            e.preventDefault();
+            const file = e.dataTransfer.files[0];
+            if (file) void upload(file);
+          }}
+          data-active={status === "dragging"}
+        >
+          <Text size="sm">{fileName ?? t("priceImport.drop.hint")}</Text>
+          {status === "uploading" ? <Loader size="xs" /> : null}
+          {status === "failed" ? <Text c="red">{t("priceImport.drop.failed")}</Text> : null}
+        </Box>
+      );
+    }
+- id: C12-19
+  card: C12
+  expected: clean
+  path: src/widgets/dispatch-board/model/useBoardView.ts
+  why: The mode field stores the chosen board view (table or map) in localStorage; there is no such state on the server.
+  source: board view choice hook with remembering in browser storage, by form
+  code: |
+    import { useCallback, useEffect, useState } from "react";
+
+    const VIEW_KEY = "dispatch-board:view";
+
+    type BoardView = "table" | "map";
+
+    function readView(): BoardView {
+      try {
+        return localStorage.getItem(VIEW_KEY) === "map" ? "map" : "table";
+      } catch {
+        return "table";
+      }
+    }
+
+    export function useBoardView() {
+      const [mode, setMode] = useState<BoardView>(readView);
+
+      useEffect(() => {
+        try {
+          localStorage.setItem(VIEW_KEY, mode);
+        } catch {
+          // in private mode the storage may be unavailable
+        }
+      }, [mode]);
+
+      const toggle = useCallback(
+        () => setMode(current => (current === "table" ? "map" : "table")),
+        [],
+      );
+
+      return { mode, setMode, toggle };
+    }
+- id: C12-20
+  card: C12
+  expected: clean
+  path: src/pages/invoices/ui/InvoiceScreen.tsx
+  why: The screen chooses the view by the single stage field of the server response through a mapping; no state is computed in the browser.
+  source: invoice page with a view choice by one response field through a switch, by form
+  code: |
+    import { useInvoiceQuery } from "@/entities/invoice/api/useInvoiceQuery";
+    import {
+      InvoiceCancelledView,
+      InvoiceDraftView,
+      InvoiceIssuedView,
+      InvoiceOverdueView,
+      InvoicePaidView,
+      InvoiceSkeleton,
+      LoadError,
+    } from "./views";
+
+    export function InvoiceScreen({ invoiceId }: { invoiceId: string }) {
+      const { data: invoice, isLoading, isError, refetch } = useInvoiceQuery(invoiceId);
+
+      if (isLoading) return <InvoiceSkeleton />;
+      if (isError || !invoice) return <LoadError onRetry={() => void refetch()} />;
+
+      // The view is chosen by the stage that the server returns.
+      switch (invoice.stage) {
+        case "draft":
+          return <InvoiceDraftView invoice={invoice} />;
+        case "issued":
+          return <InvoiceIssuedView invoice={invoice} />;
+        case "overdue":
+          return <InvoiceOverdueView invoice={invoice} />;
+        case "paid":
+          return <InvoicePaidView invoice={invoice} />;
+        case "cancelled":
+          return <InvoiceCancelledView invoice={invoice} />;
+      }
+    }
+- id: C12-21
+  card: C12
+  expected: clean
+  path: src/features/reports/model/useExportProgress.ts
+  why: The status and the failure code are taken from the server response, and Date.now() - startedAt serves only for the line "N seconds passed" and does not declare a failure.
+  source: report export polling hook where the browser clock goes only into showing the elapsed time, by form
+  code: |
+    import { useEffect, useState } from "react";
+    import { useQuery } from "@tanstack/react-query";
+    import { getReportExport, isFinalExportStatus } from "@/shared/api/reports";
+
+    export function useExportProgress(exportId: string) {
+      const [startedAt] = useState(() => Date.now());
+      const [elapsedSec, setElapsedSec] = useState(0);
+
+      const query = useQuery({
+        queryKey: ["report-export", exportId],
+        queryFn: () => getReportExport(exportId),
+        refetchInterval: q => (isFinalExportStatus(q.state.data?.status) ? false : 2_000),
+      });
+
+      const status = query.data?.status ?? "queued";
+      const finished = isFinalExportStatus(status);
+
+      useEffect(() => {
+        if (finished) return;
+        const id = setInterval(() => {
+          setElapsedSec(Math.floor((Date.now() - startedAt) / 1000));
+        }, 1_000);
+        return () => clearInterval(id);
+      }, [finished, startedAt]);
+
+      return {
+        status,
+        elapsedSec,
+        errorCode: query.data?.error_code ?? null,
+      };
+    }
+- id: C12-22
+  card: C12
+  expected: clean
+  path: src/features/pallets/ui/PalletForm.tsx
+  why: The readiness of the form for submission is computed from input fields that do not yet exist on the server; this is an interface state.
+  source: form validity function over several input fields and a component that uses it, by form
+  code: |
+    type PalletFormValues = {
+      sku: string;
+      quantity: string;
+      weightKg: string;
+      zone: string | null;
+    };
+
+    export function canSubmitPalletForm(values: PalletFormValues, isSaving: boolean): boolean {
+      if (isSaving) return false;
+      const quantity = Number(values.quantity);
+      const weight = Number(values.weightKg.replace(",", "."));
+      return (
+        values.sku.trim().length > 0 &&
+        Number.isInteger(quantity) &&
+        quantity > 0 &&
+        Number.isFinite(weight) &&
+        weight > 0 &&
+        values.zone !== null
+      );
+    }
+
+    export function PalletForm({ onSave }: { onSave: (values: PalletFormValues) => Promise<void> }) {
+      const [values, setValues] = useState<PalletFormValues>({
+        sku: "",
+        quantity: "1",
+        weightKg: "",
+        zone: null,
+      });
+      const [isSaving, setIsSaving] = useState(false);
+      // The submit button is unavailable until the form is fully filled or while saving is in progress.
+      const ready = canSubmitPalletForm(values, isSaving);
+
+      const submit = async () => {
+        setIsSaving(true);
+        try {
+          await onSave(values);
+        } finally {
+          setIsSaving(false);
+        }
+      };
+
+      return <PalletFields values={values} onChange={setValues} onSubmit={submit} disabled={!ready} />;
+    }

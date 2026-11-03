@@ -1,0 +1,794 @@
+# C10 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C10-01
+  card: C10
+  expected: dirty
+  path: pricing/imports.py
+  why: The price list file is processed by rows; the first bad row moves the whole upload to failed and stops processing, although the other rows are independent and could be accepted.
+  source: service function for loading a price list by sheets and rows of a workbook
+  code: |
+    import logging
+
+    from pricing.models import PriceImport, PriceItem
+    from pricing.parsing import parse_sheet
+
+    logger = logging.getLogger(__name__)
+
+    IGNORED_SHEETS = {"Help", "Archive"}
+
+
+    def run_price_import(session, job: PriceImport, workbook) -> None:
+        items: list[PriceItem] = []
+        for sheet in workbook.sheets:
+            if sheet.name in IGNORED_SHEETS:
+                continue
+            for row in parse_sheet(sheet):
+                if row.price is None or row.price < 0:
+                    logger.warning(
+                        "price_import_row_rejected job=%s sheet=%s row=%s",
+                        job.id,
+                        sheet.name,
+                        row.number,
+                    )
+                    job.status = "failed"
+                    job.error_code = "price_row_invalid"
+                    job.error_detail = f"{sheet.name}:{row.number}"
+                    session.commit()
+                    return
+                items.append(PriceItem(import_id=job.id, sku=row.sku, price=row.price))
+        session.add_all(items)
+        job.status = "done"
+        job.items_count = len(items)
+        session.commit()
+
+- id: C10-02
+  card: C10
+  expected: clean
+  path: documents/invoice_assembly.py
+  why: The parts of a waybill are all required together, and this is declared as data in the module itself (the INVOICE_PARTS composition), so a refusal when a part is missing does not count.
+  source: assembling a composite document from parts, whose composition is declared by a constant
+  code: |
+    INVOICE_PARTS = ("header", "lines", "totals", "signature")
+
+
+    class InvoiceIncomplete(Exception):
+        def __init__(self, missing: list[str]):
+            super().__init__("invoice_parts_missing:" + ",".join(missing))
+            self.missing = missing
+
+
+    class InvoicePartInvalid(Exception):
+        def __init__(self, part: str, problem: str):
+            super().__init__(f"invoice_part_invalid:{part}:{problem}")
+            self.part = part
+            self.problem = problem
+
+
+    def assemble_invoice(invoice: Invoice, parts: dict[str, str]) -> str:
+        """A waybill consists of the INVOICE_PARTS parts.
+
+        The carrier does not accept a waybill without any of them, so
+        the document has no partial assembly.
+        """
+        missing = [name for name in INVOICE_PARTS if name not in parts]
+        if missing:
+            raise InvoiceIncomplete(missing)
+        for name in INVOICE_PARTS:
+            problem = check_part(name, parts[name])
+            if problem is not None:
+                raise InvoicePartInvalid(name, problem)
+        invoice.status = "assembled"
+        return "\n".join(parts[name] for name in INVOICE_PARTS)
+
+- id: C10-03
+  card: C10
+  expected: clean
+  path: src/features/orders/ui/OrdersBulkActions.tsx
+  why: The search fires on Promise.all, but the orders in the selection are not parts of one whole but separate entities, so the first question of the card gets the answer no.
+  source: bulk action over the selected list rows in a screen component
+  code: |
+    export function useBulkReassign(selectedIds: Set<string>, rows: OrderRow[]) {
+      const reassignOrder = useReassignOrder();
+      const [busy, setBusy] = useState(false);
+
+      const reassign = async (courierId: string) => {
+        const picked = rows.filter(row => selectedIds.has(row.orderId));
+        setBusy(true);
+        try {
+          await Promise.all(
+            picked.map(row =>
+              reassignOrder.mutateAsync({
+                orderId: row.orderId,
+                payload: { courierId, reason: "bulk" },
+              }),
+            ),
+          );
+          notify({
+            color: "green",
+            title: "Orders handed over",
+            message: `Handed to the courier: ${picked.length}`,
+          });
+          clearSelection();
+        } catch (error) {
+          notify({
+            color: "red",
+            title: "Failed to hand over the orders",
+            message: getErrorMessage(error, "Repeat the action later"),
+          });
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      return { reassign, busy };
+    }
+
+- id: C10-04
+  card: C10
+  expected: dirty
+  path: src/widgets/warehouse-report/model/useWarehouseReport.tsx
+  why: Each zone's report section is loaded separately, but the failure of one section through Promise.all drops the whole report, although the other zones could be shown.
+  source: loading a report by sections and a screen with a common error handler
+  code: |
+    export async function loadWarehouseReport(reportId: string): Promise<WarehouseReport> {
+      const header = await fetchReportHeader(reportId);
+      const sections = await Promise.all(
+        header.zones.map(zone => fetchZoneSection(reportId, zone.id)),
+      );
+      return { ...header, sections };
+    }
+
+    export function useWarehouseReport(reportId: string) {
+      return useQuery({
+        queryKey: ["warehouse-report", reportId],
+        queryFn: () => loadWarehouseReport(reportId),
+        staleTime: 60_000,
+      });
+    }
+
+    export function WarehouseReportView({ reportId }: { reportId: string }) {
+      const query = useWarehouseReport(reportId);
+
+      if (query.isLoading) {
+        return <Loader />;
+      }
+      if (query.isError || !query.data) {
+        return <Alert color="red">Failed to load the warehouse report</Alert>;
+      }
+      return (
+        <Stack>
+          <Title order={3}>{query.data.title}</Title>
+          {query.data.sections.map(section => (
+            <ZoneSection key={section.zoneId} section={section} />
+          ))}
+        </Stack>
+      );
+    }
+
+- id: C10-05
+  card: C10
+  expected: dirty
+  path: reports/builder.py
+  why: The report sections by zones are independent; the first exception while building one section moves the whole report to failed and stops building the rest.
+  source: report building service by sections with a common section error handler
+  code: |
+    import logging
+
+    from reports.models import Report, ReportSection
+    from reports.render import SectionRenderError, render_section
+    from reports.storage import save_report_body
+
+    logger = logging.getLogger(__name__)
+
+
+    def build_report(report: Report, sections: list[ReportSection]) -> None:
+        """Builds the warehouse report, one section for each zone."""
+        report.status = "building"
+        report.save()
+        rendered: list[str] = []
+        try:
+            for section in sections:
+                logger.info("render_section zone=%s report=%s", section.zone_code, report.id)
+                rendered.append(render_section(section))
+            save_report_body(report, "\n\n".join(rendered))
+            report.status = "ready"
+        except SectionRenderError as exc:
+            logger.warning("report_failed report=%s code=%s", report.id, exc.code)
+            report.status = "failed"
+            report.error_code = exc.code
+        report.save()
+
+- id: C10-06
+  card: C10
+  expected: clean
+  path: reports/parts.py
+  why: Each section has its own outcome, the failure of one section is recorded in its result, and the report is ready if at least one section is accepted.
+  source: building a report as a list of results by sections
+  code: |
+    from dataclasses import asdict, dataclass
+
+
+    @dataclass
+    class PartResult:
+        section_id: str
+        status: str
+        text: str | None = None
+        error_code: str | None = None
+
+
+    def generate_part(section: ReportSection) -> PartResult:
+        try:
+            return PartResult(section.id, "ok", text=render_section(section))
+        except SectionRenderError as exc:
+            logger.warning("section_failed section=%s code=%s", section.id, exc.code)
+            return PartResult(section.id, "failed", error_code=exc.code)
+
+
+    def build_report(report: Report, sections: list[ReportSection]) -> None:
+        results = [generate_part(section) for section in sections]
+        report.parts = [asdict(result) for result in results]
+        report.failed_parts = [r.section_id for r in results if r.status == "failed"]
+        if any(result.status == "ok" for result in results):
+            report.status = "ready"
+        else:
+            report.status = "failed"
+            report.error_code = "no_section_built"
+        report.save()
+
+- id: C10-07
+  card: C10
+  expected: clean
+  path: imports/shipment_files.py
+  why: Inside the loop there is a raise and the status done, but the defect of a single file is only recorded among the rejected, and the upload refuses only when no file is accepted.
+  source: uploading several manifest files in one task
+  code: |
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+
+    def import_shipment_files(job: ImportJob, files: list[UploadedFile]) -> None:
+        accepted: list[Manifest] = []
+        rejected: list[dict[str, str]] = []
+        for uploaded in files:
+            try:
+                accepted.append(parse_manifest(uploaded))
+            except ManifestError as exc:
+                logger.warning(
+                    "manifest_rejected job=%s file=%s code=%s", job.id, uploaded.name, exc.code
+                )
+                rejected.append({"file": uploaded.name, "code": exc.code})
+                continue
+        if not accepted:
+            raise ImportRejected("no_valid_files", rejected)
+        for manifest in accepted:
+            store_manifest(job, manifest)
+        job.status = "done"
+        job.accepted_count = len(accepted)
+        job.rejected = rejected
+        job.save()
+
+- id: C10-08
+  card: C10
+  expected: dirty
+  path: src/features/tickets/model/submitTicket.ts
+  why: The application attachments are uploaded one by one, and the first failure sets the whole application to failed and stops uploading the other files that could have been accepted.
+  source: application submission function with attachment upload in client code
+  code: |
+    /** An application can be submitted without attachments: files are optional, each
+     *  is accepted separately and bound to the application by id. */
+    export async function submitTicket(
+      ticket: TicketDraft,
+      files: File[],
+      setStatus: (status: TicketStatus) => void,
+      setError: (message: string | null) => void,
+    ): Promise<void> {
+      setStatus("uploading");
+      setError(null);
+      const uploaded: string[] = [];
+      try {
+        for (const file of files) {
+          const stored = await uploadAttachment(ticket.id, file);
+          uploaded.push(stored.id);
+        }
+        await finalizeTicket(ticket.id, {
+          subject: ticket.subject,
+          body: ticket.body,
+          attachmentIds: uploaded,
+        });
+        setStatus("sent");
+      } catch (error) {
+        setStatus("failed");
+        setError(getErrorMessage(error, "Failed to submit the application"));
+      }
+    }
+
+- id: C10-09
+  card: C10
+  expected: clean
+  path: src/features/labels/model/printLabel.ts
+  why: The three parts of a label are declared required by the LabelParts type, so the refusal of the whole when one part fails is declared by the type and does not count.
+  source: loading the composite parts of a document that are required by type, before printing
+  code: |
+    // The carrier accepts a label only with all three parts at once.
+    export type LabelParts = {
+      address: AddressBlock;
+      barcode: BarcodeBlock;
+      customs: CustomsBlock;
+    };
+
+    export async function loadLabelParts(parcelId: string): Promise<LabelParts> {
+      const [address, barcode, customs] = await Promise.all([
+        fetchAddressBlock(parcelId),
+        fetchBarcodeBlock(parcelId),
+        fetchCustomsBlock(parcelId),
+      ]);
+      return { address, barcode, customs };
+    }
+
+    export async function printLabel(
+      parcelId: string,
+      setStatus: (status: PrintStatus) => void,
+    ): Promise<void> {
+      setStatus("loading");
+      try {
+        const parts = await loadLabelParts(parcelId);
+        await sendToPrinter(renderLabel(parts));
+        setStatus("printed");
+      } catch (error) {
+        logger.warn("label_print_failed", { parcelId, error });
+        setStatus("failed");
+      }
+    }
+
+- id: C10-10
+  card: C10
+  expected: dirty
+  path: shipping/labels_job.py
+  why: The labels of the parcels of one shipment are independent, but the error of the first parcel interrupts the loop and moves the task to failed without labels for the other parcels.
+  source: background task for printing labels per parcels of a shipment
+  code: |
+    import logging
+
+    from shipping.labels import LabelError, render_label
+
+    logger = logging.getLogger(__name__)
+
+
+    def run_labels_job(job, shipment) -> None:
+        job.status = "running"
+        job.started_at = utcnow()
+        labels: dict[str, bytes] = {}
+        for parcel in shipment.parcels:
+            try:
+                labels[parcel.id] = render_label(parcel)
+            except LabelError as exc:
+                logger.warning(
+                    "label_failed job=%s parcel=%s code=%s", job.id, parcel.id, exc.code
+                )
+                job.status = "failed"
+                job.error_code = exc.code
+                break
+        else:
+            job.status = "done"
+            job.result_count = len(labels)
+        job.finished_at = utcnow()
+        store_labels(job, labels)
+        job.save()
+
+- id: C10-11
+  card: C10
+  expected: clean
+  path: src/widgets/shift-summary/model/loadShiftSummary.ts
+  why: The summary blocks of a shift are loaded through Promise.allSettled, each block has its own outcome, and the failure of one block is shown only in it.
+  source: loading summary blocks with a separate outcome of each block
+  code: |
+    type BlockResult<T> =
+      | { state: "ready"; value: T }
+      | { state: "failed"; message: string };
+
+    function settle<T>(result: PromiseSettledResult<T>): BlockResult<T> {
+      if (result.status === "fulfilled") {
+        return { state: "ready", value: result.value };
+      }
+      return { state: "failed", message: getErrorMessage(result.reason, "Block unavailable") };
+    }
+
+    export async function loadShiftSummary(shiftId: string): Promise<ShiftSummary> {
+      const [couriers, stops, incidents] = await Promise.allSettled([
+        fetchCourierStats(shiftId),
+        fetchRouteStops(shiftId),
+        fetchShiftIncidents(shiftId),
+      ]);
+      return {
+        shiftId,
+        couriers: settle(couriers),
+        stops: settle(stops),
+        incidents: settle(incidents),
+      };
+    }
+
+    export function ShiftSummaryView({ summary }: { summary: ShiftSummary }) {
+      return (
+        <Stack>
+          <SummaryBlock title="Couriers" block={summary.couriers} render={CourierTable} />
+          <SummaryBlock title="Stops" block={summary.stops} render={StopList} />
+          <SummaryBlock title="Incidents" block={summary.incidents} render={IncidentList} />
+        </Stack>
+      );
+    }
+
+- id: C10-12
+  card: C10
+  expected: dirty
+  path: surveys/scoring.py
+  why: The questionnaire sections are scored independently, but an empty section throws an error that moves the whole questionnaire to scoring_failed and does not allow saving the scores of the other sections.
+  source: questionnaire score calculation service by sections with a common handler
+  code: |
+    from statistics import mean
+
+    MIN_ANSWERS = 1
+
+
+    def compute_section_score(section: SurveySection) -> float:
+        answers = [a.value for a in section.answers if a.value is not None]
+        if len(answers) < MIN_ANSWERS:
+            raise ScoreError(f"section_empty:{section.code}")
+        return round(mean(answers), 2)
+
+
+    def score_survey(session, survey: Survey) -> None:
+        survey.status = "scoring"
+        session.flush()
+        scores: dict[str, float] = {}
+        try:
+            for section in survey.sections:
+                scores[section.code] = compute_section_score(section)
+            total = round(mean(scores.values()), 2)
+        except ScoreError as exc:
+            logger.info("survey_scoring_failed survey=%s reason=%s", survey.id, exc)
+            survey.status = "scoring_failed"
+            survey.error_code = str(exc)
+            session.commit()
+            return
+        survey.section_scores = scores
+        survey.total_score = total
+        survey.status = "scored"
+        session.commit()
+- id: C10-13
+  card: C10
+  expected: dirty
+  path: notifications/delivery_notice.py
+  why: The notification to the recipient goes out through channels in turn, an error of one channel moves the whole notification to failed and breaks the other channels, although each channel could be sent on its own.
+  source: Sending a delivery notification through several channels with a common notification status, by form
+  code: |
+    import logging
+
+    from notifications.channels import ChannelError, send_email, send_push, send_sms
+    from notifications.models import DeliveryNotice
+
+    logger = logging.getLogger(__name__)
+
+    CHANNELS = (("email", send_email), ("sms", send_sms), ("push", send_push))
+
+
+    def send_delivery_notice(notice: DeliveryNotice) -> None:
+        """Notifies the recipient of delivery through the channels available to them."""
+        notice.status = "sending"
+        notice.save()
+        sent: list[str] = []
+        try:
+            for name, send in CHANNELS:
+                if not notice.has_contact(name):
+                    continue
+                send(notice.recipient, notice.text)
+                sent.append(name)
+        except ChannelError as exc:
+            logger.warning("notice_failed notice=%s channel=%s", notice.id, exc.channel)
+            notice.status = "failed"
+            notice.error_code = exc.code
+            notice.channels_sent = sent
+            notice.save()
+            return
+        notice.channels_sent = sent
+        notice.status = "sent"
+        notice.save()
+- id: C10-14
+  card: C10
+  expected: clean
+  path: src/features/routes/model/useBulkDelete.ts
+  why: The search fires on Promise.all, but the routes in the selection are independent table records, and the selection has no common status or result.
+  source: Batch deletion of selected rows of the routes table, by form
+  code: |
+    import { useMutation, useQueryClient } from "@tanstack/react-query";
+
+    import { deleteRoute } from "../api/routes";
+
+    export function useBulkDelete(onDone: () => void) {
+      const queryClient = useQueryClient();
+
+      return useMutation({
+        mutationFn: async (routeIds: string[]) => {
+          await Promise.all(routeIds.map(routeId => deleteRoute(routeId)));
+          return routeIds.length;
+        },
+        onSuccess: count => {
+          queryClient.invalidateQueries({ queryKey: ["routes"] });
+          notify({ color: "green", message: `Routes deleted: ${count}` });
+          onDone();
+        },
+        onError: error => {
+          queryClient.invalidateQueries({ queryKey: ["routes"] });
+          notify({
+            color: "red",
+            message: getErrorMessage(error, "Failed to delete the routes"),
+          });
+        },
+      });
+    }
+- id: C10-15
+  card: C10
+  expected: dirty
+  path: returns/photos.py
+  why: Return photos are attached one by one, the first photo that is too large rejects the whole application and stops accepting the rest, although the application needs only one photo.
+  source: Accepting photos for a return application with a common application status, by form
+  code: |
+    from returns.models import ReturnApplication
+    from returns.storage import save_photo
+
+    # photos are stored in the application attachment storage
+    MIN_PHOTOS = 1
+    MAX_PHOTO_BYTES = 8 * 1024 * 1024
+
+
+    def attach_return_photos(application: ReturnApplication, uploads: list) -> None:
+        """Attaches photos to the application, at least one is needed."""
+        stored = []
+        for upload in uploads:
+            if upload.size > MAX_PHOTO_BYTES:
+                application.status = "rejected"
+                application.reject_reason = f"photo_too_large:{upload.filename}"
+                application.save()
+                return
+            stored.append(save_photo(application.id, upload))
+        if len(stored) < MIN_PHOTOS:
+            application.status = "rejected"
+            application.reject_reason = "photo_required"
+            application.save()
+            return
+        application.photo_ids = [photo.id for photo in stored]
+        application.status = "accepted"
+        application.save()
+- id: C10-16
+  card: C10
+  expected: dirty
+  path: src/jobs/dailySummary.ts
+  why: The summary is built by warehouses, the independent warehouse rows are needed separately, but an error of one warehouse moves the whole summary to failed and stops collecting the rest.
+  source: Server task that builds the daily summary by warehouses with a common summary status, by form
+  code: |
+    export async function buildDailySummary(db: Db, day: string): Promise<void> {
+      // the summary goes out in the mailing at 07:00
+      const summary = await db.summaries.create({ day, status: "building" });
+      const warehouses = await db.warehouses.listActive();
+      const rows: WarehouseRow[] = [];
+
+      for (const warehouse of warehouses) {
+        try {
+          rows.push(await collectWarehouseRow(warehouse.id, day));
+        } catch (error) {
+          logger.warn({ warehouse: warehouse.code, error }, "warehouse row failed");
+          await db.summaries.update(summary.id, {
+            status: "failed",
+            errorCode: "warehouse_unavailable",
+            errorDetail: warehouse.code,
+          });
+          throw error;
+        }
+      }
+
+      await db.summaries.update(summary.id, {
+        status: "ready",
+        rows,
+        builtAt: new Date(),
+      });
+    }
+- id: C10-17
+  card: C10
+  expected: clean
+  path: app/shipping/customs_packet.py
+  why: The packet is accepted by the carrier only with all three documents, the composition is declared by the CustomsPacket type, so a refusal when a part is missing does not count.
+  source: Assembling a customs packet from three required documents, the composition is declared by the type, by form
+  code: |
+    from dataclasses import dataclass
+
+    from app.shipping.documents import load_document
+
+
+    class PacketIncomplete(Exception):
+        def __init__(self, missing: list[str]) -> None:
+            super().__init__("customs_packet_incomplete:" + ",".join(missing))
+            self.missing = missing
+
+
+    @dataclass(frozen=True)
+    class CustomsPacket:
+        """The carrier does not accept a packet without any of the three documents."""
+
+        invoice: bytes
+        packing_list: bytes
+        declaration: bytes
+
+
+    def build_customs_packet(shipment_id: int) -> CustomsPacket:
+        loaded = {
+            name: load_document(shipment_id, name)
+            for name in ("invoice", "packing_list", "declaration")
+        }
+        missing = [name for name, body in loaded.items() if body is None]
+        if missing:
+            raise PacketIncomplete(missing)
+        return CustomsPacket(**loaded)
+- id: C10-18
+  card: C10
+  expected: dirty
+  path: handover/packet.py
+  why: The pages of a shift handover act are built for each vehicle, but the failure of one page through gather moves the whole act to failed, although the other pages are independent and could be issued.
+  source: Assembling a shift handover act from pages by vehicles with a common act status, by form
+  code: |
+    import asyncio
+    import logging
+
+    from handover.models import HandoverPacket
+    from handover.render import PageRenderError, render_vehicle_page
+
+    logger = logging.getLogger(__name__)
+
+
+    async def build_handover_packet(db, shift) -> HandoverPacket:
+        packet = HandoverPacket(shift_id=shift.id, status="building")
+        db.add(packet)
+        await db.flush()
+        # we build the pages by vehicles in parallel
+        try:
+            pages = await asyncio.gather(
+                *(render_vehicle_page(shift.id, vehicle.id) for vehicle in shift.vehicles)
+            )
+        except PageRenderError as exc:
+            logger.warning("handover_failed shift=%s vehicle=%s", shift.id, exc.vehicle_id)
+            packet.status = "failed"
+            packet.error_code = exc.code
+            await db.commit()
+            return packet
+        packet.pages = list(pages)
+        packet.status = "ready"
+        await db.commit()
+        return packet
+- id: C10-19
+  card: C10
+  expected: clean
+  path: orders/bulk_cancel.py
+  why: A loop over orders with an exception on the first failure, but the orders are independent records, and the list has no common status or result.
+  source: Batch cancellation of selected orders, each order is a separate record, by form
+  code: |
+    from orders.errors import OrderNotCancellable, OrderNotFound
+    from orders.models import Order
+    from orders.writer import set_order_status
+
+
+    def cancel_orders(session, order_ids: list[int], reason: str) -> int:
+        """Cancels the selected orders one by one."""
+        cancelled = 0
+        for order_id in order_ids:
+            order = session.get(Order, order_id)
+            if order is None:
+                raise OrderNotFound(order_id)
+            if order.status == "delivered":
+                raise OrderNotCancellable(order_id)
+            set_order_status(order, "cancelled")
+            order.cancel_reason = reason
+            session.commit()
+            cancelled += 1
+        return cancelled
+
+
+    def cancel_orders_for_courier(session, courier_id: int, reason: str) -> int:
+        ids = [
+            order.id
+            for order in session.query(Order).filter(Order.courier_id == courier_id)
+        ]
+        return cancel_orders(session, ids, reason)
+- id: C10-20
+  card: C10
+  expected: dirty
+  path: app/tariffs/sheet.py
+  why: The tariff sheet is built from tables by zones, the failure of one zone raises an exception and moves the whole sheet to failed, although the other zones are independent.
+  source: Building a tariff sheet from tables by zones with a common sheet status, by form
+  code: |
+    import logging
+
+    from app.tariffs.errors import ZoneTableError
+    from app.tariffs.models import TariffSheet
+    from app.tariffs.zones import load_zone_table
+
+    logger = logging.getLogger(__name__)
+
+
+    def build_tariff_sheet(session, sheet: TariffSheet) -> None:
+        """The sheet consists of tables by zones, each zone is calculated separately."""
+        sheet.status = "building"
+        session.flush()
+        tables = {}
+        try:
+            for zone in sheet.zones:
+                tables[zone.code] = load_zone_table(session, sheet.id, zone.code)
+        except ZoneTableError as exc:
+            logger.warning("tariff_sheet_failed sheet=%s zone=%s", sheet.id, exc.zone_code)
+            sheet.status = "failed"
+            sheet.error_code = "zone_table_invalid"
+            sheet.error_detail = exc.zone_code
+            session.commit()
+            return
+        sheet.tables = tables
+        sheet.status = "ready"
+        session.commit()
+- id: C10-21
+  card: C10
+  expected: clean
+  path: src/features/shipments/model/refreshStatuses.ts
+  why: The search fires on Promise.all, but the shipments are independent records of a list, and the selection has no common status.
+  source: Updating the statuses of selected shipments in a list, by form
+  code: |
+    export function useRefreshSelected(shipmentIds: string[]) {
+      const queryClient = useQueryClient();
+      const [pending, setPending] = useState(false);
+
+      const refresh = async () => {
+        setPending(true);
+        try {
+          await Promise.all(
+            shipmentIds.map(async shipmentId => {
+              const fresh = await fetchShipment(shipmentId);
+              queryClient.setQueryData(["shipment", shipmentId], fresh);
+            }),
+          );
+          // the list will redraw itself after the cache update
+          notify({ color: "green", message: `Updated: ${shipmentIds.length}` });
+        } catch (error) {
+          notify({ color: "red", message: getErrorMessage(error, "Failed to update") });
+        } finally {
+          setPending(false);
+        }
+      };
+
+      return { refresh, pending };
+    }
+- id: C10-22
+  card: C10
+  expected: clean
+  path: reports/section_results.py
+  why: Each page of the report is built with return_exceptions, the failure of one is recorded in its result, and the report counts as built if at least one is accepted.
+  source: Building a report with gather with a separate outcome of each page, by form
+  code: |
+    import asyncio
+
+    from reports.models import Report
+    from reports.render import PageRenderError, render_page
+
+
+    async def render_all(report: Report, page_ids: list[str]) -> None:
+        outcomes = await asyncio.gather(
+            *(render_page(report.id, page_id) for page_id in page_ids),
+            return_exceptions=True,
+        )
+        pages = []
+        for page_id, outcome in zip(page_ids, outcomes):
+            if isinstance(outcome, PageRenderError):
+                pages.append({"page": page_id, "status": "failed", "code": outcome.code})
+            elif isinstance(outcome, Exception):
+                pages.append({"page": page_id, "status": "failed", "code": "render_unexpected"})
+            else:
+                pages.append({"page": page_id, "status": "ok", "body": outcome})
+        report.pages = pages
+        ok_count = sum(1 for page in pages if page["status"] == "ok")
+        report.status = "ready" if ok_count else "failed"
+        if not ok_count:
+            report.error_code = "no_page_built"
