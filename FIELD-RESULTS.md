@@ -107,6 +107,33 @@ The dirty places sit in files that dozens of people changed with their agents an
 
 None of these needs domain knowledge to spot. They are the kind of mistake the cards target: state decided by text, a missing value read as a valid one, a transition written past the place that guards it.
 
+## Kotlin and Go
+
+The cards were first written with Python and TypeScript signs. Without an ORM, state in Kotlin and Go projects lives in SQL strings, and a search for `.status =` there mostly hits `WHERE` predicates and constants. Each card now names signs for Kotlin (and Java) and Go: `SET … status =` with a guard on the old value, repeated `IN ('…')` lists, a waiting literal together with whatever moves it out. The signs were revised after the first four runs and tried again on three.
+
+| Project | Language | Candidates | Dirty |
+|---|---|---|---|
+| [recurso](https://github.com/recurso-dev/recurso), billing | Go | 104 | 45 |
+| [hardcount](https://github.com/gethardcount/hardcount), billing | Go | 101 | 36 |
+| [arx](https://github.com/Jolls/arx), shop-floor ERP | Go | 134 | 40 |
+| [task-orchestrator](https://github.com/jpicklyk/task-orchestrator) | Kotlin | 88 | 32 |
+| [kanban-vision-api-kt](https://github.com/agnaldo4j/kanban-vision-api-kt) | Kotlin | 28 | 9 |
+| a private marketplace with escrow and payouts | Kotlin | 113 | 60 |
+
+Agent commits are 81–98% in the open projects. A run costs $1–3 on Sonnet.
+
+Confirmed by reading the code:
+- recurso: a late `payment_failed` webhook sets a paid invoice to `past_due`. The handler checks only tenant ownership, and the repository `Update` writes the status with no guard, so dunning can pursue a customer who already paid.
+- the private marketplace: a refund that the payment provider keeps refusing is retried every five minutes with no limit. The table allows only `PENDING` and `PAID`, and nobody is told.
+
+## The check next to a plain bug hunt
+
+The same model was given the private marketplace with no rules and no description of the product, only "a Kotlin backend and a TypeScript frontend; find the bugs and risks a user or operator would hit". It took 48 steps and $0.95 and reported 12 findings.
+
+The two lists barely overlap: one stuck payout timer is on both. The plain hunt found security and business-logic problems the cards do not cover: a JWT signing key with a default in the config, payouts blocked after a seller's payment account is re-approved, an electronic signature stubbed in production. It did not find the endless refund. The cards found it, along with refusal reasons lost on the way and a `GET` that writes to the database every five seconds.
+
+On a second codebase the plain hunt stopped after 17 steps and $0.40 with seven minor findings, noting that it had not read most of the code. A free-form audit picks its own depth. The cards make the run cover every sign across the code, which costs more and finds a different class of problem. They are a check of how state is built, not a replacement for looking for bugs.
+
 ## Bugs these projects already fixed
 
 391 commits with "fix" or "bug" that touch statuses, error codes or exception handling, across four projects. 172 were classified by a model and the positive answers read by hand. In 24 of them (14%), following a principle would clearly have prevented the bug. Most often: a wait with no failure state, state derived from indirect signs, unknown counted as success, and a default substituted for a missing value.
