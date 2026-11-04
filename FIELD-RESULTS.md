@@ -7,6 +7,7 @@ What the rules and the check found in open-source projects written mostly by cod
 - Coding agents don't keep this hygiene on their own. They write statuses straight from request handlers, derive state from logs and files, and refuse with free text.
 - Rules in `CLAUDE.md` alone help partly, because agents often don't open them. A check named in the task itself helps most.
 - Across 40 agent-written projects the check found 1423 dirty places, and 33 of the projects have no instruction about state, transitions or refusal codes.
+- In 15 popular projects where between 41 and 789 people commit with agents, the files those people change most hold the same share of dirty places. All 15 have agent instructions; none of them covers state, transitions or refusal codes.
 
 ## Same tasks, with and without the rules
 
@@ -74,6 +75,37 @@ The authors haven't been told about these yet.
 | omnivision-solutions/tuti | An upload stayed `PROCESSING` forever when the queue refused it | a wait with no way out | [#530](https://github.com/omnivision-solutions/tuti/pull/530) |
 
 Each fix comes with a test that fails without it. These are open pull requests and the authors may decide otherwise.
+
+## Popular projects where many people use agents
+
+786 Python and TypeScript projects with at least 1000 stars and commits after 15 October 2026. For each, the history since 1 May 2026 gives the number of different people (bots excluded) who committed with an agent's signature. 15 projects with many such people and with stateful code were checked: vLLM, Home Assistant, t3code, claude-mem, Superset, n8n, Grafana, Ray, Sentry, Paperclip, LiteLLM, Airflow, OpenHands, Langfuse and Actual Budget. Between 41 and 789 people per project committed with an agent in that time.
+
+These projects are too large to check whole. In each, the check covered up to 40 files that the most different people had changed with agents since May.
+
+| | |
+|---|---|
+| Files checked | 600 |
+| Candidates | 810 |
+| Dirty | 312 (39%, the same share as the small agent-written projects) |
+| Projects with agent instructions | 15 of 15, often hundreds of lines |
+| Of those, instructions that cover state, transitions or refusal codes | 0 |
+
+The dirty places sit in files that dozens of people changed with their agents and that went through review. Typical ones, confirmed by reading the code:
+
+| What the code does | What happens |
+|---|---|
+| The status of a failed run is chosen by whether the error text contains "cancel" | A tool error about a cancelled request records the run as cancelled by the user |
+| "Success" is computed as "status is not error and no error object" | A crashed run without an error object reports success |
+| "Everything except processing counts as completed" | A failed run counts as done, and re-triggering it does nothing |
+| An exception handler logs every HTTP error and doesn't re-raise | Adding a user to a team fails silently whatever the cause |
+| A repository declares that failed and cancelled are terminal; a route revives them with a raw UPDATE | Jobs restart past their attempt limit |
+| An UPDATE that cancels pending items omits the filter its own preceding SELECT used | Finished items are rewritten as cancelled |
+| A status lookup returns "pending" when the record is missing | An unknown, expired or abandoned job looks like it's still running |
+| A "device not found" value is checked as "device off" | The thermostat shows idle while its heater is missing |
+| A busy flag is set before an await and cleared after it, with no finally | After one failure, the action never runs again until reload |
+| `title.startswith("add")` | "Address flaky test" is listed as a significant change |
+
+None of these needs domain knowledge to spot. They are the kind of mistake the cards target: state decided by text, a missing value read as a valid one, a transition written past the place that guards it.
 
 ## Bugs these projects already fixed
 
