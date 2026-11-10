@@ -14,6 +14,15 @@ Measured results on agent-written open-source projects: [FIELD-RESULTS.md](FIELD
 | `skills/clean-contour-check/SKILL.md` | 15 cards (C1–C15): search pattern, closed questions, verdict rule, exclusions, dirty and clean example | an agent that checks code |
 | `exam/` | runner and corpus of 331 labelled fragments | whoever edits a card or picks a model for checking |
 
+## Install as a Claude Code plugin
+
+```
+/plugin marketplace add blurman-ai/plugins
+/plugin install clean-contour@blurman-ai
+```
+
+The plugin gives the `clean-contour-check` skill. The rules still go into the project: copy `RULES.md` to `docs/clean-contour.md` and add the `AGENTS.md` line from the next section.
+
 ## Install into a project
 
 Run from the root of the target project:
