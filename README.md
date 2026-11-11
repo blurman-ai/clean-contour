@@ -83,6 +83,12 @@ Measured on DeepSeek flash, 3 answers per fragment, worst answer counts (03.11.2
 
 For another model, run the exam first: [exam/README.md](exam/README.md).
 
+The corpus is Python and TypeScript. The cards' search signs for Kotlin, Go and C# are written, but the exam does not measure them yet; a corpus for another language goes into its own directory and runs with `bin/exam --corpus exam/corpus-<lang>`.
+
+## C#
+
+The cards name C# signs for EF Core, Dapper, ASP.NET Core (controllers and minimal APIs), Blazor and MVVM clients (WPF, MAUI, Avalonia). `RULES.md` shows how the instruments look in C#: an assembly per entity with `private set`, an architecture test, `BannedApiAnalyzers` on old names, a field registry over `DbContext.Model`, and an exhaustive `switch` over the refusal code enum with CS8509 as an error. Install is the same; `.Tests` projects, EF migrations and generated `*.g.cs` are excluded from every search.
+
 ## License
 
 Apache 2.0, see [LICENSE](LICENSE).

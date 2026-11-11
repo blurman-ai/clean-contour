@@ -89,7 +89,14 @@ default: if the value was not loaded from the database, did not arrive in the
 response, or did not parse, that is a refusal with a reason (principle 7).
 Forbidden at the place of reading: `.get(key, default)`, `x or default`,
 `getattr(object, name, default)`, `except …: return default`, `None` instead of
-a value for which the code takes a default. A deferred database column read
+a value for which the code takes a default. In C#: `x ?? fallback`,
+`GetValueOrDefault(key, fallback)`, `TryParse(s, out var n) ? n : 0`,
+`FirstOrDefault()` read as a value, `configuration["X"] ?? "…"`,
+`GetValue<T>(key, fallback)`, `catch { return default; }`, and `default!` or
+`null!` that silences the nullable compiler. The schema default lives in EF
+Core `HasDefaultValue` or in the options class, once. An EF Core navigation
+that was not loaded reads as `null` or an empty collection, not an error: read
+it through `Include` or a projection, never as "absent". A deferred database column read
 without loading raises an error and does not return empty. A test stub of an
 object carries the field and does not rely on the code skipping it.
 
@@ -150,6 +157,29 @@ The minimum without which a contour does not count as clean:
   refusal that goes to a user and requires a code from the contract's list; the
   debt list only shrinks; on the client the "code → text" table is typed by the
   list from the contract, and the compiler checks completeness.
+
+In C# the same instruments look like this:
+
+- the import contract: one project (assembly) per entity, its state property
+  `{ get; private set; }` or `internal set`, `InternalsVisibleTo` only for its
+  tests; the boundary between projects is checked by an architecture test
+  (NetArchTest, ArchUnitNET) in CI. A name the contract cannot forbid (an old
+  function, a writer from inside an allowed project) goes into
+  `BannedSymbols.txt` of `Microsoft.CodeAnalysis.BannedApiAnalyzers` with the
+  warning made an error; reflection and `Activator.CreateInstance` by name are
+  what the guard test searches for;
+- the registry of state fields walks `DbContext.Model.GetEntityTypes()`, takes
+  every property named `Status`/`State`/`Stage`/`Phase`/`Outcome`, and compares
+  the check constraint with `Enum.GetNames` of its type; the constraint itself
+  is built in `HasCheckConstraint` from the same `Enum.GetNames`;
+- the transition guard is the one method `TransitionTo(next)` on the entity,
+  reading a static table `IReadOnlyDictionary<TStatus, TStatus[]>`; the test
+  walks every pair of enum values;
+- the registry of refusal codes: codes are an enum in the contract project,
+  returned in `ProblemDetails` as an extension (`code`), the client type is
+  generated from OpenAPI (NSwag, Kiota); the client's "code → text" is a
+  `switch` expression over that enum, and `<WarningsAsErrors>CS8509</WarningsAsErrors>`
+  turns a code without text into a build error.
 
 Each instrument has a control case on which it is required to fail: a planted
 import, a planted field, a planted call of the old function, a member of the

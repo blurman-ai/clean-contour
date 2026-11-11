@@ -44,9 +44,12 @@ the project's CI; here they appear only where a question to the code is needed.
 
 **Languages.** The questions apply to any language; the code examples are in
 Python and TypeScript. Each search names the Python and TypeScript signs first,
-then the signs for Kotlin (and Java) and Go. Where a project has no ORM, state
-is written and read in SQL strings, so search those too. Tests in those
-languages are `src/test/`, `*Test.kt`, `*_test.go`.
+then the signs for Kotlin (and Java), Go and C#. Where a project has no ORM,
+state is written and read in SQL strings, so search those too. Tests in those
+languages are `src/test/`, `*Test.kt`, `*_test.go`, and in C# the `*.Tests`
+projects, `*Tests.cs`, classes with `[Fact]`, `[Theory]`, `[Test]`. EF Core
+migrations (`Migrations/*.cs`, `*.Designer.cs`) and generated code
+(`*.g.cs`, `obj/`) are excluded from every search.
 
 ---
 
@@ -63,6 +66,16 @@ into a status type or returned as one; helpers like `latestOfType(`,
 `json_extract(data,`. Version and settings tables (`*_versions`, `settings`) read
 the same way are not a state. `range events`, `events.any {` and `valueOf(` are
 mostly noise.
+
+**C#:** LINQ over an event collection that returns or assigns a status:
+`events.Any(e => e.Type == …)`, `.OrderByDescending(e => e.CreatedAt).FirstOrDefault()`
+over a `DbSet<*Event>`, `*Results`, `*Runs`, `*Log` whose `.Type`/`.Status` is
+returned as the entity's state, `.Aggregate(` over events, `.LastOrDefault(e =>`.
+In Dapper or raw SQL: `ORDER BY … DESC` with `TOP 1` / `LIMIT 1`,
+`ROW_NUMBER() OVER (PARTITION BY` over an events table, `JSON_VALUE(data,`.
+Event sourcing (Marten, EventStoreDB): an inline projection that persists the
+state document is the stored field; `AggregateStreamAsync` or a live
+`Apply(`/`When(` fold in a read path that decides a status is a candidate.
 
 **Questions:**
 1. Does the fragment return or set a state, stage, result, or a
@@ -111,6 +124,15 @@ Keep only hits where a status is returned or assigned within three lines;
 `COUNT(*) … > 0` returned as a bool from a function named `*Locked`, `Has*`,
 `Can*` counts.
 
+**C#:** a branch on an empty result that **returns or assigns a status**:
+`FirstOrDefaultAsync(…) is null` / `== null` followed by `return <Enum>.`,
+`?? <Enum>.NotStarted`, `!await db.X.AnyAsync(`, `CountAsync() == 0`,
+`switch { null => <Enum>.X }`, Dapper `QuerySingleOrDefaultAsync` checked for
+null, SQL `COALESCE(…, '<STATE>')`, `CASE WHEN EXISTS`. The same branch followed
+by `return NotFound()`, `Results.NotFound()`, `throw new *NotFoundException`,
+`Unauthorized()`, `BadRequest()` does not count. An `AnyAsync(` returned as a
+bool from a method named `Is*`, `Has*`, `Can*` counts.
+
 **Questions:**
 1. Does the branch on an empty selection decide the state of an entity ("not
    started", "not ready", "no access", "no account")?
@@ -141,6 +163,14 @@ assignment.
 **Kotlin and Go:** no single sign; look in files named `*Queries`, `*Facts`,
 `*View*`, access and entitlement code, and SQL that joins the status of another
 table into a status of its own (`EXISTS (SELECT 1 FROM … WHERE status`).
+
+**C#:** EF Core `.Include(x => x.Job)` followed by `x.Job.Status ==` in a
+method or property that returns the status of `x`; a projection
+`Select(d => new … { Status = d.Run.Status == … ? … })`; an expression-bodied
+property `Status => Job.State switch {`; SQL `EXISTS (SELECT 1 FROM … WHERE
+status`. Look in `*Query`, `*ReadModel`, `*Projection`, `*ViewModel`, `*Dto`
+mappers (AutoMapper `ForMember(d => d.Status, …)`), and authorization code
+(`AuthorizationHandler<`, policy requirements).
 
 **Questions:**
 1. Does the fragment return or write the state of entity A?
@@ -187,6 +217,18 @@ a boolean flipped in place (`SET is_active = NOT is_active`, `is_locked`,
 a repository `Update(ctx, x)` that writes the whole struct with no status in its
 `WHERE`.
 
+**C#:** `.Status =`, `.State =`, `.Stage =` outside the entity; a record
+`with { Status = … }` followed by `Update(`/`SaveChangesAsync`; EF Core
+`ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, …))`;
+`Entry(x).Property(p => p.Status).CurrentValue =`; Dapper or raw SQL
+`SET\s+\w*status\w*\s*=` with no guard of the old value in the `WHERE`. A
+property declared `{ get; set; }` on an entity with a lifecycle is itself a
+reason to search its writers; with `{ get; private set; }` the compiler already
+confines writes to the entity, so look only inside it for methods that assign
+it besides the writer. Writers are named `TransitionTo`, `ChangeStatus`,
+`Apply`, `MarkFailed`. An object initializer `new Order { Status =
+OrderStatus.Draft }` in the entity's own factory is creation.
+
 **Questions:**
 1. Is this an assignment to the state field of an entity with a lifecycle?
 2. Is the fragment not the write function of this field itself (its name is
@@ -217,6 +259,13 @@ the model pairs.
 **Kotlin and Go:** the same names (`isReady`, `CanOpen`), but most duplicates are SQL
 predicates with no function name: compare `status NOT IN (…)`, `status <> '…'`,
 `CASE status WHEN …` and `payment_status != '…'` across files.
+
+**C#:** the same names as properties or methods (`IsReady`,
+`CanOpen`, `IsOverdue =>`), and LINQ predicates with no name:
+`.Where(o => o.Status != … && …)` repeated across queries and services,
+`Expression<Func<T, bool>>` fields, SQL `CASE status WHEN` in Dapper strings. A
+shared specification or extension method (`o.IsOpen()`, `Specs.Open`) that both
+places call is the "one shared function".
 
 **Questions (about a pair of fragments):**
 1. Put the question of each fragment as a phrase "<verb> <object>" ("did the
@@ -261,6 +310,16 @@ from attempts import attempt_passed
 `/…/.test(` on a message. `.startsWith(` on provider ids (`pi_`, `cs_`, `sk_live_`)
 inside the adapter that declares them does not count.
 
+**C#:** `ex.Message.Contains(`, `.Message.StartsWith(`,
+`ex.Message ==`, `ex.ToString().Contains(`, `Regex.IsMatch(ex.Message`, an
+exception filter `catch (…) when (ex.Message.Contains(…))`,
+`problem.Detail.Contains(` on a client, `response.ReasonPhrase ==`, `.Code.StartsWith(` on a
+refusal code. Clean: `catch (TimeoutException)`, `catch (TaskCanceledException)
+when (!ct.IsCancellationRequested)`, `PostgresException.SqlState ==
+PostgresErrorCodes.…`, `SqlException.Number`, `HttpRequestException.StatusCode`,
+a typed `ErrorCode` property. `.StartsWith(` on provider ids inside the adapter
+that declares them does not count.
+
 **Questions:**
 1. Does the branch choose behavior (refusal code, retry, text for the user,
    kind of failure)?
@@ -293,6 +352,14 @@ label literal, `.startswith("<prefix>:")`, `unit === "steps"`,
 `startsWith("as-is:`), a body or note text compared to a constant, a kind read
 from whether a foreign key is null (`packageId == null`). Path, URL, host and
 header parsing is noise.
+
+**C#:** `string.Equals(label, "…", StringComparison.OrdinalIgnoreCase)`
+or `== "…"` against a natural-language literal, `Id.StartsWith("…:")`,
+`Unit == "pcs"`, `Name.Contains(' ')`, `x.GetType().Name ==`, a kind read
+from a nullable foreign key (`x.ParentId == null`, `PackageId is null`) or
+from which derived class an object deserialized into, when the class has a
+`Kind` property. `Enum.Parse`/`TryParse` of a declared enum inside its parsing
+method is the declaration. Path, URL, host and header parsing is noise.
 
 **Questions:**
 1. What does the branch do: does it decide **what the thing is** and how the
@@ -330,6 +397,12 @@ that chooses the processing.
 refusal does not count. In Go, kind dispatch is often a `switch` whose
 `default:` does real work for "everything else". If the "kind" is a lifecycle role, the card does not
 apply: that is C4.
+
+**C#:** `is not <Type>`, `!(x is <Type>)`, `.Kind != Kind.`,
+`!= OrderType.`, `!IsPallet(`. A `switch` statement whose `default:` or a
+switch expression whose `_ =>` arm does real work for "everything else" is a
+negative check written as a positive one. `is not <Type>` followed by `throw`
+or `return Error(` does not count; `is not null` is not a kind.
 
 **Questions:**
 1. Does the branch choose the **processing** (what to do with the object next)
@@ -374,6 +447,16 @@ Also `case "a", "b", "c":` in Go, `when (x) { "A" -> …` string branches repeat
 across Kotlin modules, `html/template` ladders `{{if eq .X "a"}}…{{else if eq .X
 "b"}}`, and SQL `CASE … WHEN` / `ORDER BY CASE` over the same statuses.
 
+**C#:** an `enum` next to `new[] { "a", "b", "c" }`, `new HashSet<string> {`,
+`ImmutableHashSet.Create(`, a collection expression `["a", "b", "c"]`, a
+`static class` of `const string` that mirrors an enum, `[EnumMember(Value =
+"…")]` or `[JsonStringEnumMemberName("…")]` values that copy a domain enum,
+`case "a": case "b":` or `"a" or "b" or "c"` patterns repeated across files,
+SQL `IN ('A','B','C')` in Dapper strings, and an EF Core
+`HasCheckConstraint("…", "status IN (…)")` written as a literal instead of
+built from `Enum.GetNames`. A type generated from the API contract (NSwag,
+Kiota, OpenAPI Generator) is not a copy.
+
 **Questions (about a pair):**
 1. Do both sets list the same thing: state values, kinds, refusal codes, ids of
    the options of one question? Calendar and physical constants (days of the
@@ -410,6 +493,13 @@ without examining the results.
 `.forEach {` over parts under one `@Transactional`.
 **Go:** `return err` inside `for … range parts`; `errgroup` over parts of one
 result, where the first error cancels the rest.
+
+**C#:** `throw` or `return Result.Fail(`/`return Error(` inside `foreach`
+over parts before one `SaveChangesAsync`, inside one
+`BeginTransactionAsync`/`TransactionScope`; `await Task.WhenAll(parts.Select(…))`
+where the first exception discards the other results; `Parallel.ForEachAsync`
+over parts of one result; a `CancellationTokenSource.Cancel()` in a part's
+`catch`.
 
 **Questions:**
 1. Name the object or field that receives an overall status or result from
@@ -455,6 +545,17 @@ Status literals may be lowercase (`'processing'`) or constants
 queues or background workers, where "pending" means a human decision, has
 nothing for this card.
 
+**C#:** writes of `Status.Pending`, `Processing`, `Queued`, `Running`
+followed by `SaveChangesAsync` and then `await _http.`, `_bus.Publish(`,
+`_queue.EnqueueAsync(`, `BackgroundJob.Enqueue(`; an `INSERT` into a table whose
+column has `HasDefaultValue(…Pending)`. Then look for the worker whose query
+reads the same literal and has a path to a final state: `BackgroundService` with
+`while (!stoppingToken.IsCancellationRequested)`, `PeriodicTimer`, Hangfire
+recurring jobs, Quartz `IJob`, a lease column (`LeaseUntil < now`). Dirty
+signs: Polly `RetryForever`/`WaitAndRetryForever`, `HttpClient.Timeout =
+Timeout.InfiniteTimeSpan`, `CancellationToken.None` passed to an external call
+while the entity waits, a `catch` that only logs and leaves the status as is.
+
 **Questions:**
 1. Before or during an external call (model, network, queue, background
    handler), does the entity get a waiting state? If there is no external call
@@ -494,6 +595,16 @@ The same applies to `.js`/`.jsx` files and to vanilla JS that rebuilds the page
 after `fetch(…).then` (`.value =`, `innerHTML =`), and to conditions over the
 server object in server templates.
 
+**C#:** Blazor: a field `phase`, `status`, `isReady` in `@code` set in
+`OnAfterRenderAsync`/`OnParametersSetAsync`, by a `System.Threading.Timer`, or
+from `ProtectedLocalStorage`/`ILocalStorageService`; an `@if` ladder over the
+server object (`@if (Model.Status == … && Model.Error == null)`). WPF, MAUI,
+Avalonia: a view model property `Phase`, `State`, `IsReady` computed from
+several DTO fields, an `IMultiValueConverter` that combines them, a
+`DispatcherTimer` that declares a failure, `DateTime.UtcNow - dto.StartedAt >`
+deciding an expiry. A view model that exposes one server field and a converter
+that maps one value to a view are the clean case.
+
 **Questions:**
 1. Is the value the state or stage of an entity that is stored on the server
    (a draft, a build, an attempt, an answer, an assignment)?
@@ -528,6 +639,13 @@ const phase = draft.stage;   // the server returns the stage, the screen draws b
 writes values into a form or into the user's choice (`prefill`, `seed`,
 `apply*`, `onSuccess`, `.then(` with `set*`), while the user can change the
 same fields before the response.
+
+**C#:** Blazor: fields bound with `@bind` or an `EditForm` model filled after
+`await Http.GetFromJsonAsync` in `OnInitializedAsync`, while the form is already
+rendered; WPF, MAUI, Avalonia: an async command or `async void` handler that
+writes two-way bound properties after `await`, with no `IsBusy`/`IsEnabled`
+gate and no `CanExecute`. Clean: `@if (loaded) { <EditForm …> }`,
+`disabled="@isLoading"`, `IsEnabled="{Binding IsIdle}"`.
 
 **Questions:**
 1. Does the response of the request write values into fields that the user can
@@ -566,6 +684,13 @@ handlers. The write is usually one call away: list the service methods named
 `MarkUsed`, then check their `GET` callers. A constant declared in a domain
 package and used nowhere else (a status nobody assigns) is the "declaration
 without a writer" half.
+
+**C#:** `[HttpGet]`, `app.MapGet(`, `group.MapGet(`; the write is usually one call
+away: services named `Get*Async`, `List*Async`, `Count*Async` that contain
+`SaveChangesAsync`, `.Add(`, `.Update(`, `ExecuteUpdateAsync`, Dapper
+`ExecuteAsync(`. An `enum` member nobody assigns outside tests, and a `DbSet<T>`
+with no `.Add(`/`AddRange(` anywhere, are the "declaration without a writer"
+half. `IMemoryCache.Set` and `IDistributedCache` writes are not a database write.
 
 **Questions:**
 1. Is there in the list of places outside `tests/` at least one line that
@@ -619,6 +744,21 @@ Most projects wrap the response in their own helper (`respondError`,
 `renderError`, `writeJSONError`, `EitherRespond`): find it first and read its
 mapping, then search its callers. On the client, `err?.response?.data?.error?.message
 || "<literal>"` shows the server text without the code.
+
+**C#:** server: `catch (Exception) { return BadRequest("…"); }`,
+`return Problem(ex.Message)`, `StatusCode(500, ex.Message)`,
+`Results.BadRequest("<text>")` (a string instead of a `ProblemDetails` with a
+code), an `IExceptionHandler` or `UseExceptionHandler` that maps every
+exception to one code, middleware `context.Response.WriteAsync(ex.Message)`,
+`ModelState.AddModelError("", "<text>")`, FluentValidation `.WithMessage(`
+without `.WithErrorCode(`, FluentResults/ErrorOr `Error.Failure("<text>")`
+without a code from a list. Client (Blazor, WPF, MAUI):
+`catch (HttpRequestException) { error = "<literal>"; }`,
+`ReadFromJsonAsync<ProblemDetails>()` that does not read the code extension,
+a `Dictionary<string, string>` of codes to texts, `switch (code)` over string
+literals instead of a generated enum. Make `switch` over the code enum
+exhaustive and turn CS8509 into an error: the compiler then checks that every
+code has a text.
 
 **Questions:**
 1. Does the branch show the user the text of a refusal or hand the refusal to
