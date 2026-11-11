@@ -2,7 +2,7 @@
 """Exam for the clean-contour cards: does a model find dirty code, and does it
 leave clean code alone.
 
-    bin/exam --model-cmd '<command>' [--cards C7,C9] [--repeat N] [--jobs N] --out report.json
+    bin/exam --model-cmd '<command>' [--cards C7,C9] [--split dev|holdout] [--repeat N] [--jobs N] --out report.json
     bin/exam --check                 only check the corpus and the cards; no model is called
     bin/exam --show-prompt C7-03     print the prompt the model will get
     bin/exam --selftest              control cases; no network
@@ -209,6 +209,27 @@ def load_corpus(directory: Path) -> list[Item]:
     return items
 
 
+def split_items(items: list[Item], split: str | None) -> list[Item]:
+    """A fixed split of every card's fragments: about one third in `holdout`,
+    the rest in `dev`. Dirty and clean fragments are split separately, and the
+    assignment is a hash of the fragment id, so it is stable across processes."""
+    if split is None:
+        return items
+    if split not in ("dev", "holdout"):
+        raise ExamError(f"--split must be dev or holdout, got {split!r}")
+    groups: dict[tuple[str, str], list[Item]] = {}
+    for it in items:
+        groups.setdefault((it.card, it.expected), []).append(it)
+    holdout: set[str] = set()
+    for group in groups.values():
+        ordered = sorted(group, key=lambda it: hashlib.sha256(it.id.encode()).hexdigest())
+        for it in ordered[:len(ordered) // 3]:
+            holdout.add(it.id)
+    if split == "holdout":
+        return [it for it in items if it.id in holdout]
+    return [it for it in items if it.id not in holdout]
+
+
 def check_corpus(items: list[Item], skill: Skill, *, cards: list[str] | None = None,
                  known_cards: bool = True, min_each: int = MIN_EACH,
                  lines: tuple[int, int] | None = LINES, hints: bool = True) -> list[str]:
@@ -399,9 +420,12 @@ def pct(a: int, b: int) -> str:
     return f"{100 * a / b:.0f}%" if b else "—"
 
 
-def render(per: dict, items: list[Item], res: dict, pol: Policy) -> str:
-    out = [f"{'card':<6}{'dirty found':>13}{'recall':>8}{'clean flagged':>15}"
-           f"{'false':>7}{'unclear':>9}{'unstable':>10}  result"]
+def render(per: dict, items: list[Item], res: dict, pol: Policy, split: str | None = None) -> str:
+    out = []
+    if split:
+        out.append(f"Split: {split}")
+    out.append(f"{'card':<6}{'dirty found':>13}{'recall':>8}{'clean flagged':>15}"
+               f"{'false':>7}{'unclear':>9}{'unstable':>10}  result")
     for code in sorted(per, key=sort_key):
         r = per[code]
         out.append(f"{code:<6}{str(r['found']) + '/' + str(r['dirty']):>13}{pct(r['found'], r['dirty']):>8}"
@@ -437,6 +461,7 @@ def build_report(args, skill, items, res, per, pol) -> dict:
         model=args.label or args.model_cmd, repeat=args.repeat,
         thresholds=dict(min_recall=pol.min_recall, max_false=pol.max_false),
         skill_sha=skill.sha, cards=sorted(per, key=sort_key),
+        split=args.split,
         summary={c: {k: v for k, v in r.items()} for c, r in sorted(per.items(), key=lambda kv: sort_key(kv[0]))},
         pass_all=all(r["pass"] for r in per.values()),
         items=[dict(id=it.id, card=it.card, expected=it.expected, path=it.path, why=it.why,
@@ -589,6 +614,25 @@ def selftest() -> int:
         dup = mut(lambda c: setattr(c[1], "id", c[0].id))
         case("a repeated id is refused", any("id repeated" in p for p in check_corpus(dup, skill)), True)
 
+        print("\nSplit")
+        dev = split_items(items, "dev")
+        hold = split_items(items, "holdout")
+        dev_ids = {it.id for it in dev}
+        hold_ids = {it.id for it in hold}
+        all_ids = {it.id for it in items}
+        case("the split is stable between runs",
+             dev_ids == {it.id for it in split_items(items, "dev")}
+             and hold_ids == {it.id for it in split_items(items, "holdout")}, True)
+        case("the split covers every fragment exactly once",
+             dev_ids | hold_ids == all_ids and not (dev_ids & hold_ids), True)
+        hold_counts: dict[str, dict[str, int]] = {}
+        for it in hold:
+            c = hold_counts.setdefault(it.card, {DIRTY: 0, CLEAN: 0})
+            c[it.expected] += 1
+        case("every card has at least 3 dirty and 3 clean fragments in holdout",
+             set(hold_counts) == set(codes)
+             and all(c[DIRTY] >= 3 and c[CLEAN] >= 3 for c in hold_counts.values()), True)
+
         print("\nCorpus parser")
         sample = "# c\n- id: A-1\n  card: C1\n  expected: clean\n  path: a/b.py\n  why: w: x\n  source: s\n  code: |\n    a = 1\n\n    b = 2\n\n"
         got = parse_corpus(sample, "s")
@@ -662,6 +706,10 @@ def selftest() -> int:
         case(f"the oracle fake passes all {len(codes)} cards",
              set(oracle) == set(codes) and all(r["pass"] for r in oracle.values()),
              not any(r["pass"] for r in miss.values()))
+        hold_oracle = run_exam(hold, skill, f"{me} --fake oracle", repeat=1, jobs=8, timeout=60, retries=0)
+        hold_per = score(hold, {k: [a["verdict"] for a in v] for k, v in hold_oracle.items()})
+        case("the oracle fake passes every card on holdout",
+             set(hold_per) == set(codes) and all(r["pass"] for r in hold_per.values()), True)
         d_all = exam("dirty")
         d_off = exam("dirty", Policy(max_false=1.0))
         case('the "always dirty" fake fails every card on false',
@@ -708,6 +756,8 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model-cmd", help="shell command: prompt on stdin, answer on stdout")
     ap.add_argument("--cards", help="comma separated, for example C7,C9; all by default")
+    ap.add_argument("--split", choices=("dev", "holdout"),
+                    help="run only dev or holdout fragments; all by default")
     ap.add_argument("--repeat", type=int, default=1, help="runs per fragment; the worst counts")
     ap.add_argument("--jobs", type=int, default=4, help="parallel model calls")
     ap.add_argument("--timeout", type=int, default=180, help="seconds per call")
@@ -736,7 +786,9 @@ def main(argv: list[str]) -> int:
             if unknown:
                 raise ExamError(f"no such cards in SKILL.md: {', '.join(unknown)}")
             items = [it for it in items if it.card in want]
-        bad = check_corpus(items, skill, cards=want)
+        if a.split:
+            items = split_items(items, a.split)
+        bad = check_corpus(items, skill, cards=want, min_each=3 if a.split else MIN_EACH)
         if bad:
             raise ExamError("corpus is invalid:\n  " + "\n  ".join(bad))
         if a.check:
@@ -760,7 +812,7 @@ def main(argv: list[str]) -> int:
         return 2
 
     per = score(items, {k: [x["verdict"] for x in v] for k, v in res.items()}, pol)
-    print(render(per, items, res, pol))
+    print(render(per, items, res, pol, a.split))
     errors = sum(1 for v in res.values() for x in v if x["error"])
     unparsed = sum(1 for v in res.values() for x in v if not x["error"] and x["verdict"] is None)
     if unparsed:
