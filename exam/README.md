@@ -9,6 +9,8 @@ bin/exam --check                     # corpus and cards are intact; no model is 
 bin/exam --selftest                  # control cases; no network
 bin/exam --model-cmd '<command>' --label <model> --repeat 3 --jobs 8 --retries 2 --out runs/<date>-<model>.json
 bin/exam --cards C7,C9 --model-cmd '<command>'    # selected cards only
+bin/exam --split dev --model-cmd '<command>'      # dev fragments only (edit while looking at these)
+bin/exam --split holdout --model-cmd '<command>'  # holdout fragments only (the pass that counts)
 bin/exam --show-prompt C7-03         # print the prompt the model will get
 ```
 
@@ -32,6 +34,12 @@ Each fragment is sent with the skill's "Procedure" section and one card. The ver
 
 With `--repeat N` each fragment is asked N times and the worst answer counts: a dirty fragment is found only if all N answers say `dirty`; a clean fragment is flagged if any answer says `dirty`. The same model under the same name answers differently between runs, so one lucky answer proves nothing. A card that passed earlier and fails now on unchanged fragments is model drift: move the card to the strong-model list.
 
+## Split
+
+`--split dev|holdout` runs a fixed subset of every card's fragments: about one third in `holdout`, the rest in `dev`, dirty and clean split separately. The assignment is a hash of the fragment `id`, so it is stable across processes and runs. Without `--split` all fragments run.
+
+A card is edited while looking at `dev` results only; the pass that goes into the root README is measured on `holdout`. This keeps the fragments a card was tuned on from also being the fragments that score it.
+
 ## Corpus
 
 `corpus/C<N>.yaml`, at least 10 dirty and 10 clean fragments per card, 15–60 lines each. Fields: `id`, `card`, `expected` (`dirty` or `clean`), `path`, `why`, `source`, `code`. Only `path` and `code` reach the model.
@@ -42,5 +50,5 @@ Fragments keep the shape of real code: conditions, comparisons, order of assignm
 
 1. Add `## C<N>. <title>` to `SKILL.md` with the subsections **Search**, **Questions**, **Dirty if**, **Does not count**, **Dirty**, **Clean**.
 2. Add `corpus/C<N>.yaml` with at least 10 + 10 fragments. The code of a fragment must not contain the words `dirty`, `clean`, `unclear` or a card number; `--check` refuses such hints.
-3. Run `bin/exam --check`, then the exam on your model with `--cards C<N> --repeat 3`.
-4. A card that fails goes to the strong-model list in the root README.
+3. Run `bin/exam --check`, then the exam on your model with `--cards C<N> --split dev --repeat 3` while editing; the final pass is measured with `--split holdout`.
+4. A card that fails on `holdout` goes to the strong-model list in the root README.
