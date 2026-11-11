@@ -81,9 +81,22 @@ Measured on DeepSeek flash, 3 answers per fragment, worst answer counts (03.11.2
 | C1, C3, C6, C7, C9, C11, C12, C15 | a cheap model is enough |
 | C2, C4, C5, C8, C10, C13, C14 | a strong model or a human |
 
+Measured on Claude Haiku and Claude Sonnet the same way (11.11.2026, 3 answers per fragment, worst answer counts):
+
+| Card | DeepSeek flash | Haiku | Sonnet |
+|---|---|---|---|
+| C1, C3, C6, C12 | pass | pass | pass |
+| C4, C13, C14 | fail | pass | pass |
+| C8 | fail | fail | pass |
+| C7, C9, C11, C15 | pass | fail | fail |
+| C2, C5, C10 | fail | fail | fail |
+| C16, C17 | not run | pass | pass |
+
+Haiku passed 9 of 17, Sonnet 10 of 17. Sonnet is not a tier above Haiku: on C1–C15 they failed the same cards except C8. Their failures are of two kinds. On C9 and C11 both flag the same clean fragments (C9-10, C11-11, C11-19) and give a reason that the card's text supports, so those labels need a second look. On C2, C5 and C10 both answer `unclear` or `clean` on dirty fragments because the answer depends on something outside the fragment (the entity's declaration, whether parts are required together), or because C5's question 1 tells them to stop when the phrases differ. No model passes C2, C5 and C10, so they stay with a human until the cards change.
+
 For another model, run the exam first: [exam/README.md](exam/README.md).
 
-The corpus is Python and TypeScript. The cards' search signs for Kotlin, Go and C# are written, but the exam does not measure them yet; a corpus for another language goes into its own directory and runs with `bin/exam --corpus exam/corpus-<lang>`.
+The corpus is mostly Python and TypeScript (C17 also has C# view models and Django templates). The cards' search signs for Kotlin, Go and C# are written, but the exam does not measure them yet; a corpus for another language goes into its own directory and runs with `bin/exam --corpus exam/corpus-<lang>`.
 
 ## C#
 
