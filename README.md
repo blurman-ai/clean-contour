@@ -108,6 +108,29 @@ The cards name C# signs for EF Core, Dapper, ASP.NET Core (controllers and minim
 
 A sign the card describes over several lines (C5 name pairs, C10 a `raise` inside a loop over parts, C14 a `GET` handler that writes) is a `{"manual": …}` entry and is not searched. The Python, TypeScript, Kotlin and Go signs are not yet narrowed by reading their hits: on one 260k-line Python backend they gave about 8000 candidates, most of them from C7, C9, C15 and C16.
 
+## Run the whole check
+
+`tools/check.py` runs the whole check over a repository's own diff (or all of
+it): it collects candidates with `tools/search.py`, sends cheap cards to a
+cheap model and strong cards (plus a cheap model's `dirty`/`unclear`) to a
+strong model, and prints one skill line per candidate plus a summary per card.
+Which cards go to which model is read from
+`skills/clean-contour-check/routing.json`, built from the exam results.
+
+```bash
+SYS='You review code. Answer with one line in the required format.'
+python3 tools/check.py --repo /path/to/repo --diff HEAD~1..HEAD \
+  --cheap-cmd "claude -p --model haiku --tools '' --no-session-persistence --system-prompt '$SYS'" \
+  --strong-cmd "claude -p --model sonnet --tools '' --no-session-persistence --system-prompt '$SYS'"
+```
+
+`--cheap-cmd` and `--strong-cmd` are shell commands with the same stdin→stdout
+contract as `bin/exam --model-cmd`. `--strong-cmd` may be omitted: then a cheap
+`dirty` is printed as `candidate` and strong-card candidates are listed as not
+checked. Use `--all` instead of `--diff` to check every candidate, `--dry-run`
+to print the candidates and the plan without calling a model, and
+`--max-candidates N` (default 300) to refuse a run that is too large.
+
 ## License
 
 Apache 2.0, see [LICENSE](LICENSE).
