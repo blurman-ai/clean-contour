@@ -859,8 +859,8 @@ under `status === "…"`, `Date.now() < deadline`, `attempts < MAX_ATTEMPTS`,
 
 **Server templates (Jinja, Django, ERB, Razor):** `{% if order.status == "…" %}`
 or `{% if obj.attempts < 3 %}` around a `<button>`, a form or a link to an
-action, when the view that runs the action checks its own rule; a Python
-helper `can_*` used only by templates while the view repeats the condition.
+action: a template is a client like the browser; a Python helper `can_*` used
+only by templates while the view repeats the condition.
 
 **C# clients (Blazor, WPF, MAUI, Avalonia):** `IsVisible`, `IsEnabled`,
 `CanExecute`, `disabled="@(…)"` computed from `Status ==` or
@@ -871,7 +871,9 @@ helper `can_*` used only by templates while the view repeats the condition.
 1. Does the branch decide whether the user may perform an action (a button is
    shown or enabled, a command can run, a form can be submitted, a route
    opens)? Choosing only how something looks (a color, a label, an icon) is
-   "no".
+   "no". A property or variable whose name answers this question
+   (`isCancellable`, `canEdit`, `showRetry`) counts as "yes" even when the
+   markup that binds it is not in the fragment.
 2. Is the decision computed on the client from a status, a date, a counter, or
    a role, rather than read from a field of the server response that answers
    this question (`can_cancel`, `allowed_actions`, an action link)?
