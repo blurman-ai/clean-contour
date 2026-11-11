@@ -791,3 +791,94 @@ const text = {
 } satisfies Record<SourceRefusalCode, string>;
 onError: (e) => notify(t(text[e.code]))
 ```
+
+## C16. The writer lets a forbidden transition pass silently
+
+**Search:** the write functions of a state field (`set_*_status`,
+`transition_*`, `mark_*`, `apply_*`, methods `setStatus`, `transitionTo`,
+`markPaid`): an `if status == X:` that wraps the assignment with no `else`, a
+bare `return` / `return False` / `return None` when the old status does not
+match, a check written as a list of forbidden statuses (`if status in (PAID,
+SHIPPED): raise`) instead of allowed ones.
+
+**Kotlin and Go:** `if (status == X) { status = Y }` with no `else`,
+`when (status) { X -> …; else -> Unit }`, `if s.Status != X { return nil }`, SQL
+`UPDATE … SET status = … WHERE status = …` whose zero affected rows nobody
+reads (`RowsAffected` ignored, `execute(` result dropped).
+**C#:** `if (Status == X) { Status = Y; }` with no `else`, `_ => { }` in a
+switch over the old status, `return false` from `TryMark*` that the caller
+ignores, `ExecuteUpdateAsync` with the old status in `Where` and the returned
+row count ignored.
+
+**Questions:**
+1. Is the fragment the write function of a state field (it assigns the field
+   or issues the `UPDATE` that changes it)?
+2. Is there a path where the old status is not one the transition allows, the
+   new status differs from the old one, and the function returns without a
+   refusal (no exception, no refusal code, no recorded conflict state) and
+   without making the caller check a result?
+3. Are the allowed old statuses written inside this function, branch by branch,
+   rather than read from one transition table?
+
+**Dirty if:** 1 = yes and 2 = yes. Question 3 = yes makes the place worse: the
+next writer will copy the branch with other statuses.
+
+**Does not count:** a repeat of the same target status (`if status == new:
+return`): that is idempotency, not a transition; a function that on a
+mismatch moves the entity to a declared conflict state or raises; an `UPDATE …
+WHERE status = …` whose affected row count is checked and turned into a
+refusal; tests.
+
+**Dirty:**
+```python
+def mark_paid(order):
+    if order.status == OrderStatus.STOCK_CONFIRMED:
+        order.status = OrderStatus.PAID
+    # cancelled, shipped: returns as if paid
+```
+**Clean:**
+```python
+def mark_paid(order):
+    if order.status == OrderStatus.PAID:
+        return                                  # a repeated message
+    transition(order, OrderStatus.PAID)         # raises on a pair outside the table
+```
+
+## C17. The client decides what the user is allowed to do
+
+**Search:** in the frontend, a comparison of a status, a date, or a counter from
+a server response next to whether an action is offered: `canCancel`, `canEdit`,
+`canRetry`, `isEditable`, `showRetry`, `disabled={…status…}`, a button rendered
+under `status === "…"`, `Date.now() < deadline`, `attempts < MAX_ATTEMPTS`,
+`role === "admin"` choosing a button.
+
+**C# clients (Blazor, WPF, MAUI, Avalonia):** `IsVisible`, `IsEnabled`,
+`CanExecute`, `disabled="@(…)"` computed from `Status ==` or
+`.Equals("…")`, a deadline or an attempt counter; a view model property
+`Can*` or `Is*Order` built from the order's status.
+
+**Questions:**
+1. Does the branch decide whether the user may perform an action (a button is
+   shown or enabled, a command can run, a form can be submitted, a route
+   opens)? Choosing only how something looks (a color, a label, an icon) is
+   "no".
+2. Is the decision computed on the client from a status, a date, a counter, or
+   a role, rather than read from a field of the server response that answers
+   this question (`can_cancel`, `allowed_actions`, an action link)?
+
+**Dirty if:** 1 = yes and 2 = yes.
+
+**Does not count:** a check of the shape of input (a required field, a length,
+an email format); hiding an action while its own request is in flight; a
+branch that reads a server field which answers the question, even if it also
+reads other fields for display; tests.
+
+**Dirty:**
+```ts
+const canCancel = order.status === "submitted";
+{canCancel && <Button onClick={cancel}>Cancel</Button>}
+```
+**Clean:**
+```ts
+{order.allowedActions.includes("cancel") && <Button onClick={cancel}>Cancel</Button>}
+```

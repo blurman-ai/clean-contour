@@ -1,0 +1,725 @@
+# C17 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C17-01
+  card: C17
+  expected: dirty
+  path: web/src/features/orders/OrderDetails.tsx
+  why: The cancel button is shown by a client copy of the rule status === submitted; the server allows cancel from more statuses.
+  source: Order details page with a cancel action.
+  code: |
+    import { useMutation, useQuery } from "@tanstack/react-query";
+    import { api } from "../../api";
+    import type { OrderDto } from "../../api/types";
+
+    export function OrderDetails({ orderId }: { orderId: string }) {
+      const { data: order } = useQuery({
+        queryKey: ["order", orderId],
+        queryFn: () => api.get<OrderDto>(`/orders/${orderId}`),
+      });
+      const cancel = useMutation({
+        mutationFn: () => api.put(`/orders/${orderId}/cancel`),
+      });
+
+      if (!order) return <Spinner />;
+
+      const canCancel = order.status === "submitted";
+
+      return (
+        <section>
+          <h1>Order {order.number}</h1>
+          <StatusBadge status={order.status} />
+          <ItemsTable items={order.items} />
+          {canCancel && (
+            <Button variant="danger" onClick={() => cancel.mutate()}>
+              Cancel order
+            </Button>
+          )}
+        </section>
+      );
+    }
+
+- id: C17-02
+  card: C17
+  expected: dirty
+  path: web/src/features/imports/ImportRow.tsx
+  why: Whether a retry is offered is decided by the client from attempts < 3, a copy of the server retry limit.
+  source: Row of a list of price imports with a retry button.
+  code: |
+    import type { PriceImportDto } from "../../api/types";
+
+    const MAX_ATTEMPTS = 3;
+
+    type Props = {
+      item: PriceImportDto;
+      onRetry: (id: string) => void;
+    };
+
+    export function ImportRow({ item, onRetry }: Props) {
+      const failed = item.status === "failed";
+      const showRetry = failed && item.attempts < MAX_ATTEMPTS;
+
+      return (
+        <tr>
+          <td>{item.fileName}</td>
+          <td>{item.supplierName}</td>
+          <td>
+            <StatusBadge status={item.status} />
+          </td>
+          <td>{item.attempts}</td>
+          <td>
+            {showRetry ? (
+              <button type="button" onClick={() => onRetry(item.id)}>
+                Retry
+              </button>
+            ) : null}
+          </td>
+        </tr>
+      );
+    }
+
+- id: C17-03
+  card: C17
+  expected: dirty
+  path: web/src/features/bookings/EditBookingButton.tsx
+  why: Whether editing is allowed is decided by comparing the browser clock with a deadline; the server rule is copied on the client.
+  source: Delivery slot booking card with an edit action.
+  code: |
+    import { Link } from "react-router-dom";
+    import type { SlotBookingDto } from "../../api/types";
+
+    const EDIT_WINDOW_HOURS = 24;
+
+    export function EditBookingButton({ booking }: { booking: SlotBookingDto }) {
+      const slotStart = new Date(booking.slotStart).getTime();
+      const editableUntil = slotStart - EDIT_WINDOW_HOURS * 60 * 60 * 1000;
+      const canEdit = booking.status === "confirmed" && Date.now() < editableUntil;
+
+      return (
+        <div className="booking-actions">
+          <span>
+            {new Date(booking.slotStart).toLocaleString()} at dock {booking.dock}
+          </span>
+          {canEdit ? (
+            <Link to={`/bookings/${booking.id}/edit`} className="btn">
+              Change slot
+            </Link>
+          ) : (
+            <span className="muted">Slot is locked</span>
+          )}
+        </div>
+      );
+    }
+
+- id: C17-04
+  card: C17
+  expected: dirty
+  path: web/src/features/expenses/ExpenseActions.tsx
+  why: The approve button is shown by the client from the user role and the report status, not from a server field.
+  source: Expense report page with approve and reject actions.
+  code: |
+    import { useCurrentUser } from "../../auth/useCurrentUser";
+    import type { ExpenseReportDto } from "../../api/types";
+
+    type Props = {
+      report: ExpenseReportDto;
+      onApprove: () => void;
+      onReject: () => void;
+    };
+
+    export function ExpenseActions({ report, onApprove, onReject }: Props) {
+      const user = useCurrentUser();
+      const isApprover = user.role === "manager" || user.role === "finance";
+      const pending = report.status === "submitted";
+      const notOwn = report.authorId !== user.id;
+
+      if (!(isApprover && pending && notOwn)) {
+        return null;
+      }
+
+      return (
+        <div className="actions">
+          <button type="button" onClick={onApprove}>
+            Approve
+          </button>
+          <button type="button" onClick={onReject}>
+            Reject
+          </button>
+        </div>
+      );
+    }
+
+- id: C17-05
+  card: C17
+  expected: dirty
+  path: web/src/lib/tickets.ts
+  why: canReopen is a client rule over status and a lock flag, used to show the reopen action.
+  source: Helper module for the support ticket screens.
+  code: |
+    import type { TicketDto } from "../api/types";
+
+    export function ticketTitle(t: TicketDto): string {
+      return `#${t.number} ${t.subject}`;
+    }
+
+    export function canReopen(t: TicketDto): boolean {
+      return ["closed", "resolved"].includes(t.status) && !t.locked;
+    }
+
+    export function canReply(t: TicketDto): boolean {
+      return t.status !== "closed" && !t.locked;
+    }
+
+    export function ticketMenu(t: TicketDto): { key: string; label: string }[] {
+      const items = [{ key: "copy-link", label: "Copy link" }];
+      if (canReply(t)) {
+        items.push({ key: "reply", label: "Reply" });
+      }
+      if (canReopen(t)) {
+        items.push({ key: "reopen", label: "Reopen" });
+      }
+      return items;
+    }
+
+- id: C17-06
+  card: C17
+  expected: dirty
+  path: web/src/features/invoices/InvoiceForm.tsx
+  why: The submit button is disabled by the client rule status !== draft, which decides whether the user may send the invoice.
+  source: Invoice edit form.
+  code: |
+    import { useForm } from "react-hook-form";
+    import type { InvoiceDto } from "../../api/types";
+
+    type Props = {
+      invoice: InvoiceDto;
+      onSend: (values: InvoiceFormValues) => void;
+    };
+
+    export function InvoiceForm({ invoice, onSend }: Props) {
+      const form = useForm<InvoiceFormValues>({
+        defaultValues: {
+          customerEmail: invoice.customerEmail,
+          dueDate: invoice.dueDate,
+          lines: invoice.lines,
+        },
+      });
+
+      return (
+        <form onSubmit={form.handleSubmit(onSend)}>
+          <input {...form.register("customerEmail", { required: true })} />
+          <input type="date" {...form.register("dueDate")} />
+          <LinesEditor control={form.control} />
+          <button type="submit" disabled={invoice.status !== "draft"}>
+            Send invoice
+          </button>
+        </form>
+      );
+    }
+
+- id: C17-07
+  card: C17
+  expected: dirty
+  path: src/ShipmentApp/ViewModels/ShipmentDetailViewModel.cs
+  why: IsCancellable, bound to the visibility of the cancel button, is a client copy of the server rule built from status strings.
+  source: MAUI view model of a shipment details screen.
+  code: |
+    public partial class ShipmentDetailViewModel : ViewModelBase
+    {
+        private readonly IShipmentService _shipments;
+
+        [ObservableProperty]
+        private ShipmentDto _shipment;
+
+        [ObservableProperty]
+        private bool _isCancellable;
+
+        public ShipmentDetailViewModel(IShipmentService shipments, INavigationService nav)
+            : base(nav)
+        {
+            _shipments = shipments;
+        }
+
+        public override async Task InitializeAsync(string shipmentId)
+        {
+            await IsBusyFor(async () =>
+            {
+                Shipment = await _shipments.GetAsync(shipmentId);
+                IsCancellable = Shipment.Status == "Created" || Shipment.Status == "Packed";
+            });
+        }
+
+        [RelayCommand]
+        private async Task CancelAsync()
+        {
+            await _shipments.CancelAsync(Shipment.Id);
+            Shipment = await _shipments.GetAsync(Shipment.Id);
+        }
+    }
+
+- id: C17-08
+  card: C17
+  expected: dirty
+  path: src/Storefront/Components/Pages/OrderPage.razor
+  why: The change address button is rendered by a client rule over status and the age of the order.
+  source: Blazor order page.
+  code: |
+    @page "/orders/{OrderId:int}"
+    @inject OrdersClient Orders
+
+    @if (order is null)
+    {
+        <p>Loading...</p>
+    }
+    else
+    {
+        <h2>Order @order.Number</h2>
+        <p>Delivery to @order.Address.City, @order.Address.Street</p>
+
+        @if (order.Status == "Pending" && order.CreatedAt > DateTime.UtcNow.AddHours(-1))
+        {
+            <button class="btn" @onclick="OpenAddressDialog">Change address</button>
+        }
+
+        <OrderLines Lines="order.Lines" />
+    }
+
+    @code {
+        [Parameter] public int OrderId { get; set; }
+
+        private OrderDto? order;
+
+        protected override async Task OnParametersSetAsync()
+        {
+            order = await Orders.GetAsync(OrderId);
+        }
+
+        private void OpenAddressDialog() => dialogOpen = true;
+
+        private bool dialogOpen;
+    }
+
+- id: C17-09
+  card: C17
+  expected: dirty
+  path: web/src/features/drafts/ReviewPage.tsx
+  why: The route opens the review page only when the client sees stage review; the decision to let the user review is made from a stage value on the client.
+  source: Review page of a document draft.
+  code: |
+    import { useEffect } from "react";
+    import { useNavigate, useParams } from "react-router-dom";
+    import { useDraft } from "./useDraft";
+
+    export function ReviewPage() {
+      const { draftId } = useParams();
+      const navigate = useNavigate();
+      const { data: draft } = useDraft(draftId!);
+
+      useEffect(() => {
+        if (!draft) return;
+        if (draft.stage !== "review" || draft.reviewerId === null) {
+          navigate(`/drafts/${draftId}`, { replace: true });
+        }
+      }, [draft, draftId, navigate]);
+
+      if (!draft) return <Spinner />;
+
+      return (
+        <ReviewLayout>
+          <DraftText text={draft.body} />
+          <ReviewForm draftId={draft.id} />
+        </ReviewLayout>
+      );
+    }
+
+- id: C17-10
+  card: C17
+  expected: dirty
+  path: web/src/features/subscriptions/actions.ts
+  why: The list of actions offered to the user is built on the client from the subscription status.
+  source: Subscription screen helper that builds menu actions.
+  code: |
+    import type { SubscriptionDto } from "../../api/types";
+
+    export type SubscriptionAction = "pause" | "resume" | "cancel" | "change-plan";
+
+    export function subscriptionActions(sub: SubscriptionDto): SubscriptionAction[] {
+      const actions: SubscriptionAction[] = [];
+      if (sub.status === "active") {
+        actions.push("pause", "change-plan");
+      }
+      if (sub.status === "paused") {
+        actions.push("resume");
+      }
+      if (sub.status === "active" || sub.status === "paused") {
+        actions.push("cancel");
+      }
+      return actions;
+    }
+
+    export const actionLabels: Record<SubscriptionAction, string> = {
+      pause: "Pause",
+      resume: "Resume",
+      cancel: "Cancel subscription",
+      "change-plan": "Change plan",
+    };
+
+- id: C17-11
+  card: C17
+  expected: clean
+  path: web/src/features/orders/OrderDetails.tsx
+  why: The cancel button is shown by the allowedActions field of the server response.
+  source: Order details page with a cancel action.
+  code: |
+    import { useMutation, useQuery } from "@tanstack/react-query";
+    import { api } from "../../api";
+    import type { OrderDto } from "../../api/types";
+
+    export function OrderDetails({ orderId }: { orderId: string }) {
+      const { data: order } = useQuery({
+        queryKey: ["order", orderId],
+        queryFn: () => api.get<OrderDto>(`/orders/${orderId}`),
+      });
+      const cancel = useMutation({
+        mutationFn: () => api.put(`/orders/${orderId}/cancel`),
+      });
+
+      if (!order) return <Spinner />;
+
+      return (
+        <section>
+          <h1>Order {order.number}</h1>
+          <StatusBadge status={order.status} />
+          <ItemsTable items={order.items} />
+          {order.allowedActions.includes("cancel") && (
+            <Button variant="danger" onClick={() => cancel.mutate()}>
+              Cancel order
+            </Button>
+          )}
+        </section>
+      );
+    }
+
+- id: C17-12
+  card: C17
+  expected: clean
+  path: web/src/components/StatusBadge.tsx
+  why: The branch over status chooses only a color and a label; it does not decide whether an action is available.
+  source: Status badge component.
+  code: |
+    import type { OrderStatus } from "../api/types";
+
+    const tone: Record<OrderStatus, "neutral" | "info" | "success" | "danger"> = {
+      submitted: "neutral",
+      awaiting_stock: "info",
+      stock_confirmed: "info",
+      paid: "success",
+      shipped: "success",
+      cancelled: "danger",
+    };
+
+    const label: Record<OrderStatus, string> = {
+      submitted: "Submitted",
+      awaiting_stock: "Checking stock",
+      stock_confirmed: "Stock confirmed",
+      paid: "Paid",
+      shipped: "Shipped",
+      cancelled: "Cancelled",
+    };
+
+    export function StatusBadge({ status }: { status: OrderStatus }) {
+      return (
+        <span className={`badge badge-${tone[status]}`} data-status={status}>
+          {label[status]}
+        </span>
+      );
+    }
+
+- id: C17-13
+  card: C17
+  expected: clean
+  path: web/src/features/account/InviteForm.tsx
+  why: The submit button is disabled by the shape of the input (an email format, a required name); that is input checking, not a permission.
+  source: Form for inviting a colleague.
+  code: |
+    import { useState } from "react";
+
+    const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+    export function InviteForm({ onInvite }: { onInvite: (v: InviteValues) => void }) {
+      const [email, setEmail] = useState("");
+      const [name, setName] = useState("");
+
+      const emailOk = EMAIL.test(email);
+      const nameOk = name.trim().length > 0 && name.length <= 80;
+
+      return (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            onInvite({ email, name });
+          }}
+        >
+          <label>
+            Email
+            <input value={email} onChange={(e) => setEmail(e.target.value)} />
+          </label>
+          <label>
+            Name
+            <input value={name} onChange={(e) => setName(e.target.value)} />
+          </label>
+          <button type="submit" disabled={!emailOk || !nameOk}>
+            Send invite
+          </button>
+        </form>
+      );
+    }
+
+- id: C17-14
+  card: C17
+  expected: clean
+  path: web/src/features/imports/ImportRow.tsx
+  why: The retry button is hidden only while the retry request is in flight; whether retry is allowed comes from item.retryAllowed returned by the server.
+  source: Row of a list of price imports with a retry button.
+  code: |
+    import { useMutation } from "@tanstack/react-query";
+    import { api } from "../../api";
+    import type { PriceImportDto } from "../../api/types";
+
+    export function ImportRow({ item }: { item: PriceImportDto }) {
+      const retry = useMutation({
+        mutationFn: () => api.post(`/imports/${item.id}/retry`),
+      });
+
+      return (
+        <tr>
+          <td>{item.fileName}</td>
+          <td>{item.supplierName}</td>
+          <td>
+            <StatusBadge status={item.status} />
+          </td>
+          <td>{item.attempts}</td>
+          <td>
+            {item.retryAllowed && !retry.isPending ? (
+              <button type="button" onClick={() => retry.mutate()}>
+                Retry
+              </button>
+            ) : null}
+          </td>
+        </tr>
+      );
+    }
+
+- id: C17-15
+  card: C17
+  expected: clean
+  path: web/src/features/tickets/TicketHeader.tsx
+  why: Actions are taken from the links of the server response; the status is used only for the badge.
+  source: Support ticket header with actions.
+  code: |
+    import type { TicketDto } from "../../api/types";
+
+    type Props = {
+      ticket: TicketDto;
+      onAction: (href: string) => void;
+    };
+
+    export function TicketHeader({ ticket, onAction }: Props) {
+      return (
+        <header className="ticket-header">
+          <h1>
+            #{ticket.number} {ticket.subject}
+          </h1>
+          <StatusBadge status={ticket.status} />
+          <nav>
+            {ticket.links.reply && (
+              <button onClick={() => onAction(ticket.links.reply!.href)}>Reply</button>
+            )}
+            {ticket.links.reopen && (
+              <button onClick={() => onAction(ticket.links.reopen!.href)}>Reopen</button>
+            )}
+            {ticket.links.close && (
+              <button onClick={() => onAction(ticket.links.close!.href)}>Close</button>
+            )}
+          </nav>
+        </header>
+      );
+    }
+
+- id: C17-16
+  card: C17
+  expected: clean
+  path: src/ShipmentApp/ViewModels/ShipmentDetailViewModel.cs
+  why: IsCancellable is copied from CanCancel of the server response; the client keeps no rule.
+  source: MAUI view model of a shipment details screen.
+  code: |
+    public partial class ShipmentDetailViewModel : ViewModelBase
+    {
+        private readonly IShipmentService _shipments;
+
+        [ObservableProperty]
+        private ShipmentDto _shipment;
+
+        [ObservableProperty]
+        private bool _isCancellable;
+
+        public ShipmentDetailViewModel(IShipmentService shipments, INavigationService nav)
+            : base(nav)
+        {
+            _shipments = shipments;
+        }
+
+        public override async Task InitializeAsync(string shipmentId)
+        {
+            await IsBusyFor(async () =>
+            {
+                Shipment = await _shipments.GetAsync(shipmentId);
+                IsCancellable = Shipment.CanCancel;
+            });
+        }
+
+        [RelayCommand]
+        private async Task CancelAsync()
+        {
+            await _shipments.CancelAsync(Shipment.Id);
+            Shipment = await _shipments.GetAsync(Shipment.Id);
+            IsCancellable = Shipment.CanCancel;
+        }
+    }
+
+- id: C17-17
+  card: C17
+  expected: clean
+  path: web/src/features/bookings/BookingSummary.tsx
+  why: The deadline is only shown as text; whether the slot can be changed comes from booking.canEdit.
+  source: Delivery slot booking card.
+  code: |
+    import { Link } from "react-router-dom";
+    import type { SlotBookingDto } from "../../api/types";
+
+    export function BookingSummary({ booking }: { booking: SlotBookingDto }) {
+      const editableUntil = new Date(booking.editableUntil);
+
+      return (
+        <div className="booking-summary">
+          <span>
+            {new Date(booking.slotStart).toLocaleString()} at dock {booking.dock}
+          </span>
+          <small>
+            Changes possible until {editableUntil.toLocaleString()}
+          </small>
+          {booking.canEdit ? (
+            <Link to={`/bookings/${booking.id}/edit`} className="btn">
+              Change slot
+            </Link>
+          ) : (
+            <span className="muted">Slot is locked</span>
+          )}
+        </div>
+      );
+    }
+
+- id: C17-18
+  card: C17
+  expected: clean
+  path: web/src/features/expenses/ExpenseActions.tsx
+  why: Approve and reject are shown by permissions returned with the report; the role is used only to show who is signed in.
+  source: Expense report page with approve and reject actions.
+  code: |
+    import { useCurrentUser } from "../../auth/useCurrentUser";
+    import type { ExpenseReportDto } from "../../api/types";
+
+    type Props = {
+      report: ExpenseReportDto;
+      onApprove: () => void;
+      onReject: () => void;
+    };
+
+    export function ExpenseActions({ report, onApprove, onReject }: Props) {
+      const user = useCurrentUser();
+
+      return (
+        <div className="actions">
+          <span className="muted">
+            Signed in as {user.name} ({user.role})
+          </span>
+          {report.permissions.canApprove && (
+            <button type="button" onClick={onApprove}>
+              Approve
+            </button>
+          )}
+          {report.permissions.canReject && (
+            <button type="button" onClick={onReject}>
+              Reject
+            </button>
+          )}
+        </div>
+      );
+    }
+
+- id: C17-19
+  card: C17
+  expected: clean
+  path: web/src/features/drafts/DraftView.tsx
+  why: The view is chosen by a mapping from the stage field to a component; it does not decide whether an action is allowed.
+  source: Draft page that switches the view by stage.
+  code: |
+    import type { DraftDto, DraftStage } from "../../api/types";
+
+    const views: Record<DraftStage, React.ComponentType<{ draft: DraftDto }>> = {
+      writing: WritingView,
+      review: ReviewView,
+      approved: ApprovedView,
+      published: PublishedView,
+      archived: ArchivedView,
+    };
+
+    export function DraftView({ draft }: { draft: DraftDto }) {
+      const View = views[draft.stage];
+      return (
+        <main>
+          <DraftHeader title={draft.title} stage={draft.stage} />
+          <View draft={draft} />
+        </main>
+      );
+    }
+
+    function DraftHeader({ title, stage }: { title: string; stage: DraftStage }) {
+      return (
+        <header>
+          <h1>{title}</h1>
+          <StageBadge stage={stage} />
+        </header>
+      );
+    }
+
+- id: C17-20
+  card: C17
+  expected: clean
+  path: web/src/features/subscriptions/SubscriptionMenu.tsx
+  why: The actions come from the allowedActions list of the server response; the client only maps them to labels.
+  source: Subscription screen menu.
+  code: |
+    import type { SubscriptionAction, SubscriptionDto } from "../../api/types";
+
+    const actionLabels: Record<SubscriptionAction, string> = {
+      pause: "Pause",
+      resume: "Resume",
+      cancel: "Cancel subscription",
+      "change-plan": "Change plan",
+    };
+
+    type Props = {
+      sub: SubscriptionDto;
+      onAction: (action: SubscriptionAction) => void;
+    };
+
+    export function SubscriptionMenu({ sub, onAction }: Props) {
+      return (
+        <Menu>
+          {sub.allowedActions.map((action) => (
+            <MenuItem key={action} onSelect={() => onAction(action)}>
+              {actionLabels[action]}
+            </MenuItem>
+          ))}
+        </Menu>
+      );
+    }

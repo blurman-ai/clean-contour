@@ -1,0 +1,674 @@
+# C16 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C16-01
+  card: C16
+  expected: dirty
+  path: app/shipments/writer.py
+  why: The writer assigns DELIVERED only from OUT_FOR_DELIVERY; from any other status it returns as if the delivery was recorded, and the caller commits.
+  source: Shipment writer called from a courier webhook.
+  code: |
+    from app.shipments.models import Shipment, ShipmentStatus
+    from app.shipments.events import record_shipment_event
+
+
+    def mark_delivered(shipment: Shipment, *, signed_by: str, at) -> None:
+        """Called when the courier app confirms the handover."""
+
+        if shipment.status == ShipmentStatus.OUT_FOR_DELIVERY:
+            shipment.status = ShipmentStatus.DELIVERED
+            shipment.delivered_at = at
+            shipment.signed_by = signed_by
+            record_shipment_event(shipment, "delivered")
+
+
+    def handle_courier_handover(db, payload: dict) -> dict:
+        shipment = db.get(Shipment, payload["shipment_id"])
+        if shipment is None:
+            return {"ok": False, "code": "shipment_not_found"}
+        mark_delivered(
+            shipment,
+            signed_by=payload["signed_by"],
+            at=payload["handed_over_at"],
+        )
+        db.commit()
+        return {"ok": True}
+
+- id: C16-02
+  card: C16
+  expected: dirty
+  path: billing/invoices/status.py
+  why: The writer refuses only from PAID and REFUNDED; from VOID it returns silently, and from SENT the flag write goes through without a table, so a void of an already voided invoice re-emits the event.
+  source: Invoice void function in a billing module.
+  code: |
+    from billing.invoices.models import Invoice, InvoiceStatus
+    from billing.errors import BillingRefusal
+    from billing.outbox import emit
+
+
+    def void_invoice(invoice: Invoice, *, reason: str, actor_id: int) -> None:
+        if invoice.status in (InvoiceStatus.PAID, InvoiceStatus.REFUNDED):
+            raise BillingRefusal("invoice_already_settled")
+
+        if invoice.status == InvoiceStatus.DRAFT:
+            # a draft was never sent, nothing to void
+            return
+
+        invoice.status = InvoiceStatus.VOID
+        invoice.void_reason = reason
+        invoice.voided_by = actor_id
+        emit("invoice.voided", {"invoice_id": invoice.id, "reason": reason})
+
+
+    def void_from_admin(db, invoice_id: int, reason: str, actor_id: int) -> None:
+        invoice = db.get(Invoice, invoice_id)
+        void_invoice(invoice, reason=reason, actor_id=actor_id)
+        db.commit()
+
+- id: C16-03
+  card: C16
+  expected: dirty
+  path: warehouse/reservations/repo.py
+  why: The UPDATE guards the old status in WHERE but the affected row count is dropped; when the reservation was already released, the function still returns the reservation as picked.
+  source: Raw SQL writer of a stock reservation.
+  code: |
+    from sqlalchemy import text
+
+
+    PICK_SQL = text(
+        """
+        UPDATE stock_reservations
+           SET status = 'picked',
+               picked_at = now(),
+               picked_by = :picker_id
+         WHERE id = :reservation_id
+           AND status = 'reserved'
+        """
+    )
+
+
+    async def mark_reservation_picked(conn, reservation_id: int, picker_id: int) -> dict:
+        await conn.execute(
+            PICK_SQL,
+            {"reservation_id": reservation_id, "picker_id": picker_id},
+        )
+        row = await conn.execute(
+            text("SELECT id, sku, quantity FROM stock_reservations WHERE id = :id"),
+            {"id": reservation_id},
+        )
+        reservation = row.mappings().one()
+        return {
+            "id": reservation["id"],
+            "sku": reservation["sku"],
+            "quantity": reservation["quantity"],
+            "state": "picked",
+        }
+
+- id: C16-04
+  card: C16
+  expected: dirty
+  path: src/server/tasks/pickTask.ts
+  why: The writer returns early when the task is not assigned, and the route answers 200 with ok true, so a pick of a cancelled task looks recorded.
+  source: Express route and the writer of a picking task status.
+  code: |
+    import { Router } from "express";
+    import { db } from "../db";
+    import { PickTaskStatus } from "./status";
+
+    export async function markPicked(taskId: string, pickerId: string): Promise<void> {
+      const task = await db.pickTask.findUniqueOrThrow({ where: { id: taskId } });
+      if (task.status !== PickTaskStatus.Assigned) {
+        return;
+      }
+      await db.pickTask.update({
+        where: { id: taskId },
+        data: {
+          status: PickTaskStatus.Picked,
+          pickedBy: pickerId,
+          pickedAt: new Date(),
+        },
+      });
+    }
+
+    export const pickRouter = Router();
+
+    pickRouter.post("/tasks/:id/picked", async (req, res) => {
+      await markPicked(req.params.id, req.user.id);
+      res.json({ ok: true });
+    });
+
+- id: C16-05
+  card: C16
+  expected: dirty
+  path: src/server/returns/transition.ts
+  why: The transition switch has a default arm that returns the return request unchanged; every pair outside the listed cases passes as success.
+  source: Writer of a customer return request with a switch over events.
+  code: |
+    import type { ReturnRequest } from "./types";
+
+    type ReturnEvent =
+      | { type: "approve"; by: string }
+      | { type: "receive"; warehouseId: string }
+      | { type: "refund"; amount: number };
+
+    export function applyReturnEvent(req: ReturnRequest, ev: ReturnEvent): ReturnRequest {
+      switch (`${req.status}:${ev.type}`) {
+        case "requested:approve":
+          return { ...req, status: "approved", approvedBy: ev.type === "approve" ? ev.by : null };
+        case "approved:receive":
+          return {
+            ...req,
+            status: "received",
+            warehouseId: ev.type === "receive" ? ev.warehouseId : req.warehouseId,
+          };
+        case "received:refund":
+          return {
+            ...req,
+            status: "refunded",
+            refundedAmount: ev.type === "refund" ? ev.amount : 0,
+          };
+        default:
+          return req;
+      }
+    }
+
+    export async function saveReturnEvent(repo: ReturnsRepo, id: string, ev: ReturnEvent) {
+      const current = await repo.get(id);
+      const next = applyReturnEvent(current, ev);
+      await repo.save(next);
+      return next;
+    }
+
+- id: C16-06
+  card: C16
+  expected: dirty
+  path: reports/runs/service.py
+  why: try_start_run returns False on a run that is not queued, and the caller ignores the result and starts the export, so a cancelled run is executed.
+  source: Report run service with a start function and a worker step.
+  code: |
+    from reports.runs.models import ReportRun, RunStatus
+    from reports.export import build_export
+
+
+    def try_start_run(run: ReportRun, worker_id: str) -> bool:
+        if run.status != RunStatus.QUEUED:
+            return False
+        run.status = RunStatus.RUNNING
+        run.worker_id = worker_id
+        return True
+
+
+    def process_next(db, run_id: int, worker_id: str) -> None:
+        run = db.get(ReportRun, run_id)
+        try_start_run(run, worker_id)
+        db.commit()
+
+        result = build_export(run.report_id, run.params)
+        run.result_path = result.path
+        run.status = RunStatus.SUCCEEDED
+        db.commit()
+
+- id: C16-07
+  card: C16
+  expected: dirty
+  path: app/returns/inspection.py
+  why: complete_inspection returns the return unchanged when it is not inspecting; the handler reports the grade as accepted.
+  source: Async writer of a return inspection and its route.
+  code: |
+    from fastapi import APIRouter, Depends
+
+    from app.db import get_session
+    from app.returns.models import Return, ReturnStatus
+
+    router = APIRouter()
+
+
+    async def complete_inspection(db, return_id: int, grade: str) -> Return:
+        ret = await db.get(Return, return_id)
+        if ret.status != ReturnStatus.INSPECTING:
+            return ret
+        ret.status = ReturnStatus.INSPECTED
+        ret.grade = grade
+        await db.flush()
+        return ret
+
+
+    @router.post("/returns/{return_id}/inspection")
+    async def post_inspection(return_id: int, body: dict, db=Depends(get_session)):
+        ret = await complete_inspection(db, return_id, body["grade"])
+        await db.commit()
+        return {"id": ret.id, "grade": body["grade"], "accepted": True}
+
+- id: C16-08
+  card: C16
+  expected: dirty
+  path: src/server/payouts/approve.ts
+  why: updateMany guards the old status but its count is ignored; approving a payout that is already rejected returns approved to the caller.
+  source: Payout approval writer on Prisma.
+  code: |
+    import { prisma } from "../prisma";
+    import { audit } from "../audit";
+
+    export async function approvePayout(payoutId: string, approverId: string) {
+      await prisma.payout.updateMany({
+        where: { id: payoutId, status: "pending_review" },
+        data: {
+          status: "approved",
+          approvedBy: approverId,
+          approvedAt: new Date(),
+        },
+      });
+
+      await audit("payout.approved", { payoutId, approverId });
+
+      return { id: payoutId, status: "approved" as const };
+    }
+
+    export async function approveBatch(ids: string[], approverId: string) {
+      const results = [];
+      for (const id of ids) {
+        results.push(await approvePayout(id, approverId));
+      }
+      return results;
+    }
+
+- id: C16-09
+  card: C16
+  expected: dirty
+  path: fleet/vehicles/state.py
+  why: The writer reads a transition table, but a pair missing from it returns None silently instead of refusing.
+  source: Vehicle maintenance state writer with a table of next states.
+  code: |
+    from fleet.vehicles.models import Vehicle, VehicleState
+
+    NEXT = {
+        (VehicleState.IN_SERVICE, "report_fault"): VehicleState.NEEDS_REPAIR,
+        (VehicleState.NEEDS_REPAIR, "start_repair"): VehicleState.IN_REPAIR,
+        (VehicleState.IN_REPAIR, "finish_repair"): VehicleState.IN_SERVICE,
+        (VehicleState.IN_SERVICE, "retire"): VehicleState.RETIRED,
+    }
+
+
+    def apply_vehicle_action(vehicle: Vehicle, action: str, note: str | None = None) -> None:
+        nxt = NEXT.get((vehicle.state, action))
+        if nxt is None:
+            return
+        vehicle.state = nxt
+        if note:
+            vehicle.notes.append(note)
+
+
+    def retire_vehicle(db, vehicle_id: int) -> dict:
+        vehicle = db.get(Vehicle, vehicle_id)
+        apply_vehicle_action(vehicle, "retire")
+        db.commit()
+        return {"vehicle_id": vehicle_id, "retired": True}
+
+- id: C16-10
+  card: C16
+  expected: dirty
+  path: src/domain/booking.ts
+  why: cancel() changes the status only from draft or held; from confirmed it logs a warning and returns, and the caller sends the cancellation email.
+  source: Booking entity method and the service calling it.
+  code: |
+    import { logger } from "../logger";
+
+    export class Booking {
+      constructor(
+        public readonly id: string,
+        public status: "draft" | "held" | "confirmed" | "cancelled",
+        public cancelledAt: Date | null = null,
+      ) {}
+
+      cancel(now: Date): void {
+        if (this.status === "draft" || this.status === "held") {
+          this.status = "cancelled";
+          this.cancelledAt = now;
+          return;
+        }
+        logger.warn("booking cancel ignored", { id: this.id, status: this.status });
+      }
+    }
+
+    export async function cancelBooking(repo: BookingRepo, mail: Mailer, id: string) {
+      const booking = await repo.get(id);
+      booking.cancel(new Date());
+      await repo.save(booking);
+      await mail.send(booking.id, "booking_cancelled");
+    }
+
+- id: C16-11
+  card: C16
+  expected: clean
+  path: app/shipments/writer.py
+  why: A repeat of DELIVERED returns as idempotency; any other pair outside the table raises a refusal.
+  source: Shipment writer with a transition table and a repeat check.
+  code: |
+    from app.shipments.models import Shipment, ShipmentStatus
+    from app.shipments.transitions import ALLOWED
+    from app.errors import TransitionRefused
+
+
+    def set_shipment_status(shipment: Shipment, new: ShipmentStatus) -> None:
+        if shipment.status == new:
+            # the courier app resends the same confirmation
+            return
+        if (shipment.status, new) not in ALLOWED:
+            raise TransitionRefused(
+                code="shipment_transition_not_allowed",
+                old=shipment.status.value,
+                new=new.value,
+            )
+        shipment.status = new
+
+
+    def mark_delivered(shipment: Shipment, *, signed_by: str, at) -> None:
+        set_shipment_status(shipment, ShipmentStatus.DELIVERED)
+        shipment.delivered_at = at
+        shipment.signed_by = signed_by
+
+- id: C16-12
+  card: C16
+  expected: clean
+  path: billing/invoices/status.py
+  why: The writer checks the pair against one table and raises with a code; there is no silent path.
+  source: Invoice status writer.
+  code: |
+    from billing.invoices.models import Invoice, InvoiceStatus
+    from billing.errors import BillingRefusal, RefusalCode
+
+    TRANSITIONS: dict[InvoiceStatus, frozenset[InvoiceStatus]] = {
+        InvoiceStatus.DRAFT: frozenset({InvoiceStatus.SENT, InvoiceStatus.VOID}),
+        InvoiceStatus.SENT: frozenset({InvoiceStatus.PAID, InvoiceStatus.VOID}),
+        InvoiceStatus.PAID: frozenset({InvoiceStatus.REFUNDED}),
+        InvoiceStatus.VOID: frozenset(),
+        InvoiceStatus.REFUNDED: frozenset(),
+    }
+
+
+    def set_invoice_status(invoice: Invoice, new: InvoiceStatus) -> None:
+        allowed = TRANSITIONS[invoice.status]
+        if new not in allowed:
+            raise BillingRefusal(
+                RefusalCode.INVOICE_TRANSITION_NOT_ALLOWED,
+                detail={"old": invoice.status.value, "new": new.value},
+            )
+        invoice.status = new
+
+
+    def void_invoice(invoice: Invoice, *, reason: str) -> None:
+        set_invoice_status(invoice, InvoiceStatus.VOID)
+        invoice.void_reason = reason
+
+- id: C16-13
+  card: C16
+  expected: clean
+  path: warehouse/reservations/repo.py
+  why: The guarded UPDATE checks rowcount and turns zero rows into a refusal with a code.
+  source: Raw SQL writer of a stock reservation.
+  code: |
+    from sqlalchemy import text
+
+    from warehouse.errors import Refusal
+
+
+    PICK_SQL = text(
+        """
+        UPDATE stock_reservations
+           SET status = 'picked',
+               picked_at = now(),
+               picked_by = :picker_id
+         WHERE id = :reservation_id
+           AND status = 'reserved'
+        """
+    )
+
+
+    async def mark_reservation_picked(conn, reservation_id: int, picker_id: int) -> None:
+        result = await conn.execute(
+            PICK_SQL,
+            {"reservation_id": reservation_id, "picker_id": picker_id},
+        )
+        if result.rowcount == 0:
+            raise Refusal(
+                "reservation_not_reserved",
+                reservation_id=reservation_id,
+            )
+
+- id: C16-14
+  card: C16
+  expected: clean
+  path: src/server/tasks/pickTask.ts
+  why: The same status is a repeat and returns; any other status throws TransitionRejected, which the route turns into a 409 with a code.
+  source: Writer of a picking task status and its route.
+  code: |
+    import { db } from "../db";
+    import { PickTaskStatus, TRANSITIONS } from "./status";
+    import { TransitionRejected } from "../errors";
+
+    export async function setPickTaskStatus(taskId: string, next: PickTaskStatus): Promise<void> {
+      const task = await db.pickTask.findUniqueOrThrow({ where: { id: taskId } });
+      if (task.status === next) {
+        return;
+      }
+      if (!TRANSITIONS[task.status].includes(next)) {
+        throw new TransitionRejected("pick_task_transition_not_allowed", {
+          from: task.status,
+          to: next,
+        });
+      }
+      await db.pickTask.update({ where: { id: taskId }, data: { status: next } });
+    }
+
+    pickRouter.post("/tasks/:id/picked", async (req, res) => {
+      try {
+        await setPickTaskStatus(req.params.id, PickTaskStatus.Picked);
+        res.json({ ok: true });
+      } catch (e) {
+        if (e instanceof TransitionRejected) {
+          return res.status(409).json({ code: e.code });
+        }
+        throw e;
+      }
+    });
+
+- id: C16-15
+  card: C16
+  expected: clean
+  path: shop/orders/payments.py
+  why: A payment that arrives after cancellation is not dropped; the writer moves the order to the declared state REFUND_REQUIRED.
+  source: Order writer for a payment confirmation from a payment provider.
+  code: |
+    from shop.orders.models import Order, OrderStatus
+    from shop.orders.writer import set_order_status
+
+
+    def on_payment_captured(order: Order, payment_id: str) -> None:
+        """A capture can arrive after the buyer cancelled; money is then owed back."""
+
+        if order.status == OrderStatus.PAID:
+            return
+
+        if order.status == OrderStatus.CANCELLED:
+            order.captured_payment_id = payment_id
+            set_order_status(order, OrderStatus.REFUND_REQUIRED)
+            return
+
+        order.captured_payment_id = payment_id
+        set_order_status(order, OrderStatus.PAID)
+
+
+    def handle_capture_message(db, message: dict) -> None:
+        order = db.get(Order, message["order_id"])
+        on_payment_captured(order, message["payment_id"])
+        db.commit()
+
+- id: C16-16
+  card: C16
+  expected: clean
+  path: src/server/payouts/approve.ts
+  why: The count of updated rows is checked; zero rows returns a refusal object that the route returns with its code.
+  source: Payout approval writer on Prisma.
+  code: |
+    import { prisma } from "../prisma";
+
+    type ApproveResult =
+      | { ok: true }
+      | { ok: false; code: "payout_not_pending_review" };
+
+    export async function approvePayout(payoutId: string, approverId: string): Promise<ApproveResult> {
+      const { count } = await prisma.payout.updateMany({
+        where: { id: payoutId, status: "pending_review" },
+        data: { status: "approved", approvedBy: approverId, approvedAt: new Date() },
+      });
+      if (count === 0) {
+        return { ok: false, code: "payout_not_pending_review" };
+      }
+      return { ok: true };
+    }
+
+    payoutsRouter.post("/payouts/:id/approve", async (req, res) => {
+      const result = await approvePayout(req.params.id, req.user.id);
+      if (!result.ok) {
+        return res.status(409).json({ code: result.code });
+      }
+      res.json({ ok: true });
+    });
+
+- id: C16-17
+  card: C16
+  expected: clean
+  path: shop/orders/rules.py
+  why: The fragment is a predicate that answers whether shipping is possible; it does not assign the state field, so it is not a writer.
+  source: Order rules module used by the API to fill allowed actions.
+  code: |
+    from shop.orders.models import Order, OrderStatus
+
+
+    SHIPPABLE = frozenset({OrderStatus.PAID})
+    CANCELLABLE = frozenset(
+        {OrderStatus.SUBMITTED, OrderStatus.AWAITING_STOCK, OrderStatus.STOCK_CONFIRMED}
+    )
+
+
+    def can_ship(order: Order) -> bool:
+        if order.status != OrderStatus.PAID:
+            return False
+        return order.shipping_address is not None
+
+
+    def can_cancel(order: Order) -> bool:
+        return order.status in CANCELLABLE
+
+
+    def allowed_actions(order: Order) -> list[str]:
+        actions = []
+        if can_ship(order):
+            actions.append("ship")
+        if can_cancel(order):
+            actions.append("cancel")
+        return actions
+
+- id: C16-18
+  card: C16
+  expected: clean
+  path: reports/runs/service.py
+  why: try_start_run returns a refusal result, and the caller reads it and stops before building the export.
+  source: Report run service with a start function and a worker step.
+  code: |
+    from dataclasses import dataclass
+
+    from reports.runs.models import ReportRun, RunStatus
+    from reports.export import build_export
+
+
+    @dataclass
+    class StartRefused:
+        code: str
+
+
+    def try_start_run(run: ReportRun, worker_id: str) -> StartRefused | None:
+        if run.status != RunStatus.QUEUED:
+            return StartRefused(code=f"run_not_queued_{run.status.value}")
+        run.status = RunStatus.RUNNING
+        run.worker_id = worker_id
+        return None
+
+
+    def process_next(db, run_id: int, worker_id: str, log) -> None:
+        run = db.get(ReportRun, run_id)
+        refused = try_start_run(run, worker_id)
+        if refused is not None:
+            log.info("run skipped", run_id=run_id, code=refused.code)
+            return
+        db.commit()
+        result = build_export(run.report_id, run.params)
+        run.result_path = result.path
+
+- id: C16-19
+  card: C16
+  expected: clean
+  path: src/domain/booking.ts
+  why: The writer reads the allowed pairs from one table and throws on a pair outside it; the repeat of the same status returns.
+  source: Booking entity with a transition table.
+  code: |
+    import { TransitionRejected } from "../errors";
+
+    type BookingStatus = "draft" | "held" | "confirmed" | "cancelled";
+
+    const TRANSITIONS: Record<BookingStatus, readonly BookingStatus[]> = {
+      draft: ["held", "cancelled"],
+      held: ["confirmed", "cancelled"],
+      confirmed: [],
+      cancelled: [],
+    };
+
+    export class Booking {
+      constructor(
+        public readonly id: string,
+        private _status: BookingStatus,
+      ) {}
+
+      get status(): BookingStatus {
+        return this._status;
+      }
+
+      transitionTo(next: BookingStatus): void {
+        if (this._status === next) return;
+        if (!TRANSITIONS[this._status].includes(next)) {
+          throw new TransitionRejected("booking_transition_not_allowed", {
+            from: this._status,
+            to: next,
+          });
+        }
+        this._status = next;
+      }
+    }
+
+- id: C16-20
+  card: C16
+  expected: clean
+  path: app/payments/consumer.py
+  why: The early return skips a message whose id was already processed, not a status mismatch; the writer it calls raises on a pair outside the table.
+  source: Queue consumer for payment results with deduplication by message id.
+  code: |
+    from app.payments.models import Payment, PaymentStatus, ProcessedMessage
+    from app.payments.writer import set_payment_status
+
+
+    def handle_payment_result(db, message: dict) -> None:
+        message_id = message["message_id"]
+        if db.get(ProcessedMessage, message_id) is not None:
+            # at-least-once delivery: this message was handled before
+            return
+
+        payment = db.get(Payment, message["payment_id"])
+        if message["result"] == "captured":
+            set_payment_status(payment, PaymentStatus.CAPTURED)
+        elif message["result"] == "declined":
+            payment.decline_code = message["decline_code"]
+            set_payment_status(payment, PaymentStatus.DECLINED)
+        else:
+            payment.failure_code = "unknown_provider_result"
+            set_payment_status(payment, PaymentStatus.FAILED)
+
+        db.add(ProcessedMessage(id=message_id))
+        db.commit()
