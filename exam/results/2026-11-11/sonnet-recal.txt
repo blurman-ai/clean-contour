@@ -1,0 +1,24 @@
+card    dirty found  recall  clean flagged  false  unclear  unstable  result
+C2             9/11     82%           2/11    18%        0         3  FAIL (recall, false)
+C5            10/11     91%           0/12     0%        1         1  PASS
+C9            11/11    100%           3/11    27%        0         1  FAIL (false)
+C10           10/11     91%           1/11     9%        1         3  PASS
+C11           13/13    100%           2/11    18%        0         1  FAIL (false)
+
+Total: 2 of 5 cards passed; dirty found 53/57 (93%), clean flagged 8/56 (14%). Threshold: recall ≥ 90%, false ≤ 10%.
+
+C2 — errors:
+  C2-03 expected clean, got dirty: Пустой список строк `InvoiceLine` возвращается как `lines=[]` при `status=invoice.status` из хранимого поля, но состояние из пустоты не выводится, так что ветка
+  C2-08 expected dirty, got clean: The branches test the courier's own fields (`user_id`, `phone_verified_at`) for None rather than an empty selection of other rows, so the state is derived from 
+  C2-10 expected dirty, got clean: The `total == 0` branch returns state "empty" from a count of PriceRow rows, but those rows are the import's own data rows, not a stored state field of another 
+  C2-16 expected clean, got dirty: A missing active Tariff row for the zone (None from the query) is turned into a hardcoded DEFAULT_RATE with zero per_kg instead of a failure, so the price comes
+
+C9 — errors:
+  C9-06 expected clean, got dirty: The parametrize list ["created", "packed", "shipped", "delivered"] is a literal copy of the OrderState values in app/shipping/states.py instead of being taken f
+  C9-16 expected clean, got dirty: The parametrize list of five state strings is a literal copy of the ParcelState values and will diverge when a state is added, while `set(STATE_LABELS) == set(P
+  C9-22 expected clean, got dirty: WEEKDAYS in app/shifts/calendar.py and the Weekday Literal in app/schemas/schedule.py are separate literal lists of the same seven codes that the schedule API a
+
+C11 — errors:
+  C11-02 expected clean, got dirty: Статус "pending" записан и закоммичен до вызова pricing_api, а таймаут, отказ API и отмена переводят его в "failed", но смерть процесса между коммитом и концом 
+  C11-05 expected clean, got dirty: Статус "processing" имеет lease и счётчик попыток, но если все попытки завершаются ошибкой, перевод в "failed" для ошибки и таймаута зависит от неизвестного `st
+Report: runs/2026-11-11-sonnet-recal.json
