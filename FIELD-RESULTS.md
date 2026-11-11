@@ -76,6 +76,7 @@ The authors haven't been told about these yet.
 | dotnet/eShop | A payment that succeeds after the order was cancelled is dropped without a trace | the writer lets a forbidden transition pass silently | [#1077](https://github.com/dotnet/eShop/pull/1077) |
 | simplcommerce/SimplCommerce | A Momo payment that arrives after the automatic cancellation marks the order paid | transition with no check | [#1155](https://github.com/simplcommerce/SimplCommerce/pull/1155) |
 | btcpayserver/btcpayserver | A refused invoice status change is shown as done, and a failed save still fires the webhook | unknown is not success | [#7800](https://github.com/btcpayserver/btcpayserver/pull/7800) |
+| Ombi-app/Ombi | The API accepted any issue status, including In Progress when the setting is off; only the UI applied the rule | the server decides what is allowed | [#5492](https://github.com/Ombi-app/Ombi/pull/5492) |
 
 Each fix comes with a test that fails without it. State on 11 November 2026: the mvidarr author applied the patch unchanged with its 12 tests in [#589](https://github.com/prefect421/mvidarr/pull/589), merged into `dev` for v1.1.6, and closed #582 as incorporated; the others are open.
 
