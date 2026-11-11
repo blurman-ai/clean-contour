@@ -5,36 +5,33 @@
 Columns: card, file:line, the line of code. A hit is a candidate, not a verdict:
 each one is read against the card's questions. Tests, EF migrations and
 generated code are skipped, as the skill's "Languages" paragraph says.
+
+The C# patterns live in `skills/clean-contour-check/signs.json`; this script
+keeps its own file walk (same extensions, same SKIP, same order and line format
+as before) so earlier field results stay reproducible.
 """
+import json
 import re
 import sys
 from pathlib import Path
 
-SIGNS = {
-    "C1": [r"events?\.Any\(\s*\w+\s*=>\s*\w+\.(Type|Kind|Name)", r"OrderByDescending\([^)]*\)\.(First|FirstOrDefault)", r"\.Aggregate\(", r"AggregateStreamAsync", r"ROW_NUMBER\(\)\s*OVER"],
-    "C2": [r"(FirstOrDefault|SingleOrDefault)(Async)?\([^;]*\)\s*(is null|==\s*null)", r"\?\?\s*\w*(Status|State)\.\w+", r"!\s*await\s+[\w.]+\.AnyAsync\(", r"CountAsync\([^)]*\)\s*==\s*0", r"COALESCE\([^)]*'"],
-    "C3": [r"\.\w+\.(Status|State)\s*==", r"(Status|State)\s*=\s*\w+\.\w+\.(Status|State)\b"],
-    "C4": [r"\.(Status|State|Stage|Phase|Outcome|\w+Status|\w+State)\s*=(?!=)", r"_?(orderStatus|status|state)\w*\s*=\s*\w*(Status|State)\.", r"SetProperty\(\s*\w+\s*=>\s*\w+\.\w*(Status|State)", r"SET\s+\[?\w*(status|state)\w*\]?\s*=", r"with\s*\{\s*(Status|State)\s*="],
-    "C6": [r"\.Message\.(Contains|StartsWith|EndsWith|Equals)\(", r"\.Message\s*==", r"ToString\(\)\.Contains\(", r"Regex\.(IsMatch|Match)\([^,]*Message", r"when\s*\([^)]*Message"],
-    "C7": [r"StringComparison\.\w*IgnoreCase\)", r"Id\.StartsWith\(\"", r"GetType\(\)\.Name\s*==", r"\.Name\s*==\s*\"[A-Z][a-z]+ "],
-    "C8": [r"\bis not\s+[A-Z]\w+\s*\)", r"!\(\s*\w+\s+is\s+[A-Z]", r"\.(Kind|Type)\s*!=\s*\w+\."],
-    "C9": [r"new\s*(\[\]|string\[\]|HashSet<string>|List<string>)\s*\{\s*\"[^\"]+\"\s*,\s*\"[^\"]+\"\s*,\s*\"", r"\bIN\s*\(\s*'[^']+'\s*,\s*'", r"case\s+\"\w+\":\s*case\s+\""],
-    "C10": [r"Task\.WhenAll\(", r"Parallel\.ForEach"],
-    "C11": [r"(Status|State)\.(Pending|Processing|Queued|Running|Submitted|AwaitingValidation|Started)\b", r"RetryForever|WaitAndRetryForever|InfiniteTimeSpan", r"while\s*\(\s*!\s*\w*(stoppingToken|token|cancellationToken)\w*\.IsCancellationRequested"],
-    "C12": [r"DispatcherTimer", r"ProtectedLocalStorage|ILocalStorageService", r"@if\s*\([^)]*Status\s*==[^)]*&&"],
-    "C14": [r"\[HttpGet", r"MapGet\("],
-    "C15": [r"catch\s*\(\s*Exception[^)]*\)", r"Problem\(\s*\w+\.Message", r"StatusCode\(\s*500\s*,", r"BadRequest\(\s*\"", r"WriteAsync\(\s*\w+\.Message", r"AddModelError\(\s*\"\"", r"WithMessage\("],
-    "C16": [r"(void|bool|Task|Task<bool>)\s+(Set\w*Status|Mark\w+|TransitionTo|ChangeStatus|Change\w*State|Try(Mark|Start|Set)\w*)\s*\(", r"ExecuteUpdate(Async)?\(", r"UPDATE\s+\S+\s+SET[^;]*WHERE[^;]*(status|state)"],
-    "C17": [r"\*ngIf=\"[^\"]*(status|state|Status|State)[^\"]*(==|!=)", r"\[disabled\]=\"[^\"]*(status|Status)", r"(can|Can)[A-Z]\w*\s*[:=]\s*[^;]*(status|Status)\s*[!=]==?", r"@if\s*\([^)]*(Status|State)\s*[!=]=", r"(IsVisible|IsEnabled|disabled)\s*=\s*\"?@?\(?[^;\"]*Status\s*[!=]="],
-}
+HERE = Path(__file__).resolve().parent
+SIGNS_PATH = HERE.parent / "skills" / "clean-contour-check" / "signs.json"
+
 SKIP = re.compile(r"(/obj/|/bin/|Migrations/|\.g\.cs$|\.Designer\.cs$|[Tt]ests?/|\.Tests?\b|Tests?\.cs$|/samples?/|/Benchmarks?/|node_modules|\.spec\.ts$|wwwroot/(lib|vendor)|\.min\.|/dist/)")
+
+
+def load_cs_signs() -> dict:
+    with open(SIGNS_PATH, encoding="utf-8") as f:
+        signs = json.load(f)
+    return {card: card_data["cs"] for card, card_data in signs["cards"].items() if "cs" in card_data}
 
 
 def main(root: str) -> None:
     rootp = Path(root)
     files = sorted(p for ext in ("*.cs", "*.razor", "*.cshtml", "*.ts", "*.html") for p in rootp.rglob(ext)
                    if not SKIP.search(str(p)))
-    for card, pats in SIGNS.items():
+    for card, pats in load_cs_signs().items():
         rx = [re.compile(p) for p in pats]
         for f in files:
             try:
