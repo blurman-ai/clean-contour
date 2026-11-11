@@ -723,3 +723,64 @@
         </Menu>
       );
     }
+
+- id: C17-21
+  card: C17
+  expected: dirty
+  path: depot/templates/transfers/detail.html
+  why: The template decides whether to offer cancel from status and the age of the transfer; the view that cancels keeps its own condition.
+  source: Django template of a transfer page.
+  code: |
+    {% extends "base.html" %}
+    {% load i18n %}
+
+    {% block content %}
+      <h1>{% trans "Transfer" %} {{ transfer.number }}</h1>
+      <p>{{ transfer.from_depot.name }} &rarr; {{ transfer.to_depot.name }}</p>
+      <span class="badge badge-{{ transfer.status }}">{{ transfer.get_status_display }}</span>
+
+      <table class="lines">
+        {% for line in transfer.lines.all %}
+          <tr><td>{{ line.sku }}</td><td>{{ line.quantity }}</td></tr>
+        {% endfor %}
+      </table>
+
+      {% if transfer.status == "ready" or transfer.status == "draft" %}
+        {% if transfer.age_hours < 24 %}
+          <form method="post" action="{% url 'transfers:cancel' transfer.pk %}">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-danger">{% trans "Cancel transfer" %}</button>
+          </form>
+        {% endif %}
+      {% endif %}
+    {% endblock %}
+
+- id: C17-22
+  card: C17
+  expected: clean
+  path: depot/templates/transfers/detail.html
+  why: The template asks the same can_cancel rule that the cancel view uses to refuse; the template keeps no copy of the condition.
+  source: Django template of a transfer page.
+  code: |
+    {% extends "base.html" %}
+    {% load i18n transfer_rules %}
+
+    {% block content %}
+      <h1>{% trans "Transfer" %} {{ transfer.number }}</h1>
+      <p>{{ transfer.from_depot.name }} &rarr; {{ transfer.to_depot.name }}</p>
+      <span class="badge badge-{{ transfer.status }}">{{ transfer.get_status_display }}</span>
+
+      <table class="lines">
+        {% for line in transfer.lines.all %}
+          <tr><td>{{ line.sku }}</td><td>{{ line.quantity }}</td></tr>
+        {% endfor %}
+      </table>
+
+      {% comment %} can_cancel is transfers.rules.can_cancel, the same function the cancel view calls {% endcomment %}
+      {% if transfer|can_cancel %}
+        <form method="post" action="{% url 'transfers:cancel' transfer.pk %}">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-danger">{% trans "Cancel transfer" %}</button>
+        </form>
+      {% endif %}
+    {% endblock %}

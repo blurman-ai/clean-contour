@@ -672,3 +672,63 @@
 
         db.add(ProcessedMessage(id=message_id))
         db.commit()
+
+- id: C16-21
+  card: C16
+  expected: dirty
+  path: depot/transfers/services.py
+  why: The Django update guards the old status, but its returned row count is dropped; a transfer that was already cancelled is reported as dispatched.
+  source: Django service for dispatching a stock transfer between depots.
+  code: |
+    from django.db import transaction
+    from django.utils import timezone
+
+    from depot.transfers.models import Transfer, TransferStatus
+    from depot.notifications import notify_depot
+
+
+    @transaction.atomic
+    def dispatch_transfer(transfer_id: int, driver_id: int) -> dict:
+        Transfer.objects.filter(
+            pk=transfer_id,
+            status=TransferStatus.READY,
+        ).update(
+            status=TransferStatus.DISPATCHED,
+            driver_id=driver_id,
+            dispatched_at=timezone.now(),
+        )
+
+        transfer = Transfer.objects.get(pk=transfer_id)
+        notify_depot(transfer.to_depot_id, "transfer_dispatched", transfer.id)
+        return {"id": transfer.id, "status": "dispatched"}
+
+- id: C16-22
+  card: C16
+  expected: clean
+  path: depot/transfers/services.py
+  why: The Django update guards the old status and a zero row count becomes a refusal with a code before anything is announced.
+  source: Django service for dispatching a stock transfer between depots.
+  code: |
+    from django.db import transaction
+    from django.utils import timezone
+
+    from depot.errors import Refusal
+    from depot.transfers.models import Transfer, TransferStatus
+    from depot.notifications import notify_depot
+
+
+    @transaction.atomic
+    def dispatch_transfer(transfer_id: int, driver_id: int) -> None:
+        updated = Transfer.objects.filter(
+            pk=transfer_id,
+            status=TransferStatus.READY,
+        ).update(
+            status=TransferStatus.DISPATCHED,
+            driver_id=driver_id,
+            dispatched_at=timezone.now(),
+        )
+        if updated == 0:
+            raise Refusal("transfer_not_ready", transfer_id=transfer_id)
+
+        transfer = Transfer.objects.get(pk=transfer_id)
+        notify_depot(transfer.to_depot_id, "transfer_dispatched", transfer.id)

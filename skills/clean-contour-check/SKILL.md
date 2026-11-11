@@ -799,7 +799,10 @@ onError: (e) => notify(t(text[e.code]))
 `markPaid`): an `if status == X:` that wraps the assignment with no `else`, a
 bare `return` / `return False` / `return None` when the old status does not
 match, a check written as a list of forbidden statuses (`if status in (PAID,
-SHIPPED): raise`) instead of allowed ones.
+SHIPPED): raise`) instead of allowed ones. Django: `Model.objects.filter(pk=…,
+status=…).update(status=…)` whose returned count is dropped; SQLAlchemy:
+`session.execute(update(…).where(… .status == …))` whose `rowcount` nobody reads;
+`get_or_none`/`first()` on the old status followed by a bare `return`.
 
 **Kotlin and Go:** `if (status == X) { status = Y }` with no `else`,
 `when (status) { X -> …; else -> Unit }`, `if s.Status != X { return nil }`, SQL
@@ -816,7 +819,9 @@ row count ignored.
 2. Is there a path where the old status is not one the transition allows, the
    new status differs from the old one, and the function returns without a
    refusal (no exception, no refusal code, no recorded conflict state) and
-   without making the caller check a result?
+   without making the caller check a result? An old status the branch does not
+   name is not allowed; the full list of statuses is not needed to answer. A
+   result the caller in the fragment ignores counts as not checked.
 3. Are the allowed old statuses written inside this function, branch by branch,
    rather than read from one transition table?
 
@@ -852,6 +857,11 @@ a server response next to whether an action is offered: `canCancel`, `canEdit`,
 under `status === "…"`, `Date.now() < deadline`, `attempts < MAX_ATTEMPTS`,
 `role === "admin"` choosing a button.
 
+**Server templates (Jinja, Django, ERB, Razor):** `{% if order.status == "…" %}`
+or `{% if obj.attempts < 3 %}` around a `<button>`, a form or a link to an
+action, when the view that runs the action checks its own rule; a Python
+helper `can_*` used only by templates while the view repeats the condition.
+
 **C# clients (Blazor, WPF, MAUI, Avalonia):** `IsVisible`, `IsEnabled`,
 `CanExecute`, `disabled="@(…)"` computed from `Status ==` or
 `.Equals("…")`, a deadline or an attempt counter; a view model property
@@ -869,7 +879,9 @@ under `status === "…"`, `Date.now() < deadline`, `attempts < MAX_ATTEMPTS`,
 **Dirty if:** 1 = yes and 2 = yes.
 
 **Does not count:** a check of the shape of input (a required field, a length,
-an email format); hiding an action while its own request is in flight; a
+an email format); a template that calls the same function the action's view
+calls to refuse (`{% if order|can_cancel %}` with `can_cancel` used by the
+view); hiding an action while its own request is in flight; a
 branch that reads a server field which answers the question, even if it also
 reads other fields for display; tests.
 
