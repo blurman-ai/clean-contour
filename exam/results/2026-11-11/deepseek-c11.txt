@@ -1,0 +1,5 @@
+card    dirty found  recall  clean flagged  false  unclear  unstable  result
+C11           14/14    100%           0/10     0%        0         0  PASS
+
+Total: 1 of 1 cards passed; dirty found 14/14 (100%), clean flagged 0/10 (0%). Threshold: recall ≥ 90%, false ≤ 10%.
+Report: runs/2026-11-11-deepseek-c11.json

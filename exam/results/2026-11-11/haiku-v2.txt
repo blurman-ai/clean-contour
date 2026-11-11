@@ -1,0 +1,12 @@
+card    dirty found  recall  clean flagged  false  unclear  unstable  result
+C2            11/11    100%           0/11     0%        0         0  PASS
+C10            9/11     82%           1/11     9%        0         2  FAIL (recall)
+C16           10/11     91%           0/11     0%        1         2  PASS
+
+Total: 2 of 3 cards passed; dirty found 30/33 (91%), clean flagged 1/33 (3%). Threshold: recall ≥ 90%, false ≤ 10%.
+
+C10 — errors:
+  C10-01 expected dirty, got clean: Excluded by "does not count": the workbook is one uploaded input that is refused on its first invalid row, and the rows have no outcomes of their own.
+  C10-15 expected dirty, got clean: Кандидат отброшен по пункту «не считается»: `uploads` — один ввод одной заявки, и при первом слишком большом файле функция отказывает целиком.
+  C10-17 expected clean, got dirty: `build_customs_packet` raises `PacketIncomplete` on any missing document, so one missing part fails the whole packet, and the three documents are required toget
+Report: runs/2026-11-11-haiku-v2.json

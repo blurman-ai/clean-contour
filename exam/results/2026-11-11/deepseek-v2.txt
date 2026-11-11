@@ -1,0 +1,12 @@
+card    dirty found  recall  clean flagged  false  unclear  unstable  result
+C2            11/11    100%           1/11     9%        0         1  PASS
+C10            9/11     82%           0/11     0%        0         0  FAIL (recall)
+C16           10/11     91%           0/11     0%        0         0  PASS
+C17           11/11    100%           0/11     0%        0         0  PASS
+
+Total: 3 of 4 cards passed; dirty found 41/44 (93%), clean flagged 1/44 (2%). Threshold: recall ≥ 90%, false ≤ 10%.
+
+C10 — errors:
+  C10-08 expected dirty, got clean: The overall status is the ticket's own submission status, but the doc comment declares attachments optional and each accepted separately, so the loop over files
+  C10-13 expected dirty, got clean: The loop sends one notification through independent channels; a ChannelError marks the notice failed, but the notice is a single delivery record, not an overall
+Report: runs/2026-11-11-deepseek-v2.json

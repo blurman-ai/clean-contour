@@ -1,0 +1,13 @@
+card    dirty found  recall  clean flagged  false  unclear  unstable  result
+C2             9/11     82%           0/11     0%        0         2  FAIL (recall)
+C5            10/11     91%           1/12     8%        0         2  PASS
+C9            11/11    100%           0/11     0%        0         0  PASS
+C10           11/11    100%           0/11     0%        0         0  PASS
+C11           13/13    100%           1/11     9%        0         0  PASS
+
+Total: 4 of 5 cards passed; dirty found 54/57 (95%), clean flagged 2/56 (4%). Threshold: recall ≥ 90%, false ≤ 10%.
+
+C2 — errors:
+  C2-06 expected dirty, got clean: The empty `ShipmentPhoto` selection at line 22 returns a `DispatchCheck` with a reason string, not a stored state value, and the state field of `Shipment` is no
+  C2-08 expected dirty, got clean: `courier.user_id is None` returns state "no_account", but `user_id` is a column of the courier itself, not an empty row of another entity, so the second questio
+Report: runs/2026-11-11-haiku-recal.json

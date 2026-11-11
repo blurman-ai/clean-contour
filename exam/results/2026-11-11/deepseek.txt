@@ -1,0 +1,51 @@
+card    dirty found  recall  clean flagged  false  unclear  unstable  result
+C1             8/11     73%           3/11    27%        0         5  FAIL (recall, false)
+C2            10/11     91%           0/11     0%        0         0  PASS
+C3            11/11    100%           0/11     0%        0         0  PASS
+C4             7/11     64%           0/12     0%        0         3  FAIL (recall)
+C5            10/11     91%           0/12     0%        0         0  PASS
+C6            11/11    100%           1/12     8%        0         0  PASS
+C7             8/10     80%           0/12     0%        0         2  FAIL (recall)
+C8             9/11     82%           0/11     0%        0         1  FAIL (recall)
+C9            11/11    100%           1/11     9%        0         1  PASS
+C10           10/11     91%           0/11     0%        0         0  PASS
+C11           13/13    100%           1/11     9%        0         0  PASS
+C12           11/11    100%           0/11     0%        0         0  PASS
+C13           11/11    100%           0/11     0%        0         0  PASS
+C14           11/11    100%           2/11    18%        0         0  FAIL (false)
+C15            8/10     80%           0/10     0%        0         0  FAIL (recall)
+C16           11/11    100%           0/11     0%        0         0  PASS
+C17           11/11    100%           0/11     0%        0         0  PASS
+
+Total: 11 of 17 cards passed; dirty found 171/187 (91%), clean flagged 8/190 (4%). Threshold: recall ≥ 90%, false ≤ 10%.
+
+C1 — errors:
+  C1-01 expected clean, got dirty: register_scan folds ShipmentEvent log via any(e.request_key == request_key) to decide duplicate, while Shipment.status is the stored field with the same meaning
+  C1-03 expected dirty, got unclear: ticketStage folds the event log into a stage, but no stored stage/status field of Ticket is visible in the fragment or its imports, so question 3 cannot be answ
+  C1-04 expected clean, got dirty: dispatch_delays_minutes derives per-shipment delay from the event log via _first over events, and no stored field with the same meaning appears in the fragment 
+  C1-08 expected dirty, got unclear: outcome is folded from JobEvent log, but no stored status field of DeliveryJob is visible in the fragment to confirm question 3.
+  C1-15 expected dirty, got unclear: finished flag is derived from the events log via events.some(e => e.type === "route_closed"), but whether the Route entity has a stored status field of the same
+  C1-22 expected clean, got dirty: `any(e.dedup_token == dedup_token for e in slot.events)` folds the event log, but it is an idempotency-key repeat check, which does not count; the state read is
+
+C4 — errors:
+  C4-02 expected dirty, got clean: assignment to processing_status sits in _store_result, which guards the old value with processing_status == "processing" and lease_id in the SELECT before writi
+  C4-06 expected dirty, got clean: `existing.label_print_status = "ready"` is a state write, but it sits inside `republish_report`, the write function for the publication lifecycle, so question 2
+  C4-08 expected dirty, got clean: the two `update(RouteStop).values(state=…)` writes are the writer's own guarded transitions (`WHERE … state == RUNNING/QUEUED`), so they are the write function 
+  C4-18 expected dirty, got clean: bulk update sets Order.status but guards the old value with WHERE Order.status == "picked", so the transition is checked in the same statement.
+
+C7 — errors:
+  C7-04 expected dirty, got clean: The comparison with "unnamed stop" only chooses display text (fallback title), not what the stop is or how it is processed.
+  C7-05 expected dirty, got clean: The branch only chooses display text (subheading vs table row) from the "Item name" column label, so it falls under "does not count".
+
+C8 — errors:
+  C8-04 expected dirty, got clean: The negative check `!isDraft && kind !== "freight"` only gates whether a tracking link is rendered, not the processing of the object by its kind.
+  C8-06 expected dirty, got clean: The `not is_courier_build` branch only gates copying a layout snapshot and the condition is a mode flag, not a kind-based dispatch of processing.
+
+C14 — errors:
+  C14-03 expected clean, got dirty: GET handler commits a write (record_view_event + db.commit), but the fragment shows no declaration of the table/field being written nor reads outside the declar
+  C14-19 expected clean, got dirty: GET handler get_price_list writes to the database via update(PriceListViewCounter) and db.commit(), which is a view counter write not declared as such in the fr
+
+C15 — errors:
+  C15-01 expected dirty, got unclear: onError shows a fixed text t("orders.saveFailed") without reading the refusal code from the server response, so the reason is lost; whether several causes colla
+  C15-17 expected dirty, got clean: bookingErrorText reads the refusal code via readApiErrorCode, maps only listed codes to texts and falls back to a generic text for unknown codes, so no refusal 
+Report: runs/2026-11-11-deepseek.json

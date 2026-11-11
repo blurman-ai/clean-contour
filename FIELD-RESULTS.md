@@ -169,6 +169,8 @@ Confirmed by reading the code:
 - jellyfin: SQLite retries are decided by `Message.Contains("database is locked")` instead of the error code.
 - bitwarden/server: places where a status is written with a full-entity replace and no check of the old status, and a bulk confirmation that sends mail and writes the audit event before the save. Two of them look security-relevant, so their details are not published here.
 
+Full reading reports: [nopCommerce](field/2026-11-11/nopCommerce.md), [jellyfin](field/2026-11-11/jellyfin.md). Exam score tables of the same day: [exam/results/2026-11-11](exam/results/2026-11-11/README.md).
+
 Per card, the cheap model was right most often on C4 (writes around the writer) and C6, and almost never on C8 and C17 in these projects.
 
 What the search said about the signs: the C11, C15, C6, C2, C16 and C17 signs found real places; the C7 sign `StringComparison.*IgnoreCase` and the C11 sign `InfiniteTimeSpan` were mostly noise (header and config parsing, library code).
