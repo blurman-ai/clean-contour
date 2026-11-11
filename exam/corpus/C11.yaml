@@ -37,9 +37,9 @@
 
 - id: C11-02
   card: C11
-  expected: clean
+  expected: dirty
   path: pricing/estimates.py
-  why: The estimate gets pending before the external call, but a timeout, a service refusal and a cancellation move it to failed with a code, that is, the way out of the wait is in the fragment.
+  why: A timeout, a service refusal and a cancellation move the estimate to failed with a code, but if the process dies after the commit of pending, the estimate stays pending; the fragment names no cleaner.
   source: service function requesting an estimate from an external service with a timeout and a failure state
   code: |
     import asyncio
@@ -370,9 +370,9 @@
 
 - id: C11-11
   card: C11
-  expected: clean
+  expected: dirty
   path: src/jobs/exportReport.ts
-  why: The document gets exporting before the service call, but a timeout and any error move it to failed with a code.
+  why: A timeout and any error move the document to failed with a code, but if the process dies between the write of exporting and the end of the call, the document stays exporting; the fragment names no cleaner.
   source: server task handler in TypeScript with a timeout and a failure state
   code: |
     const RENDER_TIMEOUT_MS = 30_000;
@@ -634,9 +634,9 @@
             session.rollback()
 - id: C11-19
   card: C11
-  expected: clean
+  expected: dirty
   path: printing/spooler.py
-  why: The print task gets printing before the call to the external print program, but a timeout and a refusal of the program move it to failed with a code.
+  why: A timeout and a refusal of the print program move the task to failed with a code, but if the process dies after the commit of printing, the task stays printing; the fragment names no cleaner.
   source: Printing a label with an external program with a timeout and a move to failed, by form
   code: |
     import subprocess
@@ -773,4 +773,100 @@
       return setInterval(() => {
         void reapStalledSyncs(db);
       }, REAP_EVERY_MS);
+    }
+- id: C11-23
+  card: C11
+  expected: clean
+  path: billing/invoice_pdf.py
+  why: A timeout and a refusal of the renderer move the invoice to failed, and the cleaner in the same module moves rendering older than the limit to failed, which covers the death of the process.
+  source: Rendering an invoice PDF with an external service, a timeout, and a periodic cleaner of overdue rendering, by form
+  code: |
+    import httpx
+    from datetime import timedelta
+
+    RENDER_TIMEOUT_SECONDS = 25
+    STALE_AFTER = timedelta(minutes=5)
+
+
+    def render_invoice_pdf(session, invoice_id: int) -> None:
+        invoice = session.get(Invoice, invoice_id)
+        invoice.pdf_status = "rendering"
+        invoice.pdf_started_at = utcnow()
+        session.commit()
+        try:
+            response = httpx.post(
+                RENDERER_URL,
+                json={"invoice_id": invoice.id},
+                timeout=RENDER_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+        except httpx.TimeoutException:
+            invoice.pdf_status = "failed"
+            invoice.pdf_error = "renderer_timeout"
+        except httpx.HTTPStatusError:
+            invoice.pdf_status = "failed"
+            invoice.pdf_error = "renderer_refused"
+        else:
+            invoice.pdf_status = "ready"
+            invoice.pdf_key = response.json()["key"]
+        session.commit()
+
+
+    def expire_stale_renders(session) -> int:
+        """Runs every minute from the scheduler."""
+        cutoff = utcnow() - STALE_AFTER
+        stale = session.query(Invoice).filter(
+            Invoice.pdf_status == "rendering",
+            Invoice.pdf_started_at < cutoff,
+        )
+        count = 0
+        for invoice in stale:
+            invoice.pdf_status = "failed"
+            invoice.pdf_error = "render_expired"
+            count += 1
+        session.commit()
+        return count
+- id: C11-24
+  card: C11
+  expected: clean
+  path: src/geocoding/geocodeAddress.ts
+  why: The address gets geocoding with a lease; a timeout and an error move it to failed, and a record whose lease has expired is taken again by the worker and goes to failed after the last attempt.
+  source: Geocoding an address with a lease and a limited number of attempts, by form
+  code: |
+    const LEASE_MS = 60_000;
+    const MAX_ATTEMPTS = 3;
+
+    export async function claimNextAddress(db: Db): Promise<Address | null> {
+      const now = new Date();
+      return db.addresses.claimOne({
+        where: {
+          OR: [
+            { geoStatus: "pending" },
+            { geoStatus: "geocoding", leaseUntil: { lt: now } },
+          ],
+        },
+        set: {
+          geoStatus: "geocoding",
+          leaseUntil: new Date(now.getTime() + LEASE_MS),
+          attempts: { increment: 1 },
+        },
+      });
+    }
+
+    export async function geocodeOne(db: Db): Promise<void> {
+      const address = await claimNextAddress(db);
+      if (!address) return;
+      if (address.attempts > MAX_ATTEMPTS) {
+        await db.addresses.update(address.id, { geoStatus: "failed", geoError: "attempts_exhausted" });
+        return;
+      }
+      try {
+        const point = await geocoder.lookup(address.line, { signal: AbortSignal.timeout(10_000) });
+        await db.addresses.update(address.id, { geoStatus: "located", lat: point.lat, lon: point.lon });
+      } catch (error) {
+        const code = error instanceof DOMException && error.name === "TimeoutError"
+          ? "geocoder_timeout"
+          : "geocoder_failed";
+        await db.addresses.update(address.id, { geoStatus: "failed", geoError: code });
+      }
     }

@@ -35,8 +35,10 @@ place outside the diff is a line in the report, not a fix "while at it".
 
 **Which cards go to whom.** A weak model (cheap, without reasoning) gets the
 cards that passed the exam from the `exam/` directory with threshold 90/10; on
-03.11.2026 (DeepSeek flash) cards C2, C4, C5, C8, C10, C13 and C14 were not
-passed, so their candidates are checked by a strong model or a human.
+11.11.2026 (DeepSeek flash) C1, C4, C7, C8, C14 and C15 were not passed, and C10
+passed but was mostly wrong on real code, so their candidates are checked by a
+strong model or a human. A weak model's `dirty` is a candidate: a strong model
+reads it before it is reported.
 
 Signs that a machine looks for without reading, such as a new state field
 without a declaration or a set of values outside the declaring module, sit in
@@ -136,9 +138,19 @@ by `return NotFound()`, `Results.NotFound()`, `throw new *NotFoundException`,
 bool from a method named `Is*`, `Has*`, `Can*` counts.
 
 **Questions:**
-1. Does the branch on an empty selection decide the state of an entity ("not
-   started", "not ready", "no access", "no account")?
-2. Is this state not stored as a field of the entity the decision is about?
+1. Does a branch on an empty selection (no rows, `None`, a zero count, "does
+   not exist", an empty id) return or assign a state value: a status name or
+   literal, an enum member, a `state=`/`status=` field ("not started", "not
+   ready", "no access", "no account", "empty"), a result object whose flag or
+   reason says ready / not ready, or a bool from a function named
+   `is*`/`has*`/`can*`? An empty list, a 404, an exception, passing `None` on,
+   or a default for a calculation is "no".
+2. Are the rows that turned out empty other rows than the state field of the
+   entity the value is about (grants of an employee, answers of a step, photos
+   of a shipment, rows of an upload)? An empty foreign key (`user_id is None`)
+   stands for a missing row of another table and is "yes". Reading that
+   entity's own state field is "no". Whether the entity also has a stored field is not asked: answer from
+   the branch itself.
 
 **Dirty if:** 1 = yes and 2 = yes.
 
@@ -270,11 +282,15 @@ shared specification or extension method (`o.IsOpen()`, `Specs.Open`) that both
 places call is the "one shared function".
 
 **Questions (about a pair of fragments):**
-1. Put the question of each fragment as a phrase "<verb> <object>" ("did the
-   attempt pass", "can the order be opened"). Do the phrases match entirely? If
-   the verb or the object differs (open / close, cancel / refund, was applied /
-   is in force now, order / shipment), the answer is "no" and questions 2-3 are
-   not asked.
+1. Do both fragments compute the same outcome for the same entity? The same
+   outcome: the same name or a synonym (finished / ready / done / publishable;
+   passed / accepted; empty / nothing found), or the same set of output values
+   (both map one status to a label, a stage or a badge). Different outcomes:
+   opposite or neighbouring actions (open / close, cancel / refund), different
+   times (was ever applied / is in force now), different entities (order /
+   shipment). Judge by the names and the returned values, not by how the
+   conditions are written: a condition that differs is question 3, not a
+   reason for "no". If the answer is "no", questions 2-3 are not asked.
 2. Is the answer computed, rather than read from one stored field or one shared
    function?
 3. Do the calculation rules in the fragments differ by at least one branch?
@@ -471,8 +487,10 @@ Kiota, OpenAPI Generator) is not a copy.
 that match today will diverge at the next edit of one of the places. Question
 3 = yes means the divergence already exists.
 
-**Does not count:** a subset declared by **name** next to the list
-(`FINAL = {A.DONE, A.FAILED}`); fixtures and test parametrization; sizes,
+**Does not count:** a subset declared by **name** next to the list whose
+members the compiler checks against that one list: enum members (`FINAL =
+{A.DONE, A.FAILED}`) or literals typed by the imported or generated union
+(`new Set<ShipmentStatus>(["delivered", "returned"])`); fixtures and test parametrization; sizes,
 colors and other presentation values (`"xs" | "sm" | "md"`).
 
 **Dirty:**
@@ -504,14 +522,19 @@ over parts of one result; a `CancellationTokenSource.Cancel()` in a part's
 `catch`.
 
 **Questions:**
-1. Name the object or field that receives an overall status or result from
-   these parts (a report from sections, an application from files). If it
-   cannot be named from the fragment, the answer is "no".
-2. Does the failure of one part put the whole into failure or stop the
-   processing of the rest?
-3. Could the other parts have been accepted on their own?
+1. Name the one object or field that receives an overall status or result
+   built from these parts (a report from sections, an application from files,
+   a task from labels). A notification, a toast, a log line, a response to a
+   bulk request, or a list of independent records (orders, rows, routes) is not
+   such an object. If it cannot be named from the fragment, the answer is "no".
+2. Does the failure of one part set the overall status (`failed`), discard the
+   results of the other parts, or stop the processing of the rest?
+3. Is it declared in the fragment that the parts are required together: a
+   type or a constant that lists the required composition? A comment, a
+   function name, or a guess about intent is not a declaration. Nothing
+   declared is "no".
 
-**Dirty if:** 1, 2 and 3 = yes.
+**Dirty if:** 1 = yes, 2 = yes and 3 = no.
 
 **Does not count:** parts that by type are all required together, and this is
 declared in the plan or the type; `Promise.all` and a loop over independent
@@ -562,9 +585,12 @@ while the entity waits, a `catch` that only logs and leaves the status as is.
 1. Before or during an external call (model, network, queue, background
    handler), does the entity get a waiting state? If there is no external call
    (waiting for a human decision), the answer is "no".
-2. Is there a path by which a refusal, a timeout, or the death of the process
-   moves it to a final state (`failed`, `timeout`), in the fragment or in an
-   explicitly named cleaner?
+2. Is there a path to a final state (`failed`, `timeout`) for all three: a
+   refusal, a timeout, **and** the death of the process between the write of
+   the waiting state and the end of the call? A `try`/`except` covers the first
+   two only; the death of the process is covered by a lease that another
+   worker takes over, a cleaner that reads the waiting state, or a recovery on
+   start, in the fragment or explicitly named by it.
 
 **Dirty if:** 1 = yes and 2 = no.
 
@@ -832,7 +858,11 @@ next writer will copy the branch with other statuses.
 return`): that is idempotency, not a transition; a function that on a
 mismatch moves the entity to a declared conflict state or raises; an `UPDATE …
 WHERE status = …` whose affected row count is checked and turned into a
-refusal; tests.
+refusal; a function that does not assign the field itself but hands the
+transition to the one writer (`set_*_status(…)`, `transition(…)`), which checks
+the table; a skip of an event that the function's docstring or a comment names
+as stale, duplicate or outranked by a newer answer (an ordering rule, card C13);
+tests.
 
 **Dirty:**
 ```python

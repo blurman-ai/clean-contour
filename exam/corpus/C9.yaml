@@ -379,7 +379,7 @@
   card: C9
   expected: clean
   path: src/shipment-list/model/statusGroups.ts
-  why: The status groups are declared by names and typed by the imported status type.
+  why: The status groups are declared by names, and their members are literals typed by the imported generated status type, so the compiler checks every member against the one list.
   source: Named subsets of statuses typed by the imported type of the list.
   code: |
     ### file: src/shared/api/model/shipments.ts

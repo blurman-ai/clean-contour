@@ -73,8 +73,11 @@ The authors haven't been told about these yet.
 | prefect421/mvidarr | An anonymous `POST /skip` turned a finished setup wizard back into unfinished, which reopened endpoints that work without a login | transition with no check | [#582](https://github.com/prefect421/mvidarr/pull/582) |
 | ander1044/wairz | A failed NVD lookup counted as "no CVEs", and later scans returned that as cached | unknown is not success | [#1](https://github.com/ander1044/wairz/pull/1) |
 | omnivision-solutions/tuti | An upload stayed `PROCESSING` forever when the queue refused it | a wait with no way out | [#530](https://github.com/omnivision-solutions/tuti/pull/530) |
+| dotnet/eShop | A payment that succeeds after the order was cancelled is dropped without a trace | the writer lets a forbidden transition pass silently | [#1077](https://github.com/dotnet/eShop/pull/1077) |
+| simplcommerce/SimplCommerce | A Momo payment that arrives after the automatic cancellation marks the order paid | transition with no check | [#1155](https://github.com/simplcommerce/SimplCommerce/pull/1155) |
+| btcpayserver/btcpayserver | A refused invoice status change is shown as done, and a failed save still fires the webhook | unknown is not success | [#7800](https://github.com/btcpayserver/btcpayserver/pull/7800) |
 
-Each fix comes with a test that fails without it. These are open pull requests and the authors may decide otherwise.
+Each fix comes with a test that fails without it. State on 11 November 2026: the mvidarr author applied the patch unchanged with its 12 tests in [#589](https://github.com/prefect421/mvidarr/pull/589), merged into `dev` for v1.1.6, and closed #582 as incorporated; the others are open.
 
 ## Popular projects where many people use agents
 
@@ -125,6 +128,49 @@ Agent commits are 81–98% in the open projects. A run costs $1–3 on Sonnet.
 Confirmed by reading the code:
 - recurso: a late `payment_failed` webhook sets a paid invoice to `past_due`. The handler checks only tenant ownership, and the repository `Update` writes the status with no guard, so dunning can pursue a customer who already paid.
 - the private marketplace: a refund that the payment provider keeps refusing is retried every five minutes with no limit. The table allows only `PENDING` and `PAID`, and nobody is told.
+
+## C#
+
+Five open C# projects, shallow clones of `main` on 11 November 2026. Candidates came from the C# search signs of the cards (`tools/cs_search.py`); every candidate was read by a strong model (Opus) against the card questions. This is not the skill's procedure on a cheap model, and the pass was not exhaustive: entities with a life cycle were read first. Line numbers are approximate.
+
+| Project | Size | What was found |
+|---|---|---|
+| [dotnet/eShop](https://github.com/dotnet/eShop) | ~18k lines | 6 places: C11, C11, C16, C15, C17, principle 16 |
+| [HangfireIO/Hangfire](https://github.com/HangfireIO/Hangfire) | ~54k lines | 3 places: C6, C2, principle 2 (mild) |
+| [SimplCommerce](https://github.com/simplcommerce/SimplCommerce) | ~4k stars | 4 places: C4, C16 with C11, principle 7, C15 |
+| [btcpayserver](https://github.com/btcpayserver/btcpayserver) | ~115k lines, invoices only | 3 places: C16, principle 7, C16 |
+| [Ombi](https://github.com/Ombi-app/Ombi) | C# and Angular | 3 places: C4 with C17, C5, C12 |
+
+Confirmed by reading the code:
+- eShop, `Order.cs`: `SetPaidStatus`, `SetStockConfirmedStatus` and `SetAwaitingValidationStatus` return silently on a wrong source status, while `SetShippedStatus` throws. A user cancels an order in `StockConfirmed`, the payment then succeeds, `SetPaidStatus` is ignored: the money is taken and the order stays cancelled with no refund.
+- eShop, `IntegrationEventLogService.cs`: an event is set to `InProgress` before publishing, and only `NotPublished` is read back. If the process dies in between, the event is never published; `PublishedFailed` is written and read by nobody.
+- SimplCommerce: a background service cancels orders in `PendingPayment` five minutes after their last update and returns the goods to stock. The Momo result endpoint writes `PaymentReceived` without reading the current status (the notify endpoint does check it). A buyer who pays on the Momo side for longer than five minutes is charged, the order shows as paid, and the goods may already be sold to someone else. In the Stripe, Braintree and PayPal controllers the order is created and charged in one request, so the window is only the length of the gateway call.
+- btcpayserver, `UIInvoiceController.ChangeInvoiceState`: ignores the `false` that `MarkInvoiceStatus` returns for a forbidden transition and shows "Settled (marked)"; the `MarkedCompleted` event is published in `finally`, also when `SaveChangesAsync` failed.
+- Hangfire, `ExpirationManager.cs`: decides by `ex.Message.Contains("Lock request time out period exceeded")`, which does not match on a SQL Server with another language; `SqlException.Number == 1222` does.
+- Ombi, `IssuesController.UpdateStatus`: accepts any status from the request; the rule "In Progress only when the setting is on" lives only in the Angular template.
+
+Hangfire was the cleanest: one writer under a distributed lock, and a job that cannot be loaded goes to `FailedState` with a reason.
+
+Three more projects on the same day, this time with the skill's procedure: the C# search signs, DeepSeek flash on every candidate, then a strong model (Sonnet) reading what DeepSeek flagged, with whole files and callers. C7 was left out (its sign matched header and config parsing). Where the flagged list was long, C15 and C8 were read by sample.
+
+| Project | Candidates | Flagged by DeepSeek | Read | Held up |
+|---|---|---|---|---|
+| [nopCommerce](https://github.com/nopSolutions/nopCommerce) | 382 | 102 | 44 | 28 |
+| [bitwarden/server](https://github.com/bitwarden/server) | 475 | 119 | 72 | 20 |
+| [jellyfin](https://github.com/jellyfin/jellyfin) | 421 | 64 | 52 | 21, of them 3 with an effect a user would notice |
+
+Confirmed by reading the code:
+- nopCommerce: when the tax provider returns an error, the tax rate stays 0 and the order is placed without tax; the error is logged only when `LogErrors` is on.
+- nopCommerce: after a successful charge, any exception while saving the order, moving the cart, rendering the PDF or sending mail becomes `result.AddError(exc.Message)`; the buyer sees the raw exception text for an order that was paid, and the order stays `Pending` without the paid-order handlers.
+- nopCommerce: a late PayPal `PENDING` webhook sets `PaymentStatus = Pending` on an order that is already paid or refunded.
+- nopCommerce: the "Cancel" button is hidden unless payment is pending, but `CanCancelOrder` only refuses an already cancelled order, so the cancel link cancels a paid order.
+- jellyfin: a recording stopped by a server shutdown is saved as `Completed`, the same as one stopped by the user, so a truncated recording is not retried.
+- jellyfin: SQLite retries are decided by `Message.Contains("database is locked")` instead of the error code.
+- bitwarden/server: places where a status is written with a full-entity replace and no check of the old status, and a bulk confirmation that sends mail and writes the audit event before the save. Details go to the maintainers first.
+
+Per card, the cheap model was right most often on C4 (writes around the writer) and C6, and almost never on C8 and C17 in these projects.
+
+What the search said about the signs: the C11, C15, C6, C2, C16 and C17 signs found real places; the C7 sign `StringComparison.*IgnoreCase` and the C11 sign `InfiniteTimeSpan` were mostly noise (header and config parsing, library code).
 
 ## The check next to a plain bug hunt
 

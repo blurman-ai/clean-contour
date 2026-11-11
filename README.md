@@ -74,25 +74,25 @@ src/features/order/useSave.ts:21 | C15 | yes, yes, no, no | dirty | the error ha
 
 A card looks at one location, so a cheap model can run it if it passes the exam: at least 90% of dirty fragments found and at most 10% of clean ones flagged.
 
-Measured on DeepSeek flash, 3 answers per fragment, worst answer counts (03.11.2026): 8 of 15 cards passed; over all cards 94% of dirty fragments found and 12% of clean ones flagged. Failures are mostly false flags on near misses: the model ignores a card's "Does not count" exclusion.
-
-| Cards | Who runs them |
-|---|---|
-| C1, C3, C6, C7, C9, C11, C12, C15 | a cheap model is enough |
-| C2, C4, C5, C8, C10, C13, C14 | a strong model or a human |
-
-Measured on Claude Haiku and Claude Sonnet the same way (11.11.2026, 3 answers per fragment, worst answer counts):
+Measured on 11.11.2026, 3 answers per fragment, worst answer counts:
 
 | Card | DeepSeek flash | Haiku | Sonnet |
 |---|---|---|---|
-| C1, C3, C6, C12 | pass | pass | pass |
-| C4, C13, C14 | fail | pass | pass |
+| C2, C3, C5, C6, C9, C11, C12, C13, C16, C17 | pass | pass | pass, except C9 |
+| C10 | pass | pass | pass |
+| C4, C14 | fail | pass | pass |
+| C1 | fail | pass | pass |
 | C8 | fail | fail | pass |
-| C7, C9, C11, C15 | pass | fail | fail |
-| C2, C5, C10 | fail | fail | fail |
-| C16, C17 | not run | pass | pass |
+| C7, C15 | fail | fail | fail |
 
-Haiku passed 9 of 17, Sonnet 10 of 17. Sonnet is not a tier above Haiku: on C1–C15 they failed the same cards except C8. Their failures are of two kinds. On C9 and C11 both flag the same clean fragments (C9-10, C11-11, C11-19) and give a reason that the card's text supports, so those labels need a second look. On C2, C5 and C10 both answer `unclear` or `clean` on dirty fragments because the answer depends on something outside the fragment (the entity's declaration, whether parts are required together), or because C5's question 1 tells them to stop when the phrases differ. No model passes C2, C5 and C10, so they stay with a human until the cards change.
+C2, C5, C10 and C11 were rewritten on 11.11 so that the answer follows from the fragment: C2 judges the branch, not whether the entity also has a stored field; C5 compares outcomes, not phrasing; C10 asks whether the composition is declared, not whether parts "could" be accepted alone; C11 requires a way out for the death of the process too, not only for a refusal and a timeout. C1 passed on DeepSeek on 03.11 and fails on the same fragments now, which is model drift. Sonnet flags test parametrization on C9 that the card excludes.
+
+| Cards | Who runs them |
+|---|---|
+| C2, C3, C5, C6, C9, C11, C12, C13, C16, C17 | a cheap model is enough |
+| C1, C4, C7, C8, C10, C14, C15 | a strong model or a human |
+
+C10 passes the exam but goes to a strong model: on a real backend 2 of 15 places it flagged were dirty. A dirty verdict from a cheap model on real code is a candidate for reading, not a finding: on that product 7 of the 60 places DeepSeek flagged held up when read, on the C# projects below about half.
 
 For another model, run the exam first: [exam/README.md](exam/README.md).
 
@@ -100,7 +100,7 @@ The corpus is mostly Python and TypeScript (C17 also has C# view models and Djan
 
 ## C#
 
-The cards name C# signs for EF Core, Dapper, ASP.NET Core (controllers and minimal APIs), Blazor and MVVM clients (WPF, MAUI, Avalonia). `RULES.md` shows how the instruments look in C#: an assembly per entity with `private set`, an architecture test, `BannedApiAnalyzers` on old names, a field registry over `DbContext.Model`, and an exhaustive `switch` over the refusal code enum with CS8509 as an error. Install is the same; `.Tests` projects, EF migrations and generated `*.g.cs` are excluded from every search.
+The cards name C# signs for EF Core, Dapper, ASP.NET Core (controllers and minimal APIs), Blazor and MVVM clients (WPF, MAUI, Avalonia). `RULES.md` shows how the instruments look in C#: an assembly per entity with `private set`, an architecture test, `BannedApiAnalyzers` on old names, a field registry over `DbContext.Model`, and an exhaustive `switch` over the refusal code enum with CS8509 as an error. Install is the same; `.Tests` projects, EF migrations and generated `*.g.cs` are excluded from every search. `tools/cs_search.py <repo>` prints candidates for every card's C# signs, one line per hit; each hit is then read against the card.
 
 ## License
 
