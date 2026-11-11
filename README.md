@@ -102,6 +102,12 @@ The corpus is mostly Python and TypeScript (C17 also has C# view models and Djan
 
 The cards name C# signs for EF Core, Dapper, ASP.NET Core (controllers and minimal APIs), Blazor and MVVM clients (WPF, MAUI, Avalonia). `RULES.md` shows how the instruments look in C#: an assembly per entity with `private set`, an architecture test, `BannedApiAnalyzers` on old names, a field registry over `DbContext.Model`, and an exhaustive `switch` over the refusal code enum with CS8509 as an error. Install is the same; `.Tests` projects, EF migrations and generated `*.g.cs` are excluded from every search. `tools/cs_search.py <repo>` prints candidates for every card's C# signs, one line per hit; each hit is then read against the card.
 
+## Search
+
+`tools/search.py <repo> [--lang py,ts,kt,go,cs] [--cards C4,C11]` prints candidates for every card, one line per hit, in the same `card<TAB>file:line<TAB>line` format as `tools/cs_search.py`. The language is taken from the file extension; the signs live in `skills/clean-contour-check/signs.json` (card → language → regexes, plus a per-language skip list for tests, migrations, generated and vendored code). `tools/search.py --selftest` checks that every regex compiles, every card C1–C17 is present, each pattern hits its fixture line, and the skip list drops a test file.
+
+A sign the card describes over several lines (C5 name pairs, C10 a `raise` inside a loop over parts, C14 a `GET` handler that writes) is a `{"manual": …}` entry and is not searched. The Python, TypeScript, Kotlin and Go signs are not yet narrowed by reading their hits: on one 260k-line Python backend they gave about 8000 candidates, most of them from C7, C9, C15 and C16.
+
 ## License
 
 Apache 2.0, see [LICENSE](LICENSE).
