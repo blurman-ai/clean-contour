@@ -11,8 +11,8 @@ Measured results on agent-written open-source projects: [FIELD-RESULTS.md](FIELD
 | Path | What it is | Who reads it |
 |---|---|---|
 | `RULES.md` | 17 principles, signs of a dirty contour, how to move an entity into the clean contour | an agent that writes or changes an entity with a lifecycle |
-| `skills/clean-contour-check/SKILL.md` | 15 cards (C1–C15): search pattern, closed questions, verdict rule, exclusions, dirty and clean example | an agent that checks code |
-| `exam/` | runner and corpus of 331 labelled fragments | whoever edits a card or picks a model for checking |
+| `skills/clean-contour-check/SKILL.md` | 17 cards (C1–C17): search pattern, closed questions, verdict rule, exclusions, dirty and clean example | an agent that checks code |
+| `exam/` | runner and corpus of 377 labelled fragments | whoever edits a card or picks a model for checking |
 
 ## Install as a Claude Code plugin
 
