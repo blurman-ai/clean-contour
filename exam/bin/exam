@@ -278,6 +278,13 @@ def parse_verdict(answer: str) -> tuple[str | None, str]:
             v = _norm(parts[3])
             if v:
                 return v, " | ".join(parts[4:]).strip()
+        if len(parts) >= 3 and re.fullmatch(r"C\d+", parts[1]):
+            # answers and verdict merged with commas: `C15 | yes, yes, unclear, dirty, reason`
+            tokens = [t.strip() for t in ",".join(parts[2:]).split(",")]
+            hits = [i for i, t in enumerate(tokens) if _norm(t)]
+            if hits and hits[-1] > 0:
+                i = hits[-1]
+                return _norm(tokens[i]), ", ".join(tokens[i + 1:]).strip()
     text = answer.lower()
     found = {v for v in VERDICTS if re.search(r"(?<![a-z])" + v + r"(?![a-z])", text)}
     if len(found) == 1:
@@ -618,8 +625,11 @@ def selftest() -> int:
                  ("dirty", DIRTY),
                  ("x | C1 | yes | dirty / clean / unclear | format echo", None),
                  ("don't know", None),
-                 ("x | C1 | yes | maybe | no", None)]
-        case("the verdict is read from the fourth field; a format echo and garbage are not a verdict",
+                 ("x | C1 | yes | maybe | no", None),
+                 ("x:1 | C15 | yes, yes, unclear, dirty, the code is lost", DIRTY),
+                 ("x:1 | C15 | yes, no, clean | the reason", CLEAN)]
+        case("the verdict is read from the fourth field, or the last verdict word after the "
+             "answers when the separators are merged; a format echo and garbage are not a verdict",
              all(parse_verdict(a)[0] == w for a, w in table), True)
 
         print("\nThreshold and scoring")
