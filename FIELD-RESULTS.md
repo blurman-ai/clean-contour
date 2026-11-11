@@ -167,7 +167,7 @@ Confirmed by reading the code:
 - nopCommerce: the "Cancel" button is hidden unless payment is pending, but `CanCancelOrder` only refuses an already cancelled order, so the cancel link cancels a paid order.
 - jellyfin: a recording stopped by a server shutdown is saved as `Completed`, the same as one stopped by the user, so a truncated recording is not retried.
 - jellyfin: SQLite retries are decided by `Message.Contains("database is locked")` instead of the error code.
-- bitwarden/server: places where a status is written with a full-entity replace and no check of the old status, and a bulk confirmation that sends mail and writes the audit event before the save. Details go to the maintainers first.
+- bitwarden/server: places where a status is written with a full-entity replace and no check of the old status, and a bulk confirmation that sends mail and writes the audit event before the save. Two of them look security-relevant, so their details are not published here.
 
 Per card, the cheap model was right most often on C4 (writes around the writer) and C6, and almost never on C8 and C17 in these projects.
 
