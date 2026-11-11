@@ -77,6 +77,13 @@ The authors haven't been told about these yet.
 | simplcommerce/SimplCommerce | A Momo payment that arrives after the automatic cancellation marks the order paid | transition with no check | [#1155](https://github.com/simplcommerce/SimplCommerce/pull/1155) |
 | btcpayserver/btcpayserver | A refused invoice status change is shown as done, and a failed save still fires the webhook | unknown is not success | [#7800](https://github.com/btcpayserver/btcpayserver/pull/7800) |
 | Ombi-app/Ombi | The API accepted any issue status, including In Progress when the setting is off; only the UI applied the rule | the server decides what is allowed | [#5492](https://github.com/Ombi-app/Ombi/pull/5492) |
+| HangfireIO/Hangfire | A lock timeout during cleanup was recognised by its English message, so on a non-English SQL Server it counted as a failure | a decision by error text | [#2599](https://github.com/HangfireIO/Hangfire/pull/2599) |
+| Radarr/Radarr | A download whose import threw stayed "Importing" until restart | a wait with no way out | [#12088](https://github.com/Radarr/Radarr/pull/12088) |
+| smartstore/Smartstore | A late PayPal webhook reset a paid or cancelled order to Pending | transition with no check | [#1606](https://github.com/smartstore/Smartstore/pull/1606) |
+| elsa-workflows/elsa-core | An alteration job whose run threw stayed Running, and a plan with failed jobs was stored Completed | a wait with no way out | [#9230](https://github.com/elsa-workflows/elsa-core/pull/9230) |
+| PrefectHQ/prefect | `prefect transfer` silently dropped deployments that depend on an already existing resource | the writer lets a transition pass silently | [#23848](https://github.com/PrefectHQ/prefect/pull/23848) |
+| PrefectHQ/prefect | On SQLite a duplicate schedule slug got a generic 409 because the check matched PostgreSQL's wording | a decision by error text | [#23849](https://github.com/PrefectHQ/prefect/pull/23849) |
+| crewAIInc/crewAI | Any MCP server error, including 401 and 404, was reported to the model as a timeout and retried | the reason for a refusal is lost | [#9368](https://github.com/crewAIInc/crewAI/pull/9368) |
 
 Each fix comes with a test that fails without it. State on 11 November 2026: the mvidarr author applied the patch unchanged with its 12 tests in [#589](https://github.com/prefect421/mvidarr/pull/589), merged into `dev` for v1.1.6, and closed #582 as incorporated; the others are open.
 
@@ -168,6 +175,22 @@ Confirmed by reading the code:
 - jellyfin: a recording stopped by a server shutdown is saved as `Completed`, the same as one stopped by the user, so a truncated recording is not retried.
 - jellyfin: SQLite retries are decided by `Message.Contains("database is locked")` instead of the error code.
 - bitwarden/server: places where a status is written with a full-entity replace and no check of the old status, and a bulk confirmation that sends mail and writes the audit event before the save. Two of them look security-relevant, so their details are not published here.
+
+Nine more projects the same way on the same day, chosen among popular Python and C# projects that take outside pull requests with no CLA registration (DCO sign-off at most):
+
+| Project | Language | Flagged by DeepSeek | Held up when read |
+|---|---|---|---|
+| [Prefect](https://github.com/PrefectHQ/prefect) | Python | 43 | 24, of them 3 with an effect a user would notice |
+| [crewAI](https://github.com/crewAIInc/crewAI) | Python | 12 | 7 |
+| [NetBox](https://github.com/netbox-community/netbox) | Python | 8 | 4 |
+| [Celery](https://github.com/celery/celery) | Python | 3 | 1 |
+| [Radarr](https://github.com/Radarr/Radarr) | C# | 30 | 9 |
+| [duplicati](https://github.com/duplicati/duplicati) | C# | 16 | 6 |
+| [MassTransit](https://github.com/MassTransit/MassTransit) | C# | 9 | 4 |
+| [Smartstore](https://github.com/smartstore/Smartstore) | C# | 27 | 7 places |
+| [elsa-core](https://github.com/elsa-workflows/elsa-core) | C# | 50 | 15 rows, 5 places with an effect |
+
+In Python, C6 (a decision by error text) held up in about 24 of 29 places, mostly with a small effect; C4 hits were mostly in-memory objects and response models. Reports: [python-batch](field/2026-11-11/python-batch.md), [csharp-batch-a](field/2026-11-11/csharp-batch-a.md), [csharp-batch-b](field/2026-11-11/csharp-batch-b.md).
 
 Full reading reports: [nopCommerce](field/2026-11-11/nopCommerce.md), [jellyfin](field/2026-11-11/jellyfin.md). Exam score tables of the same day: [exam/results/2026-11-11](exam/results/2026-11-11/README.md).
 
