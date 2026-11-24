@@ -1,0 +1,803 @@
+# C19 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C19-01
+  card: C19
+  expected: dirty
+  path: app/runs/state.py
+  why: The run lifecycle imports an enum that the stand page declares, so application logic depends on the transport module; the enum value is used in a stored state.
+  source: The run lifecycle imports an enum from the stand page.
+  code: |
+    from __future__ import annotations
+
+    import enum
+    from dataclasses import dataclass, replace
+
+    from app.lifecycle import Actor, Lifecycle, Transition
+    from app.web.stand import SendOutcome
+
+
+    class RunState(enum.Enum):
+        PREPARING = "preparing"
+        GOING = "going"
+        NOT_PREPARED = "not prepared"
+        FINISHED = "finished"
+
+
+    LIFECYCLE = Lifecycle(
+        initial=RunState.PREPARING,
+        final=frozenset({RunState.FINISHED}),
+        transitions=frozenset({
+            Transition(RunState.PREPARING, RunState.GOING, Actor.SYSTEM),
+            Transition(RunState.PREPARING, RunState.NOT_PREPARED, Actor.SYSTEM),
+            Transition(RunState.GOING, RunState.FINISHED, Actor.ENGINEER),
+        }),
+    )
+
+
+    @dataclass(frozen=True)
+    class Run:
+        scenario: str
+        state: RunState
+        why: str = ""
+
+
+    def not_prepared(run: Run, outcome: SendOutcome | None) -> Run:
+        """The letter never left: remember why the run stopped."""
+        LIFECYCLE.check(run.state, RunState.NOT_PREPARED, Actor.SYSTEM, None)
+        reason = outcome.value if outcome is not None else SendOutcome.REFUSED.value
+        return replace(run, state=RunState.NOT_PREPARED, why=reason)
+- id: C19-02
+  card: C19
+  expected: dirty
+  path: app/storage/drafts.py
+  why: The storage module imports FastAPI to raise and return a transport response, so data access depends on the web layer and its error shape.
+  source: Storage raises a web-framework response.
+  code: |
+    from __future__ import annotations
+
+    import sqlite3
+
+    from fastapi import HTTPException
+    from fastapi.responses import JSONResponse
+
+    from app.storage.model import Draft
+
+
+    NOT_FOUND = "draft not found"
+
+
+    class Drafts:
+        def __init__(self, db: sqlite3.Connection) -> None:
+            self.db = db
+
+        def of(self, trip: str) -> list[Draft]:
+            rows = self.db.execute("SELECT kind, state FROM drafts WHERE trip = ?",
+                                   (trip,)).fetchall()
+            return [Draft(trip=trip, kind=kind, state=state) for kind, state in rows]
+
+        def required(self, trip: str) -> list[Draft]:
+            found = self.of(trip)
+            if not found:
+                raise HTTPException(404, NOT_FOUND)
+            return found
+
+        def answer(self, trip: str) -> JSONResponse:
+            return JSONResponse({"drafts": [draft.kind for draft in self.required(trip)]})
+- id: C19-03
+  card: C19
+  expected: dirty
+  path: app/trips/lifecycle.py
+  why: The lifecycle of the trip raises a FastAPI exception class to signal a refusal, so the rule module imports the web framework.
+  source: A rule module raises a web-framework exception.
+  code: |
+    from __future__ import annotations
+
+    import enum
+    from dataclasses import dataclass, replace
+
+    from fastapi import HTTPException
+
+    from app.lifecycle import Actor, Lifecycle, Transition
+
+
+    class TripState(enum.Enum):
+        NEW = "new"
+        BOUND = "bound"
+        SHIPPED = "shipped"
+
+
+    LIFECYCLE = Lifecycle(
+        initial=TripState.NEW,
+        final=frozenset({TripState.SHIPPED}),
+        transitions=frozenset({
+            Transition(TripState.NEW, TripState.BOUND, Actor.SYSTEM),
+            Transition(TripState.BOUND, TripState.SHIPPED, Actor.MANAGER),
+        }),
+    )
+
+
+    @dataclass(frozen=True)
+    class Trip:
+        number: str
+        state: TripState
+
+
+    def bind(trip: Trip, actor: Actor) -> Trip:
+        """Bind the trip to a buyer by the table of transitions."""
+        if not LIFECYCLE.allows(trip.state, TripState.BOUND, actor):
+            raise HTTPException(409, f"trip {trip.number} cannot be bound from {trip.state.value}")
+        return replace(trip, state=TripState.BOUND)
+- id: C19-04
+  card: C19
+  expected: dirty
+  path: app/documents/assemble.py
+  why: The document assembler imports a CLI module to print a warning, so the application depends on the CLI transport for reporting.
+  source: An assembler prints a warning through the CLI.
+  code: |
+    from __future__ import annotations
+
+    from dataclasses import dataclass, field
+
+    from app.cli.output import warn
+    from app.documents.model import Document, Field
+    from app.trips.model import Trip
+
+
+    @dataclass
+    class Draft:
+        kind: str
+        fields: list[Field] = field(default_factory=list)
+
+
+    def empty(field: Field) -> bool:
+        return not str(field.value).strip()
+
+
+    def assemble(trip: Trip, kind: str) -> Draft:
+        """Build the draft of the document from the trip, naming empty fields."""
+        draft = Draft(kind=kind)
+        for name, value in trip.requisites(kind).items():
+            draft.fields.append(Field(name=name, value=value))
+        for field in draft.fields:
+            if empty(field):
+                warn(f"{kind}: {field.name} is empty — the manager fills it in the ERP")
+        return draft
+
+
+    def counted(drafts: list[Draft]) -> dict[str, int]:
+        found: dict[str, int] = {}
+        for draft in drafts:
+            found[draft.kind] = found.get(draft.kind, 0) + 1
+        return found
+- id: C19-05
+  card: C19
+  expected: dirty
+  path: app/binding/resolve.py
+  why: The binding rule loads the command-line module by name at run time to ask for a confirmation, so application logic reaches the CLI transport.
+  source: A rule loads the CLI module by name at run time.
+  code: |
+    from __future__ import annotations
+
+    import importlib
+
+    from app.binding.model import Basis, Binding, Unbound
+    from app.trips.model import Trip
+
+
+    PLACES = {"Springfield": "buyer-a", "Riverton": "buyer-b"}
+
+
+    def by_address(trip: Trip) -> Binding | Unbound:
+        buyer = PLACES.get(trip.unloading_place)
+        if buyer is None:
+            return Unbound(reason="unknown address")
+        return Binding(buyer=buyer, contract=None, basis=Basis.ADDRESS)
+
+
+    def by_address_confirmed(trip: Trip, ask: bool = False) -> Binding | Unbound:
+        """Resolve the buyer by the unloading address; an ambiguous place asks the operator."""
+        found = by_address(trip)
+        if ask and found.buyer in {"buyer-a", "buyer-b"}:
+            module = importlib.import_module("app.cli.confirm")
+            if not module.answer(f"bind {trip.number} to {found.buyer}?"):
+                return Unbound(reason="the operator refused the binding")
+        return found
+
+    def places() -> dict[str, str]:
+        return dict(PLACES)
+
+
+    def known(place: str) -> bool:
+        return place in PLACES
+- id: C19-06
+  card: C19
+  expected: dirty
+  path: app/progress/settle.py
+  why: The progress rule imports a helper of the stand page and calls it to choose the boxes of a run, so application logic depends on the web layer for a decision.
+  source: A rule calls a stand-page helper for a decision.
+  code: |
+    from __future__ import annotations
+
+    from app.documents.model import DocumentKind
+    from app.progress.model import Progress
+    from app.storage.orders import Store
+    from app.web.stand import picked_boxes
+
+
+    STATES = {DocumentKind.PROXY: "ready", DocumentKind.SALE: "ready"}
+
+
+    def remaining(drafts: list) -> set[DocumentKind]:
+        return {kind for kind, state in STATES.items()
+                if not any(draft.kind is kind and draft.state.value == state for draft in drafts)}
+
+
+    def settle(progress: Progress, drafts: list) -> Progress:
+        left = remaining(drafts)
+        if not left:
+            return progress.with_state("ready")
+        return progress.with_state("waiting")
+
+
+    def boxes_of(store: Store, query: str) -> list[str]:
+        """Mailboxes of a run: the ones the page form ticked, checked against the accounts."""
+        known = {user.name: user.mailbox for user in store.users() if user.mailbox}
+        return [known[name] for name in picked_boxes(query) if name in known]
+
+
+    def state_of(progress: Progress) -> str:
+        return progress.state
+- id: C19-07
+  card: C19
+  expected: dirty
+  path: app/trips/model.py
+  why: The domain model imports a DTO declared in the page module, so the entity type depends on the transport layer.
+  source: The entity type imports a DTO from the page module.
+  code: |
+    from __future__ import annotations
+
+    import enum
+    from dataclasses import dataclass
+
+    from app.web.stand import BindingCase
+
+
+    class TripState(enum.Enum):
+        NEW = "new"
+        BOUND = "bound"
+
+
+    @dataclass(frozen=True)
+    class Contract:
+        number: str
+        loading_place: str
+        unloading_place: str
+
+
+    @dataclass(frozen=True)
+    class Trip:
+        contract: Contract
+        state: TripState = TripState.NEW
+        case: BindingCase = BindingCase.UNKNOWN
+
+        @property
+        def number(self) -> str:
+            return self.contract.number
+
+        def with_case(self, case: BindingCase) -> "Trip":
+            return Trip(contract=self.contract, state=self.state, case=case)
+
+
+    def several(contract: Contract) -> Trip:
+        return Trip(contract=contract, case=BindingCase.SEVERAL)
+- id: C19-08
+  card: C19
+  expected: dirty
+  path: app/letters/build.py
+  why: The letter builder imports the page module to reuse a form helper, so document logic depends on the web layer for parsing.
+  source: A builder reuses a page form helper.
+  code: |
+    from __future__ import annotations
+
+    from dataclasses import dataclass
+
+    from app.places import find
+    from app.web.site import form_of
+    from app.trips.model import Trip
+
+
+    @dataclass(frozen=True)
+    class Letter:
+        to: str
+        subject: str
+        text: str
+
+
+    TEMPLATE = {"subject": "Loading {number}", "text": "Loading address: {place}"}
+
+
+    def plant_of(trip: Trip, plants: list[dict]) -> dict:
+        found = find(plants, trip.contract.loading_place)
+        if found is None:
+            raise ValueError(f"unknown loading place {trip.contract.loading_place}")
+        return found
+
+
+    def letter(trip: Trip, plants: list[dict]) -> Letter:
+        """Letter to the plant of the loading address."""
+        plant = plant_of(trip, plants)
+        values = form_of({"number": trip.number, "place": plant["address"]})
+        return Letter(to=plant["mail"], subject=TEMPLATE["subject"].format(**values),
+                      text=TEMPLATE["text"].format(**values))
+- id: C19-09
+  card: C19
+  expected: dirty
+  path: app/accounts/service.py
+  why: A service module reports a refusal through the command-line library instead of returning a code, so the application imports the CLI transport.
+  source: A service reports a refusal through the CLI library.
+  code: |
+    from __future__ import annotations
+
+    import hashlib
+    import hmac
+
+    import click
+
+    from app.accounts.model import Refused, Role, User, UserState
+
+
+    ATTEMPTS = 5
+    WINDOW_MINUTES = 15
+
+
+    def hash_password(password: str, salt: bytes) -> str:
+        return hashlib.scrypt(password.encode(), salt=salt, n=2 ** 14, r=8, p=1).hex()
+
+
+    def verify(user: User, password: str, salt: bytes) -> bool:
+        return hmac.compare_digest(user.password_hash, hash_password(password, salt))
+
+
+    def login(user: User, password: str, salt: bytes, failures: int) -> User:
+        """Let the user in unless the account is disabled or the attempts ran out."""
+        if user.state is not UserState.ACTIVE:
+            raise Refused("the account is disabled")
+        if failures >= ATTEMPTS:
+            raise Refused("too many attempts")
+        if not verify(user, password, salt):
+            click.echo(f"{user.name}: wrong password", err=True)
+            raise Refused("wrong password")
+        return user.with_role(Role.MANAGER)
+- id: C19-10
+  card: C19
+  expected: dirty
+  path: app/orders/flow.py
+  why: The state machine imports the page module's enum as its list of states, so stored states are declared inside the transport layer.
+  source: A state machine imports the page module's enum.
+  code: |
+    from __future__ import annotations
+
+    from dataclasses import replace
+
+    from app.lifecycle import Actor, Lifecycle, Transition
+    from app.web.orders import OrderState
+
+
+    LIFECYCLE = Lifecycle(
+        initial=OrderState.NEW,
+        final=frozenset({OrderState.SHIPPED, OrderState.CANCELLED}),
+        transitions=frozenset({
+            Transition(OrderState.NEW, OrderState.CONFIRMED, Actor.MANAGER),
+            Transition(OrderState.CONFIRMED, OrderState.SHIPPED, Actor.SYSTEM),
+            Transition(OrderState.NEW, OrderState.CANCELLED, Actor.MANAGER),
+            Transition(OrderState.CONFIRMED, OrderState.CANCELLED, Actor.MANAGER),
+        }),
+    )
+
+
+    def cancel(order, actor: Actor):
+        """Cancel the order by the table; a shipped order stays shipped."""
+        LIFECYCLE.check(order.state, OrderState.CANCELLED, actor, None)
+        return replace(order, state=OrderState.CANCELLED)
+
+
+    def shipped_numbers(orders: list) -> list[str]:
+        return [order.number for order in orders if order.state is OrderState.SHIPPED]
+
+    def open_orders(orders: list) -> int:
+        return sum(1 for order in orders if order.state is not OrderState.SHIPPED)
+- id: C19-11
+  card: C19
+  expected: clean
+  path: app/web/trips.py
+  why: The page imports the application modules and only draws what they return; the dependency points from transport to application.
+  source: A page that imports application modules.
+  code: |
+    from __future__ import annotations
+
+    from fastapi import APIRouter, Request
+    from fastapi.responses import HTMLResponse
+
+    from app.progress import settle
+    from app.responsible import change
+    from app.site import render
+    from app.storage.orders import Orders
+
+
+    routes = APIRouter()
+
+
+    @routes.get("/orders", response_class=HTMLResponse)
+    def page(request: Request, store: Orders) -> HTMLResponse:
+        orders = store.in_state("going")
+        progress = settle(orders)
+        return render(request, "orders.html", {"orders": orders, "progress": progress})
+
+
+    @routes.post("/orders/{number}/responsible")
+    def reassign(number: str, request: Request, store: Orders) -> HTMLResponse:
+        found = store.of(number)
+        changed = change(found, request.query_params.get("to", ""))
+        store.save(changed)
+        return page(request, store)
+
+    def numbers(orders) -> list[str]:
+        return [order.number for order in orders]
+- id: C19-12
+  card: C19
+  expected: clean
+  path: app/service.py
+  why: The composition root wires the web pages, the storage and the mail adapter and computes no rule; both directions are allowed here.
+  source: The composition root wires pages and adapters.
+  code: |
+    from __future__ import annotations
+
+    import os
+    from pathlib import Path
+
+    from fastapi import FastAPI
+
+    from app.mail import adapter
+    from app.storage.schema import connect
+    from app.web import stand, trips
+
+
+    def build(store) -> FastAPI:
+        app = FastAPI()
+        app.include_router(trips.section(store).router)
+        app.include_router(stand.section(store).router)
+        return app
+
+
+    def main() -> FastAPI:
+        store = connect(Path(os.environ["STATE"]))
+        access = adapter.access_from_env()
+        app = build(store)
+        if access is not None:
+            app.state.mail = adapter.session(access)
+        return app
+
+    def health() -> dict[str, str]:
+        return {"state": "ok"}
+
+    def describe(app) -> str:
+        return ", ".join(sorted(route.path for route in app.routes))
+- id: C19-13
+  card: C19
+  expected: clean
+  path: app/cli/accounts.py
+  why: The command-line entry point parses arguments and calls application functions; it is the entry point itself, not application logic.
+  source: The command-line entry point calls application functions.
+  code: |
+    from __future__ import annotations
+
+    import os
+    import sys
+    from pathlib import Path
+
+    from app.accounts import Role, User
+    from app.storage.schema import connect
+
+
+    def usage() -> str:
+        return "accounts add <name> <role> | accounts disable <name> | accounts list"
+
+
+    def main(argv: list[str]) -> int:
+        store = connect(Path(os.environ["STATE"]))
+        match argv:
+            case ["add", name, role]:
+                store.save_user(User(name=name, role=Role(role)))
+            case ["disable", name]:
+                store.save_user(store.user(name).disabled())
+            case ["list"]:
+                for user in store.users():
+                    print(user.name, user.role.value)
+            case _:
+                print(usage(), file=sys.stderr)
+                return 2
+        return 0
+
+
+    if __name__ == "__main__":
+        sys.exit(main(sys.argv[1:]))
+- id: C19-14
+  card: C19
+  expected: clean
+  path: app/runs/model.py
+  why: The lifecycle declares its own enum next to the transition table; no transport module is imported.
+  source: The lifecycle declares its own enum.
+  code: |
+    from __future__ import annotations
+
+    import enum
+    from dataclasses import dataclass, replace
+
+    from app.lifecycle import Actor, Lifecycle, Transition
+
+
+    class RunState(enum.Enum):
+        PREPARING = "preparing"
+        GOING = "going"
+        CLEANING = "cleaning"
+        FINISHED = "finished"
+
+
+    class SendOutcome(enum.Enum):
+        SENT = "sent"
+        REFUSED = "refused"
+
+
+    LIFECYCLE = Lifecycle(
+        initial=RunState.PREPARING,
+        final=frozenset({RunState.FINISHED}),
+        transitions=frozenset({
+            Transition(RunState.PREPARING, RunState.GOING, Actor.SYSTEM),
+            Transition(RunState.GOING, RunState.CLEANING, Actor.ENGINEER),
+            Transition(RunState.CLEANING, RunState.FINISHED, Actor.SYSTEM),
+        }),
+    )
+
+
+    @dataclass(frozen=True)
+    class Run:
+        scenario: str
+        state: RunState = RunState.PREPARING
+        why: str = ""
+
+        def failed(self, outcome: SendOutcome) -> "Run":
+            return replace(self, why=outcome.value)
+- id: C19-15
+  card: C19
+  expected: clean
+  path: app/inbox/read.py
+  why: The pass imports the mail adapter; that is an I/O adapter, not a web, UI or CLI transport, so the direction is not this card's subject.
+  source: A pass imports the mail adapter.
+  code: |
+    from __future__ import annotations
+
+    from collections.abc import Mapping
+
+    from app.inbox.model import Report, Target
+    from app.mail import mailbox
+    from app.mail.model import Unavailable
+
+
+    def boxes(store, access: mailbox.Access) -> tuple[dict[str, object], list[str]]:
+        found, without = {}, []
+        for user in store.active_users():
+            account = access.account(user.mailbox) if user.mailbox else None
+            if account is None:
+                without.append(user.name)
+            else:
+                found[user.name] = account
+        return found, without
+
+
+    def read(target: Target, boxes: Mapping[str, object], now) -> Report:
+        """One pass over the mailboxes; a mailbox that is down does not stop the others."""
+        report = Report()
+        for owner, account in boxes.items():
+            try:
+                for letter in mailbox.read(account, "INBOX"):
+                    report.taken += target.take(letter, now)
+            except Unavailable as refused:
+                report.refused[owner] = refused.code
+        return report
+- id: C19-16
+  card: C19
+  expected: clean
+  path: app/web/stand.py
+  why: One router module imports another router's DTO and helper; transport depends on transport, and no application rule is involved.
+  source: A router imports another router's DTO.
+  code: |
+    from __future__ import annotations
+
+    import enum
+
+    from fastapi import APIRouter, Request
+    from fastapi.responses import HTMLResponse
+
+    from app.site import Section, render
+    from app.web.panel import SendOutcome, picked_boxes
+
+
+    class Case(enum.Enum):
+        SEVERAL = "several"
+        ONE = "one"
+        UNKNOWN = "unknown"
+
+
+    routes = APIRouter()
+
+
+    @routes.get("", response_class=HTMLResponse)
+    def page(request: Request, stand) -> HTMLResponse:
+        return render(request, "stand.html", {
+            "letters": stand.letters,
+            "cases": {case: case.value for case in Case},
+            "sent": stand.journal.all(),
+        })
+
+
+    @routes.post("/send/{number}")
+    async def send(request: Request, number: str, stand) -> HTMLResponse:
+        letter = next(each for each in stand.letters if each.number == number)
+        outcome = stand.deliver(letter, await picked_boxes(request, stand.store))
+        return render(request, "stand_sent.html", {
+            "letter": letter, "outcome": outcome, "sent": SendOutcome.SENT.value})
+- id: C19-17
+  card: C19
+  expected: clean
+  path: app/web/trips.py
+  why: The page imports an application type only for annotations, and the direction is transport to application.
+  source: A page imports an application type for annotations.
+  code: |
+    from __future__ import annotations
+
+    from typing import TYPE_CHECKING
+
+    from fastapi import APIRouter, Request
+    from fastapi.responses import HTMLResponse
+
+    from app.site import render
+
+    if TYPE_CHECKING:
+        from app.storage.orders import Order
+
+
+    routes = APIRouter()
+
+
+    def label(order: "Order") -> str:
+        return f"{order.number} — {order.state}"
+
+
+    @routes.get("/orders", response_class=HTMLResponse)
+    def page(request: Request, store) -> HTMLResponse:
+        orders = store.in_state("going")
+        return render(request, "orders.html", {"orders": orders, "labels": [label(o) for o in orders]})
+
+
+    @routes.get("/orders/{number}", response_class=HTMLResponse)
+    def card(request: Request, number: str, store) -> HTMLResponse:
+        order = store.one(number)
+        return render(request, "order.html", {"order": order, "label": label(order)})
+- id: C19-18
+  card: C19
+  expected: clean
+  path: app/web/stand.py
+  why: The handler imports the application module inside the function body; a local import in the transport layer still points from transport to application.
+  source: A handler imports the application inside the function.
+  code: |
+    from __future__ import annotations
+
+    from fastapi import APIRouter, Request
+    from fastapi.responses import HTMLResponse
+
+    from app.site import render
+
+
+    routes = APIRouter()
+
+
+    @routes.get("/stand", response_class=HTMLResponse)
+    def page(request: Request, stand) -> HTMLResponse:
+        from app.backtest import compare
+
+        letter = stand.letters[0]
+        return render(request, "stand.html", {
+            "letter": letter,
+            "checks": compare(letter, stand.drafts(letter.number)),
+        })
+
+
+    @routes.get("/stand/{number}", response_class=HTMLResponse)
+    def letter_page(request: Request, number: str, stand) -> HTMLResponse:
+        from app.backtest import compare
+
+        letter = next(each for each in stand.letters if each.number == number)
+        return render(request, "stand_letter.html", {
+            "letter": letter,
+            "checks": compare(letter, stand.drafts(number)),
+        })
+- id: C19-19
+  card: C19
+  expected: clean
+  path: app/storage/drafts.py
+  why: The storage imports the defaults module that declares the first round constant; that module is application data, not a web page, router or CLI, so the card does not apply.
+  source: Storage imports an application constant module.
+  code: |
+    from __future__ import annotations
+
+    import sqlite3
+
+    from app.defaults import FIRST_ROUND
+    from app.storage.model import Draft, Kind
+
+
+    class Drafts:
+        def __init__(self, db: sqlite3.Connection) -> None:
+            self.db = db
+
+        def of(self, trip: str) -> list[Draft]:
+            rows = self.db.execute(
+                "SELECT kind, state, round FROM drafts WHERE trip = ? ORDER BY kind",
+                (trip,)).fetchall()
+            return [Draft(trip=trip, kind=Kind(kind), state=state, round=number)
+                    for kind, state, number in rows]
+
+        def save(self, draft: Draft) -> None:
+            self.db.execute(
+                "INSERT INTO drafts (trip, kind, state, round) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (trip, kind) DO UPDATE SET state = excluded.state",
+                (draft.trip, draft.kind.value, draft.state, draft.round))
+
+        def round(self) -> int:
+            row = self.db.execute("SELECT number FROM rounds").fetchone()
+            return int(row[0]) if row else FIRST_ROUND
+
+    def numbers(drafts: list[Draft]) -> list[str]:
+        return [draft.trip for draft in drafts]
+- id: C19-20
+  card: C19
+  expected: clean
+  path: app/trips/model.py
+  why: The entity imports the lifecycle helper of the same application layer and declares its own enum; nothing of the transport layer is imported.
+  source: The entity imports the lifecycle helper of its layer.
+  code: |
+    from __future__ import annotations
+
+    import enum
+    from dataclasses import dataclass, replace
+
+    from app.lifecycle import Actor, Lifecycle, Transition
+
+
+    class TripState(enum.Enum):
+        NEW = "new"
+        BOUND = "bound"
+        SHIPPED = "shipped"
+
+
+    LIFECYCLE = Lifecycle(
+        initial=TripState.NEW,
+        final=frozenset({TripState.SHIPPED}),
+        transitions=frozenset({
+            Transition(TripState.NEW, TripState.BOUND, Actor.SYSTEM),
+            Transition(TripState.BOUND, TripState.SHIPPED, Actor.MANAGER),
+        }),
+    )
+
+
+    @dataclass(frozen=True)
+    class Trip:
+        number: str
+        state: TripState = TripState.NEW
+
+        def bind(self, actor: Actor) -> "Trip":
+            LIFECYCLE.check(self.state, TripState.BOUND, actor, None)
+            return replace(self, state=TripState.BOUND)
+
+        def shipped(self, actor: Actor) -> "Trip":
+            LIFECYCLE.check(self.state, TripState.SHIPPED, actor, None)
+            return replace(self, state=TripState.SHIPPED)

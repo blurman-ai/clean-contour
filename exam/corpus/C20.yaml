@@ -1,0 +1,859 @@
+# C20 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C20-01
+  card: C20
+  expected: dirty
+  path: app/print/forms.py
+  why: The title of a printed form is read from the config mapping by two string literals in a helper that only needs the text; nothing in the fragment declares the shape of the config.
+  source: A printed-form title read from config by literals.
+  code: |
+    from __future__ import annotations
+
+    from app import config
+    from app.print.model import Kind
+
+
+    SETTINGS = config.load("connector")
+
+
+    def title(kind: Kind) -> str:
+        """Name of the printed form, as the manager sees it in the mail."""
+        return SETTINGS["documents"][kind.value]["print"]["title"]
+
+
+    def manager(kind: Kind) -> str:
+        return SETTINGS["documents"][kind.value]["print"]["manager"]
+
+
+    def form(kind: Kind) -> str:
+        return SETTINGS["documents"][kind.value]["print"]["form"]
+
+
+    def kinds() -> list[str]:
+        return [kind.value for kind in Kind]
+
+
+    def all_titles() -> dict[str, str]:
+        return {kind.value: title(kind) for kind in Kind}
+
+
+    def described(kind: Kind) -> str:
+        return f"{title(kind)} — print: {manager(kind)}, form: {form(kind)}"
+
+
+    def label(kind: Kind, number: str) -> str:
+        return f"{title(kind)} {number}"
+
+
+    def file_name(kind: Kind, number: str) -> str:
+        return f"{title(kind)} {number}.pdf".replace(" ", "_")
+- id: C20-02
+  card: C20
+  expected: dirty
+  path: app/forwarder/order.py
+  why: The XML of the forwarder order is assembled from the config mapping by string literals all over the body; the config's shape is not declared anywhere in the fragment.
+  source: A forwarder order assembled from config literals.
+  code: |
+    from __future__ import annotations
+
+    import xml.etree.ElementTree as ET
+    from datetime import date, timedelta
+
+    from app import config, places
+
+    SETTINGS = config.load("forwarder_order")
+
+
+    def party(parent: ET.Element, tag: str, entry: dict) -> None:
+        element = ET.SubElement(parent, tag)
+        ET.SubElement(ET.SubElement(element, "IdInfo"), "LegalEntity", entry["org"])
+        address = ET.SubElement(element, "Address")
+        if "AddressLocal" in entry["address"]:
+            ET.SubElement(address, "AddressLocal", entry["address"]["AddressLocal"])
+        else:
+            ET.SubElement(address, "AddressRegistry", entry["address"]["AddressRegistry"])
+
+
+    def build(trip) -> bytes:
+        form = SETTINGS["format"]
+        root = ET.Element("File", ProgVersion=form["program"], FormVersion=form["version"])
+        doc = ET.SubElement(root, "Document", DocCode=form["doc_code"], DocName=form["name"])
+        content = ET.SubElement(doc, "ClientContent", Operation=form["operation"])
+        forwarder = SETTINGS["forwarder"]
+        ET.SubElement(content, "ForwarderContract", forwarder["contract"])
+        rule = forwarder["route"]
+        ET.SubElement(content, "DeliveryDate",
+                      (trip.loading_date + timedelta(days=rule["delivery_days"])).isoformat())
+        party(content, "Client", SETTINGS["client"])
+        ET.SubElement(content, "Vehicle", VehicleKind=SETTINGS["cargo"]["vehicle_kind"])
+        return ET.tostring(root, encoding="utf-8")
+- id: C20-03
+  card: C20
+  expected: dirty
+  path: app/connector/write.py
+  why: The command for another system is built by walking the config mapping with literal keys in every branch; the config schema exists only as keys repeated across functions.
+  source: A command built by walking config keys.
+  code: |
+    from __future__ import annotations
+
+    from app import config
+    from app.documents.model import Kind
+
+    SETTINGS = config.load("connector")
+
+
+    def value(target: dict, text: str) -> dict:
+        if target["type"] == "date":
+            return {"date": text}
+        if target["type"] == "catalog":
+            return {"catalog": target["catalog"], "name": text}
+        return {"string": text}
+
+
+    def write_command(draft) -> dict:
+        """Copy of the sample document with the requisites of the draft."""
+        document = SETTINGS["documents"][draft.kind.value]
+        where = dict(document["sample"])
+        values = dict(document["clear"])
+        for field in draft.fields:
+            if field.name in document["sample_fields"]:
+                where[document["sample_fields"][field.name]] = field.value
+            elif field.name in document["fields"]:
+                target = document["fields"][field.name]
+                values[target["requisite"]] = value(target, field.value)
+            elif field.name not in document["not_written"]:
+                raise ValueError(f"field '{field.name}' is not named in config/connector.json")
+        return {"op": "write", "document": document["document"], "sample": where,
+                "keep": list(document["keep"]), "set": values,
+                "clear_tables": list(document["tables"])}
+
+
+    def print_command(kind: Kind, number: str) -> dict:
+        printing = SETTINGS["documents"][kind.value]["print"]
+        return {"op": "print", "document": SETTINGS["documents"][kind.value]["document"],
+                "manager": printing["manager"], "form": printing["form"], "key": number}
+- id: C20-04
+  card: C20
+  expected: dirty
+  path: app/connector/answers.py
+  why: The answer of another system comes back as a raw dict and its keys choose the refusal text and the branch, with no typed answer in the fragment.
+  source: An ERP answer read as a raw dict.
+  code: |
+    from __future__ import annotations
+
+    from app.connector.model import Code, Task
+
+    TEXTS = {"expired": "expired", "no_reference": "no reference", "erp_error": "ERP error"}
+
+
+    def erp_words(detail: str) -> str:
+        return " ".join(detail.split()[:20])
+
+
+    def failure(task: Task, reply: dict) -> str:
+        """Why the task stopped: the kind of work and the refusal in words."""
+        if task.expired:
+            return f"{task.kind} — {TEXTS['expired']}"
+        code = Code(reply["code"])
+        words = f"{task.kind} — {TEXTS[code.value]}"
+        detail = erp_words(reply.get("detail", "")) if code is Code.ERP_ERROR else ""
+        return f"{words}: {detail}" if detail else words
+
+
+    def refused(reply: dict) -> bool:
+        return reply["posted"] is False or reply["code"] == "erp_error"
+
+
+    def number_of(reply: dict) -> str:
+        return str(reply["number"])
+
+
+    def codes(replies: list[dict]) -> list[str]:
+        return [reply["code"] for reply in replies]
+
+
+    def words(task: Task) -> str:
+        return f"{task.kind} {task.expired}"
+- id: C20-05
+  card: C20
+  expected: dirty
+  path: app/stand/letters.py
+  why: The index of the history is a raw JSON list and every reader takes fields by literal keys; the row shape is declared nowhere in the module.
+  source: A JSON history index read by literal keys.
+  code: |
+    from __future__ import annotations
+
+    import json
+    from pathlib import Path
+
+
+    def rows(folder: Path) -> list[dict]:
+        """Rows of the stand history index, as the builder wrote them."""
+        return json.loads((folder / "index.json").read_text(encoding="utf-8"))
+
+
+    def several(folder: Path) -> list[dict]:
+        return [row for row in rows(folder) if row["binding"] == "several"]
+
+
+    def numbers(folder: Path) -> list[str]:
+        return [row["number"] for row in rows(folder)]
+
+
+    def buyer_of(folder: Path, number: str) -> str | None:
+        for row in rows(folder):
+            if row["number"] == number:
+                return row["buyer"]
+        return None
+
+
+    def mailboxes_of(folder: Path, number: str) -> tuple[str, ...] | None:
+        for row in rows(folder):
+            if row["number"] == number:
+                return tuple(row["mailboxes"]) if "mailboxes" in row else None
+        return None
+
+
+    def plants(folder: Path) -> set[str]:
+        return {row["plant"] for row in rows(folder) if row["plant"]}
+- id: C20-06
+  card: C20
+  expected: dirty
+  path: app/runs/state.py
+  why: A stored JSON blob is parsed in the run module and its keys drive the cleanup plan; the adapter that wrote the blob is the decoder, this module is not.
+  source: A stored JSON blob whose keys drive the plan.
+  code: |
+    from __future__ import annotations
+
+    import json
+
+    from app.runs.model import Run
+
+
+    def plan(run: Run) -> list[dict]:
+        """Cleanup plan of the run, as the adapter stored it."""
+        return list(json.loads(run.plan_text))
+
+
+    def kinds(run: Run) -> list[str]:
+        return [step["kind"] for step in plan(run)]
+
+
+    def command_of(run: Run, kind: str) -> dict | None:
+        for step in plan(run):
+            if step["kind"] == kind:
+                return step["command"]
+        return None
+
+
+    def removals(run: Run) -> int:
+        return sum(1 for step in plan(run) if step["kind"].startswith("delete"))
+
+
+    def tasks_of(run: Run) -> tuple[int, ...]:
+        return tuple(json.loads(run.tasks_text))
+
+
+    def boxes_of(run: Run) -> tuple[str, ...]:
+        return tuple(json.loads(run.boxes_text))
+
+
+    def letters_of(run: Run) -> tuple[str, ...]:
+        return tuple(json.loads(run.later_text))
+
+
+    def why_of(run: Run) -> str:
+        return run.why
+- id: C20-07
+  card: C20
+  expected: dirty
+  path: app/store/login.py
+  why: The login rule reads three values of the site config by string literal and compares them; the config file's shape is not declared in the module.
+  source: Login values read from the site config by literals.
+  code: |
+    from __future__ import annotations
+
+    from datetime import datetime, timedelta
+
+    from app import config
+
+    SETTINGS = config.load("site")
+
+
+    def window(now: datetime) -> datetime:
+        return now - timedelta(minutes=SETTINGS["login_window_minutes"])
+
+
+    def refused(store, name: str, now: datetime) -> bool:
+        return store.login_failures(name, window(now)) >= SETTINGS["login_attempts"]
+
+
+    def session_until(now: datetime) -> datetime:
+        return now + timedelta(days=SETTINGS["session_days"])
+
+
+    def cost() -> tuple[int, int]:
+        scrypt = SETTINGS["scrypt"]
+        return scrypt["n"], scrypt["r"]
+
+
+    def cookie_name() -> str:
+        return SETTINGS["cookie"]["name"]
+
+
+    def cookie_secure() -> bool:
+        return SETTINGS["cookie"]["secure"] is True
+
+
+    def describe() -> str:
+        return (f"attempts={SETTINGS['login_attempts']}, "
+                f"window={SETTINGS['login_window_minutes']} min, "
+                f"session={SETTINGS['session_days']} days")
+- id: C20-08
+  card: C20
+  expected: dirty
+  path: app/web/texts.py
+  why: Page texts come from one config mapping and are chosen by the stored state name — a raw literal lookup in the page helper, with no typed view of the text table.
+  source: Page texts chosen from one config mapping.
+  code: |
+    from __future__ import annotations
+
+    from app import config
+
+    TEXTS = config.load("trips_page")
+
+
+    def source_label(name: str) -> str:
+        return TEXTS["sources"][name]
+
+
+    def lag_text(lag) -> str:
+        texts = TEXTS["erp_lag"]
+        if lag.reason.value == "refused":
+            why = texts["refused"][lag.refusal]
+        else:
+            why = texts["expired"]
+        return f"{texts['line']}: {why}"
+
+
+    def refusal_text(name: str) -> str:
+        return TEXTS["refusals"].get(name, TEXTS["refusals"]["unknown"])
+
+
+    def timezone() -> str:
+        return TEXTS["timezone"]
+
+
+    def title() -> str:
+        return TEXTS["title"]
+
+
+    def empty_list() -> str:
+        return TEXTS["empty"]["orders"]
+- id: C20-09
+  card: C20
+  expected: dirty
+  path: app/mail/kind.py
+  why: The kind of an attachment comes from the config mapping by literal keys and file suffixes, and the body decides the processing from those values.
+  source: Attachment kinds decided from config lists.
+  code: |
+    from __future__ import annotations
+
+    from pathlib import Path
+
+    from app import config
+    from app.mail.model import FileKind
+
+    SETTINGS = config.load("mail")
+
+
+    def by_suffix(name: str) -> FileKind:
+        suffix = Path(name).suffix.lower()
+        if suffix in SETTINGS["pdf"]:
+            return FileKind.PDF
+        if suffix in SETTINGS["text"]:
+            return FileKind.TEXT
+        return FileKind.OTHER
+
+
+    def by_type(declared: str, name: str) -> FileKind:
+        if declared in SETTINGS["kinds"]:
+            return FileKind(SETTINGS["kinds"][declared])
+        return by_suffix(name)
+
+
+    def readable(kind: FileKind) -> bool:
+        return kind.value in SETTINGS["readable"]
+
+
+    def max_size() -> int:
+        return int(SETTINGS["max_bytes"])
+
+
+    def folders() -> list[str]:
+        return list(SETTINGS["folders"])
+
+
+    def drafts_name() -> str:
+        return SETTINGS["drafts"]["folder"]
+- id: C20-10
+  card: C20
+  expected: dirty
+  path: app/drivers/snapshot.py
+  why: Rows of the ERP answer are read by literal column names and go straight into the text of the driver card; no typed row or object is built anywhere in the fragment.
+  source: ERP rows read by literal column names.
+  code: |
+    from __future__ import annotations
+
+    import json
+
+
+    def latest(rows: list[dict], name: str, date_column: str) -> dict | None:
+        found = [row for row in rows if row.get(name)]
+        return max(found, key=lambda row: row[date_column], default=None)
+
+
+    def label_of(reply: dict, full_name: str) -> str:
+        """Driver card text: name, plate and passport, as the ERP answer has them."""
+        rows = json.loads(reply["rows"])
+        passport = latest(rows["passports"], "FullName", "Period")
+        sale = latest(rows["sales"], "Driver", "Date")
+        if passport is None and sale is None:
+            return full_name
+        plate = sale["Plate"] if sale else ""
+        series = f"{passport['Series']} {passport['Number']}" if passport else ""
+        return f"{full_name} | {plate} | {series}".strip(" |")
+
+
+    def has_passport(reply: dict, full_name: str) -> bool:
+        rows = json.loads(reply["rows"])
+        return latest(rows["passports"], "FullName", "Period") is not None
+
+
+    def plate_of(reply: dict, full_name: str) -> str | None:
+        sale = latest(json.loads(reply["rows"])["sales"], "Driver", "Date")
+        return sale["Plate"] if sale else None
+- id: C20-11
+  card: C20
+  expected: clean
+  path: app/settings/site.py
+  why: This is the one decoder of the site config — it reads the raw mapping once and returns a typed settings object, so the literal keys are the schema.
+  source: The single decoder of the site config.
+  code: |
+    from __future__ import annotations
+
+    from dataclasses import dataclass
+    from typing import Mapping
+
+
+    @dataclass(frozen=True)
+    class Cookie:
+        name: str
+        secure: bool
+
+
+    @dataclass(frozen=True)
+    class Scrypt:
+        n: int
+        r: int
+
+
+    @dataclass(frozen=True)
+    class SiteSettings:
+        login_attempts: int
+        login_window_minutes: int
+        session_days: int
+        cookie: Cookie
+        scrypt: Scrypt
+
+
+    def load_site(raw: Mapping) -> SiteSettings:
+        """The single place that knows the keys of config/site.json."""
+        cookie = raw["cookie"]
+        scrypt = raw["scrypt"]
+        return SiteSettings(
+            login_attempts=int(raw["login_attempts"]),
+            login_window_minutes=int(raw["login_window_minutes"]),
+            session_days=int(raw["session_days"]),
+            cookie=Cookie(name=str(cookie["name"]), secure=cookie["secure"] is True),
+            scrypt=Scrypt(n=int(scrypt["n"]), r=int(scrypt["r"])),
+        )
+- id: C20-12
+  card: C20
+  expected: clean
+  path: app/connector/payload.py
+  why: The fragment declares the shape of the dict it builds and sends out; the literals are the keys of the payload being written, not reads of a foreign mapping.
+  source: The outgoing payload whose shape is declared here.
+  code: |
+    from __future__ import annotations
+
+    from dataclasses import dataclass
+
+    from app.connector.model import Kind
+
+
+    @dataclass(frozen=True)
+    class Draft:
+        kind: Kind
+        trip: str
+        fields: Mapping[str, str]
+
+
+    def requisites(fields: dict[str, str], dates: set[str]) -> dict:
+        return {name: ({"date": value} if name in dates else {"string": value})
+                for name, value in fields.items()}
+
+
+    def write_payload(draft: Draft, sample: dict, keep: list[str]) -> dict:
+        """The command sent to the connector: the shape is declared right here."""
+        return {
+            "op": "write",
+            "document": draft.kind.value,
+            "key": f"{draft.trip} {draft.kind.value}",
+            "sample": sample,
+            "keep": keep,
+            "set": requisites(draft.fields, {"issued", "loading_date"}),
+            "clear_tables": ["Goods", "Services"],
+        }
+
+
+    def post_payload(draft: Draft, lines: list[dict]) -> dict:
+        return {"op": "post", "document": draft.kind.value, "key": draft.trip,
+                "lines": {"keep": lines}}
+- id: C20-13
+  card: C20
+  expected: clean
+  path: app/storage/orders.py
+  why: The columns of a database row are read next to the SQL that produced them, inside the storage adapter; there is no foreign mapping.
+  source: Columns read next to the SQL that produced them.
+  code: |
+    from __future__ import annotations
+
+    import sqlite3
+    from dataclasses import dataclass
+    from datetime import datetime
+
+
+    @dataclass(frozen=True)
+    class Order:
+        number: str
+        state: str
+        created_at: datetime
+
+
+    def order_of(row: sqlite3.Row) -> Order:
+        return Order(number=row["number"], state=row["state"],
+                     created_at=datetime.fromisoformat(row["created_at"]))
+
+
+    class Orders:
+        def __init__(self, db: sqlite3.Connection) -> None:
+            self.db = db
+
+        def one(self, number: str) -> Order | None:
+            row = self.db.execute(
+                "SELECT number, state, created_at FROM orders WHERE number = ?",
+                (number,)).fetchone()
+            return order_of(row) if row else None
+
+        def in_state(self, state: str) -> list[Order]:
+            rows = self.db.execute(
+                "SELECT number, state, created_at FROM orders WHERE state = ? ORDER BY number",
+                (state,)).fetchall()
+            return [order_of(row) for row in rows]
+
+        def save(self, order: Order) -> None:
+            self.db.execute(
+                "INSERT INTO orders (number, state, created_at) VALUES (?, ?, ?) "
+                "ON CONFLICT (number) DO UPDATE SET state = excluded.state",
+                (order.number, order.state, order.created_at.isoformat()))
+- id: C20-14
+  card: C20
+  expected: clean
+  path: app/notices/envelope.py
+  why: The mapping is built and read in the same fragment — it is the outgoing message parts of this function, not a config or a payload of another system.
+  source: A mapping built and read in one fragment.
+  code: |
+    from __future__ import annotations
+
+    from dataclasses import dataclass
+    from email.message import EmailMessage
+    from email.utils import format_datetime
+
+
+    @dataclass(frozen=True)
+    class Envelope:
+        sender: str
+        to: str
+        subject: str
+        at: object
+
+
+    def parts(envelope: Envelope) -> dict[str, str]:
+        return {"From": envelope.sender, "To": envelope.to, "Subject": envelope.subject,
+                "Date": format_datetime(envelope.at)}
+
+
+    def build(envelope: Envelope, text: str) -> EmailMessage:
+        message = EmailMessage()
+        written = parts(envelope)
+        for name, value in written.items():
+            message[name] = value
+        message.set_content(text)
+        return message
+
+
+    def renamed(envelope: Envelope, subject: str) -> EmailMessage:
+        written = parts(envelope)
+        written["Subject"] = subject
+        message = EmailMessage()
+        for name, value in written.items():
+            message[name] = value
+        return message
+- id: C20-15
+  card: C20
+  expected: clean
+  path: app/service.py
+  why: The port and the path are single environment values read into typed parameters at the composition root; no mapping shape is involved.
+  source: Single environment values at the composition root.
+  code: |
+    from __future__ import annotations
+
+    import os
+    from pathlib import Path
+
+    from app.mail.adapter import StandMailbox
+
+
+    def port() -> int:
+        return int(os.environ["STAND_SMTP_PORT"])
+
+
+    def host() -> str:
+        return os.environ.get("STAND_SMTP_HOST", "127.0.0.1")
+
+
+    def state() -> Path:
+        return Path(os.environ["STATE"])
+
+
+    def mailbox() -> StandMailbox:
+        return StandMailbox(smtp_host=host(), smtp_port=port(),
+                            api=os.environ["STAND_API"])
+
+
+    def described() -> str:
+        return f"{host()}:{port()}"
+
+
+    def ready() -> bool:
+        return port() > 0 and bool(host())
+
+
+    def fallback() -> StandMailbox:
+        return StandMailbox(smtp_host="127.0.0.1", smtp_port=2525, api="http://127.0.0.1:8080")
+- id: C20-16
+  card: C20
+  expected: clean
+  path: app/settings/connector.py
+  why: The module declares the document settings as a typed structure and reads the config in one constructor; callers get attributes, not literal keys.
+  source: The decoder of the connector config.
+  code: |
+    from __future__ import annotations
+
+    from dataclasses import dataclass
+    from typing import Mapping
+
+
+    @dataclass(frozen=True)
+    class DocumentSettings:
+        document: str
+        keep: tuple[str, ...]
+        tables: tuple[str, ...]
+        title: str
+
+
+    @dataclass(frozen=True)
+    class ConnectorSettings:
+        documents: Mapping[str, DocumentSettings]
+        take_limit: int
+        reply_minutes: int
+
+        def document(self, kind: str) -> DocumentSettings:
+            return self.documents[kind]
+
+
+    def load_connector(raw: Mapping) -> ConnectorSettings:
+        documents = {
+            name: DocumentSettings(document=str(body["document"]),
+                                   keep=tuple(body["keep"]),
+                                   tables=tuple(body["tables"]),
+                                   title=str(body["print"]["title"]))
+            for name, body in raw["documents"].items()
+        }
+        return ConnectorSettings(documents=documents, take_limit=int(raw["take_limit"]),
+                                 reply_minutes=int(raw["reply_minutes"]))
+- id: C20-17
+  card: C20
+  expected: clean
+  path: app/storage/tasks.py
+  why: A stored JSON blob is decoded once into typed objects by the storage adapter; every later read goes through the object, not through the blob.
+  source: A stored blob decoded into typed objects.
+  code: |
+    from __future__ import annotations
+
+    import json
+    import sqlite3
+    from dataclasses import dataclass
+
+
+    @dataclass(frozen=True)
+    class Step:
+        kind: str
+        command: dict
+
+
+    @dataclass(frozen=True)
+    class Task:
+        number: int
+        state: str
+        steps: tuple[Step, ...]
+
+
+    def task_of(row: sqlite3.Row) -> Task:
+        return Task(number=row["id"], state=row["state"],
+                    steps=tuple(Step(kind=step["kind"], command=step["command"])
+                                for step in json.loads(row["command"])))
+
+
+    class Tasks:
+        def __init__(self, db: sqlite3.Connection) -> None:
+            self.db = db
+
+        def one(self, number: int) -> Task | None:
+            row = self.db.execute("SELECT id, state, command FROM tasks WHERE id = ?",
+                                  (number,)).fetchone()
+            return task_of(row) if row else None
+
+        def states(self) -> dict[int, str]:
+            return {row["id"]: row["state"]
+                    for row in self.db.execute("SELECT id, state FROM tasks")}
+- id: C20-18
+  card: C20
+  expected: clean
+  path: app/mail/kinds.py
+  why: The mapping of suffixes is built in this module and read in the same module; it is an internal table, not config or a payload of another system.
+  source: An internal suffix table built in the module.
+  code: |
+    from __future__ import annotations
+
+    import enum
+    from pathlib import Path
+
+
+    class FileKind(enum.Enum):
+        PDF = "pdf"
+        TEXT = "text"
+        OTHER = "other"
+
+
+    SUFFIXES = {".pdf": FileKind.PDF, ".txt": FileKind.TEXT, ".csv": FileKind.TEXT,
+                ".doc": FileKind.OTHER, ".xls": FileKind.OTHER}
+
+
+    def by_name(name: str) -> FileKind:
+        return SUFFIXES.get(Path(name).suffix.lower(), FileKind.OTHER)
+
+
+    def readable(kind: FileKind) -> bool:
+        return kind in (FileKind.PDF, FileKind.TEXT)
+
+
+    def described(kind: FileKind) -> str:
+        return {"pdf": "PDF", "text": "text", "other": "other"}[kind.value]
+
+
+    def suffixes(kind: FileKind) -> list[str]:
+        return [suffix for suffix, found in SUFFIXES.items() if found is kind]
+
+
+    def kinds() -> list[FileKind]:
+        return list(FileKind)
+- id: C20-19
+  card: C20
+  expected: clean
+  path: app/letters/build.py
+  why: Values are taken from typed objects by attribute; the only literal key is used to build the outgoing message body, whose shape this function declares.
+  source: Values taken from typed objects.
+  code: |
+    from __future__ import annotations
+
+    from dataclasses import dataclass
+
+    from app.letters.settings import LetterSettings
+    from app.places import find
+    from app.trips.model import Trip
+
+
+    @dataclass(frozen=True)
+    class Letter:
+        to: str
+        subject: str
+        text: str
+
+
+    def plant_of(trip: Trip, settings: LetterSettings) -> object:
+        found = find(settings.plants, trip.contract.loading_place)
+        if found is None:
+            raise ValueError(f"unknown loading place {trip.contract.loading_place}")
+        return found
+
+
+    def values(trip: Trip, plant) -> dict[str, str]:
+        return {"number": trip.number, "place": plant.address,
+                "driver": trip.contract.driver.full_name}
+
+
+    def letter(trip: Trip, settings: LetterSettings) -> Letter:
+        """Letter to the plant of the loading address."""
+        plant = plant_of(trip, settings)
+        template = settings.templates[plant.letter]
+        filled = values(trip, plant)
+        return Letter(to=plant.mail, subject=template.subject.format(**filled),
+                      text=template.text.format(**filled))
+- id: C20-20
+  card: C20
+  expected: clean
+  path: app/web/forms.py
+  why: The form mapping is built here from the request and read here; it is this function's own outgoing structure, and the request body itself is only parsed.
+  source: A form mapping built and read here.
+  code: |
+    from __future__ import annotations
+
+    from urllib.parse import parse_qs
+
+    from fastapi import Request
+
+
+    def form_of(body: str) -> dict[str, str]:
+        """Form fields as the pages expect them: one value per name."""
+        parsed = parse_qs(body, keep_blank_values=True)
+        return {name: values[0] if values else "" for name, values in parsed.items()}
+
+
+    async def fields(request: Request) -> dict[str, str]:
+        return form_of((await request.body()).decode())
+
+
+    def chosen(fields: dict[str, str], name: str) -> list[str]:
+        return [value for value in fields.get(name, "").split(",") if value]
+
+
+    def number(fields: dict[str, str], name: str, default: int = 0) -> int:
+        try:
+            return int(fields[name])
+        except (KeyError, ValueError):
+            return default
+
+
+    def summary(fields: dict[str, str]) -> str:
+        return ", ".join(f"{name}={value}" for name, value in fields.items())

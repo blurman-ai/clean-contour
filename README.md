@@ -11,8 +11,8 @@ Measured results on agent-written open-source projects: [FIELD-RESULTS.md](FIELD
 | Path | What it is | Who reads it |
 |---|---|---|
 | `RULES.md` | 17 principles, signs of a dirty contour, how to move an entity into the clean contour | an agent that writes or changes an entity with a lifecycle |
-| `skills/clean-contour-check/SKILL.md` | 17 cards (C1–C17): search pattern, closed questions, verdict rule, exclusions, dirty and clean example | an agent that checks code |
-| `exam/` | runner and corpus of 377 labelled fragments | whoever edits a card or picks a model for checking |
+| `skills/clean-contour-check/SKILL.md` | 20 cards (C1–C20): search pattern, closed questions, verdict rule, exclusions, dirty and clean example | an agent that checks code |
+| `exam/` | runner and corpus of 437 labelled fragments | whoever edits a card or picks a model for checking |
 
 ## Install as a Claude Code plugin
 
@@ -87,9 +87,11 @@ Measured on 11.11.2026, 3 answers per fragment, worst answer counts:
 
 C2, C5, C10 and C11 were rewritten on 11.11 so that the answer follows from the fragment: C2 judges the branch, not whether the entity also has a stored field; C5 compares outcomes, not phrasing; C10 asks whether the composition is declared, not whether parts "could" be accepted alone; C11 requires a way out for the death of the process too, not only for a refusal and a timeout. C1 passed on DeepSeek on 03.11 and fails on the same fragments now, which is model drift. Sonnet flags test parametrization on C9 that the card excludes.
 
+C18, C19 and C20 were added on 24.11.2026 and measured the same way (3 answers per fragment, worst counts): each passes the holdout on a weak model (3/3 dirty, 0/3 clean) and on Jev (see `exam/results/2026-11-24/`), so they join the cheap list.
+
 | Cards | Who runs them |
 |---|---|
-| C2, C3, C5, C6, C9, C11, C12, C13, C16, C17 | a cheap model is enough |
+| C2, C3, C5, C6, C9, C11, C12, C13, C16, C17, C18, C19, C20 | a cheap model is enough |
 | C1, C4, C7, C8, C10, C14, C15 | a strong model or a human |
 
 C10 passes the exam but goes to a strong model: on a real backend 2 of 15 places it flagged were dirty. A dirty verdict from a cheap model on real code is a candidate for reading, not a finding: on that product 7 of the 60 places DeepSeek flagged held up when read, on the C# projects below about half.
@@ -104,7 +106,7 @@ The cards name C# signs for EF Core, Dapper, ASP.NET Core (controllers and minim
 
 ## Search
 
-`tools/search.py <repo> [--lang py,ts,kt,go,cs] [--cards C4,C11]` prints candidates for every card, one line per hit, in the same `card<TAB>file:line<TAB>line` format as `tools/cs_search.py`. The language is taken from the file extension; the signs live in `skills/clean-contour-check/signs.json` (card → language → regexes, plus a per-language skip list for tests, migrations, generated and vendored code). `tools/search.py --selftest` checks that every regex compiles, every card C1–C17 is present, each pattern hits its fixture line, and the skip list drops a test file.
+`tools/search.py <repo> [--lang py,ts,kt,go,cs] [--cards C4,C11]` prints candidates for every card, one line per hit, in the same `card<TAB>file:line<TAB>line` format as `tools/cs_search.py`. The language is taken from the file extension; the signs live in `skills/clean-contour-check/signs.json` (card → language → regexes, plus a per-language skip list for tests, migrations, generated and vendored code). `tools/search.py --selftest` checks that every regex compiles, every card C1–C20 is present, each pattern hits its fixture line, and the skip list drops a test file.
 
 A sign the card describes over several lines (C5 name pairs, C10 a `raise` inside a loop over parts, C14 a `GET` handler that writes) is a `{"manual": …}` entry and is not searched. The Python, TypeScript, Kotlin and Go signs are not yet narrowed by reading their hits: on one 260k-line Python backend they gave about 8000 candidates, most of them from C7, C9, C15 and C16.
 
@@ -130,6 +132,29 @@ contract as `bin/exam --model-cmd`. `--strong-cmd` may be omitted: then a cheap
 checked. Use `--all` instead of `--diff` to check every candidate, `--dry-run`
 to print the candidates and the plan without calling a model, and
 `--max-candidates N` (default 300) to refuse a run that is too large.
+
+## A Jev prefilter
+
+`tools/jev_judge.py` is a zero-dependency adapter to the discriminator judge
+Jev (`jev-latest`, TypeSafe AI). It reads the prompt from stdin and prints one
+answer line, so it plugs straight into `--model-cmd` / `--cheap-cmd`:
+
+```bash
+python3 tools/jev_judge.py                    # judge: argmax of dirty/clean/unclear
+python3 tools/jev_judge.py --clean-threshold 0.85   # prefilter: drop confident clean
+```
+
+It calls `https://api.typesafe.ai/v1/systemone` with the `TYPESAFE_API_KEY`
+environment variable, and returns calibrated probabilities
+`p_dirty` / `p_clean` / `p_unclear`. In prefilter mode a fragment with
+`p_clean >= T` is printed as `clean` (dropped) and everything else as `unclear`,
+which `tools/check.py` escalates to the strong model; a missing key, a failed
+request or an unparsable answer is also `unclear`, never a confident `clean`.
+
+Measured on the C1–C17 corpus: Jev passes 12 of 17 cards on the official gate
+and, as a prefilter, drops **63.5%** of clean fragments at **99.5%** recall
+(`p_clean >= 0.85`) or **50.3%** at **100%** recall (`p_clean >= 0.90`) for
+**~$0.09 per 1 000 candidates**. Numbers and thresholds: `exam/results/2026-11-24/`.
 
 ## License
 

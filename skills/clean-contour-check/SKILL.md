@@ -926,3 +926,153 @@ const canCancel = order.status === "submitted";
 ```ts
 {order.allowedActions.includes("cancel") && <Button onClick={cancel}>Cancel</Button>}
 ```
+
+## C18. Direct I/O inside a rule or a request handler
+
+**Search:** `sqlite3`, `smtplib`, `imaplib`, `urllib`, `requests`, `httpx`; driver
+calls `connect(`, `execute(`, `executemany(`, `executescript(`, `urlopen(`,
+`SMTP(`, `sendmail(`, `IMAP4(`; SQL inside strings — `SELECT`, `INSERT INTO`,
+`UPDATE`, `DELETE FROM`, `CREATE TABLE`, `PRAGMA`, `WITH` — including multiline
+strings, aliases and SQL handed to a driver.
+**Kotlin and Go:** `DriverManager.getConnection(`, `connection.prepareStatement(`,
+`jdbcTemplate.query(`, `Transport.send(`, `sql.Open(`, `db.Exec(`, `db.QueryRow(`,
+`http.Post(`, `smtp.SendMail(`.
+
+**Questions:**
+1. Does this function itself call a database, mail or HTTP driver? A call of the
+   project's own adapter method (`store.save(…)`, `mailbox.read(…)`) is "no": the
+   driver is not here.
+2. Does the same function do something that is not transport: choose or return a
+   state or a refusal (instead of raising the driver error), enforce a rule of the
+   domain (a guard in a `WHERE`, a uniqueness rule in a `CREATE INDEX`), compute a
+   value shown to the user, or serve a request (a route handler, a CLI command)?
+   Returning `NOT_PREPARED` on a driver error is choosing a state.
+
+**Dirty if:** 1 = yes and 2 = yes.
+
+**Does not count:** an adapter function whose whole job is the driver (a storage,
+mail or HTTP adapter) and which only maps the driver's error to a code; a
+function that calls an adapter method and then decides — the driver stays behind
+the method; schema creation or connection set-up with no domain rule in it; tests.
+Judge each function on its own: a class being a storage adapter does not excuse a
+method whose `WHERE`, index or error branch carries a rule or a state of the
+entity — that method is dirty.
+
+**Dirty:**
+```python
+def append_message(run_id: int, message: str) -> None:
+    # only a run that is still going may take another letter — the rule is in the WHERE
+    db.execute("UPDATE runs SET later = json_insert(later, '$[#]', ?) "
+               "WHERE id = ? AND state = 'running'", (message, run_id))
+```
+**Clean:**
+```python
+def append_message(runs: Runs, run: Run, message: str) -> Run:
+    if run.state is not RunState.RUNNING:
+        raise Refused.NOT_RUNNING
+    runs.append(run, message)      # the adapter owns the driver
+```
+
+## C19. Logic or data imports the transport layer
+
+**Search:** in a module that is not transport itself — `import` / `from` of a
+web, UI or CLI module: `fastapi`, `starlette`, `flask`, `click`, `argparse`, or
+the project's own page, router and command-line modules (`*_page`, `*_routes`,
+`*_api`, `*_cli`, and web/UI entry modules such as `site` or `stand`), absolute
+and relative, at the top, inside a function, under `TYPE_CHECKING`;
+`importlib.import_module("…")` and `__import__("…")` with a literal name.
+**Kotlin and Go:** `org.springframework.web`, `io.ktor.server`, a
+`*Controller` / `*Handler` package, `net/http` handler types, `cobra.Command` in
+a service package, a DTO from the controller package.
+
+**Questions:**
+1. Does the importing module do the work of the application — a rule, a state, a
+   document, data access — rather than being a composition root or the entry
+   point itself?
+2. Is the imported module the transport layer: a web page, a router, a
+   request/response type, a CLI command — including a DTO or an enum that is
+   declared in a transport module?
+
+**Dirty if:** 1 = yes and 2 = yes.
+
+**Does not count:** transport → application (a page importing the domain); a
+composition root (`service.py`, `main`) that wires transport and application and
+computes nothing; a CLI entry point calling application functions; a mail or
+database adapter — that is C18 and C20, not UI transport; tests.
+
+**Dirty:**
+```python
+# runs.py — the run lifecycle
+from app.web.stand import SendOutcome   # the enum is declared on the stand page
+
+
+def refusal_text(outcome: SendOutcome | None) -> str:
+    return "" if outcome is SendOutcome.SENT else "the stand mailbox is down"
+```
+**Clean:**
+```python
+# runs.py — the run lifecycle
+class SendOutcome(enum.Enum):      # the DTO lives with the logic that uses it
+    SENT = "sent"
+    REFUSED = "refused"
+
+
+def refusal_text(outcome: SendOutcome | None) -> str:
+    return "" if outcome is SendOutcome.SENT else "the stand mailbox is down"
+```
+
+## C20. Raw keys of a config or an external payload
+
+**Search:** string-literal indexing and `.get("…")` — `["…"]`, `['…']`, chains
+`a["b"]["c"]` — on a mapping that came from `config.load(`, `json.load(`,
+`json.loads(`, a request body or form (`request.json()`, `request.form`,
+`parse_qs`), a mail message, a database column that holds JSON, a reply of
+another system.
+**Kotlin and Go:** `JsonObject["…"]`, `map["…"]`, `viper.Get("…")`, a whole
+config section decoded into `map[string]any` and read by keys, `json.Unmarshal`
+into `map[string]interface{}`.
+
+**Questions:**
+1. Did the value come from outside the code — a config file, a network or
+   product payload, a mail, a stored JSON that an earlier version wrote — and is
+   that mapping still a raw dict at this point?
+2. Is the key read by a literal where the mapping is not turned into a typed
+   value: no dataclass, enum or TypedDict is built in the fragment, and the
+   fragment is not the one decoder of that payload?
+
+**Dirty if:** 1 = yes and 2 = yes.
+
+**Does not count:** the single decoder that takes the parsed payload and returns
+typed objects — its key reads are the schema; building an outgoing payload — the
+literal is a key of the dict this fragment writes (a dict literal or an
+assignment target), not a read of a mapping that came from outside: reading the
+config or the payload that feeds the payload is still dirty; a mapping built and
+read in the same fragment; columns of a database row read by the storage adapter
+next to the SQL that produced them; one scalar environment variable read into a
+typed parameter; tests.
+
+**Dirty:**
+```python
+DOCUMENTS = settings["documents"]
+
+
+def title(kind: str) -> str:
+    return DOCUMENTS[kind]["print"]["title"]
+```
+**Clean:**
+```python
+@dataclass(frozen=True)
+class Document:
+    name: str
+    title: str
+
+
+@dataclass(frozen=True)
+class Settings:
+    documents: Mapping[str, Document]
+
+
+def load_settings(raw: dict) -> Settings:      # the one decoder of the config file
+    return Settings(documents={name: Document(name=body["name"], title=body["print"]["title"])
+                               for name, body in raw["documents"].items()})
+```

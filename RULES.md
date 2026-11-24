@@ -138,6 +138,19 @@ convert the entity, not to make a fourth patch.
 
 The minimum without which a contour does not count as clean:
 
+- **an import contract for the allowed direction between layers**, in CI on
+  every PR: transport (web pages, routers, CLI commands, request/response types)
+  may import the application (rules, states, documents); the application may
+  import the data layer (storage, adapters) only through an interface it owns;
+  nothing in the application or the data layer may import transport, and the
+  data layer may not import the application. The contract is checked both
+  directly and transitively, so a chain `logic → helper → page` is red, as is a
+  relative import, an import inside a function, a `TYPE_CHECKING` import and a
+  module loaded by name. Every exception is named by module or by package
+  prefix — never by file path, line or "temporarily" — and each one is removed
+  together with the old path it served. The instrument has a control case: a
+  planted reverse import must make CI red; a contract that stays green with the
+  planted import is not an instrument.
 - **an import contract** for each boundary from principles 5 and 10, in CI on
   every PR; a guard on top of it catches what the import graph does not see:
   a relative import, an import inside a function, loading by name;

@@ -94,3 +94,19 @@ if attempts < 3 { }
 if role == "admin" { }
 // C11
 var t *time.Ticker
+
+// C18
+sql.Open("sqlite3", path)
+db.Exec("...")
+db.QueryRow("...")
+http.Post(url, "application/json", body)
+smtp.SendMail(addr, nil, from, []string{to}, msg)
+
+// C19
+var cmd cobra.Command
+import "net/http"
+
+// C20
+var cfg = viper.Get("key")
+var m map[string]any
+json.Unmarshal(data, &m)

@@ -1,0 +1,789 @@
+# C18 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C18-01
+  card: C18
+  expected: dirty
+  path: app/notices/dispatch.py
+  why: The function opens an SMTP session, sends the message and in the same function moves the entity to a final state; the transport error never reaches the caller.
+  source: SMTP delivery fused with a state write.
+  code: |
+    from __future__ import annotations
+
+    import smtplib
+
+    from app.notices.model import Notice, NoticeState
+
+
+    ACCOUNT = "robot@example.invalid"
+
+
+    def header_of(notice: Notice) -> dict[str, str]:
+        return {"From": ACCOUNT, "To": notice.address, "Subject": notice.subject}
+
+
+    def send_notice(notice: Notice, raw: bytes, host: str, port: int) -> Notice:
+        """Deliver one notice to its address and remember how it ended."""
+        with smtplib.SMTP(host, port, timeout=15) as smtp:
+            smtp.sendmail(ACCOUNT, [notice.address], raw)
+        notice.state = NoticeState.SENT
+        return notice
+
+
+    def send_all(notices: list[Notice], raw_of, host: str, port: int) -> list[Notice]:
+        sent = []
+        for notice in notices:
+            try:
+                sent.append(send_notice(notice, raw_of(notice), host, port))
+            except OSError:
+                notice.state = NoticeState.FAILED
+                sent.append(notice)
+        return sent
+- id: C18-02
+  card: C18
+  expected: dirty
+  path: app/runs/storage.py
+  why: The function runs an UPDATE whose WHERE clause enforces a lifecycle rule (a run takes a letter only while it is going) and the function is also the place that decides whether the letter is accepted.
+  source: A run repository that gates a letter on the run's state.
+  code: |
+    from __future__ import annotations
+
+    import json
+    import sqlite3
+    import threading
+
+
+    class Letters:
+        """Letters of a run, in the same file as the run repository."""
+
+        def __init__(self, db: sqlite3.Connection, lock: threading.Lock) -> None:
+            self.db, self.lock = db, lock
+
+        def add(self, run_id: int, letter: str) -> bool:
+            """Attach a letter to the run unless the run has already stopped."""
+            with self.lock:
+                cursor = self.db.execute(
+                    "UPDATE runs SET letters = json_insert(letters, '$[#]', ?) "
+                    "WHERE id = ? AND state = 'going'",
+                    (letter, run_id))
+            return cursor.rowcount == 1
+
+        def of(self, run_id: int) -> list[str]:
+            with self.lock:
+                row = self.db.execute("SELECT letters FROM runs WHERE id = ?",
+                                      (run_id,)).fetchone()
+            return list(json.loads(row[0])) if row else []
+
+        def empty(self, run_id: int) -> bool:
+            """Whether the run has no letter yet."""
+            return not self.of(run_id)
+
+        def count(self, run_id: int) -> int:
+            return len(self.of(run_id))
+- id: C18-03
+  card: C18
+  expected: dirty
+  path: app/runs/repository.py
+  why: Schema creation carries a domain rule (a partial unique index — only one open run per scenario), and the same function decides what to do when the rule fires by writing a state.
+  source: Schema creation with a partial unique index.
+  code: |
+    from __future__ import annotations
+
+    import sqlite3
+    import threading
+
+    from app.runs.model import Run, RunState
+
+
+    ONE_OPEN = ("CREATE UNIQUE INDEX IF NOT EXISTS one_open ON runs (scenario) "
+                "WHERE state <> 'finished'")
+    REFUSED = "another run of this scenario is still open"
+
+
+    class Runs:
+        def __init__(self, db: sqlite3.Connection) -> None:
+            self.db = db
+            self.lock = threading.Lock()
+            self.db.execute(
+                "CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY, scenario TEXT NOT NULL, "
+                "state TEXT NOT NULL, started_at TEXT NOT NULL)")
+            self.db.execute(ONE_OPEN)
+
+        def start(self, run: Run) -> Run:
+            with self.lock:
+                try:
+                    cursor = self.db.execute(
+                        "INSERT INTO runs (scenario, state, started_at) VALUES (?, ?, ?)",
+                        (run.scenario, RunState.PREPARING.value, run.started_at.isoformat()))
+                except sqlite3.IntegrityError:
+                    return Run(run.scenario, RunState.NOT_PREPARED, run.started_at, REFUSED)
+            return Run(run.scenario, RunState.PREPARING, run.started_at, "")
+- id: C18-04
+  card: C18
+  expected: dirty
+  path: app/inventory/balance.py
+  why: One function selects rows and turns the presence of a row into a stored verdict of the entity, so the decision and the SQL live together.
+  source: A SELECT whose presence settles an item's state.
+  code: |
+    from __future__ import annotations
+
+    import sqlite3
+
+    from app.inventory.model import Item, ItemState
+
+
+    def settle(item: Item, db: sqlite3.Connection) -> Item:
+        """Mark the item as reserved when the reservation row is already there."""
+        row = db.execute("SELECT reserved_at FROM reservations WHERE item = ?",
+                         (item.id,)).fetchone()
+        if row is None:
+            item.state = ItemState.FREE
+        else:
+            item.state = ItemState.RESERVED
+            item.reserved_at = row[0]
+        return item
+
+
+    def rows_of(db: sqlite3.Connection, state: ItemState) -> list[tuple]:
+        return list(db.execute("SELECT id, reserved_at FROM reservations WHERE state = ?",
+                               (state.value,)))
+
+    def free(items: list[Item]) -> list[Item]:
+        """Items nobody holds."""
+        return [item for item in items if item.state is ItemState.FREE]
+
+
+    def reserved(items: list[Item]) -> int:
+        return sum(1 for item in items if item.state is ItemState.RESERVED)
+- id: C18-05
+  card: C18
+  expected: dirty
+  path: app/catalog/refresh.py
+  why: The function opens an HTTP connection, decodes the price list and in the same body decides which prices are accepted and which state the catalog gets.
+  source: An HTTP price-list refresh that also decides acceptance.
+  code: |
+    from __future__ import annotations
+
+    import json
+    import urllib.request
+
+    from app.catalog.model import Price, PriceList
+
+
+    TIMEOUT = 20
+
+
+    def accepted(prices: list[Price], minimum: int) -> list[Price]:
+        return [price for price in prices if price.amount >= minimum]
+
+
+    def prices_of(payload: dict) -> list[Price]:
+        return [Price(name=row["name"], amount=row["amount"]) for row in payload["prices"]]
+
+
+    def refresh(url: str, current: PriceList, minimum: int) -> PriceList:
+        """Take the supplier price list and keep the prices we accept."""
+        request = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as answer:
+            payload = json.loads(answer.read().decode())
+        kept = accepted(prices_of(payload), minimum)
+        if not kept:
+            current.state = "refused"
+            return current
+        current.state = "ready"
+        return PriceList(prices=kept, state=current.state)
+
+
+    def describe(price_list: PriceList) -> str:
+        return f"{len(price_list.prices)} prices, state {price_list.state}"
+- id: C18-06
+  card: C18
+  expected: dirty
+  path: app/orders/status.py
+  why: A route handler issues an UPDATE of the order state itself; the request is served and the state is written in one function.
+  source: A route handler that cancels an order by UPDATE.
+  code: |
+    from __future__ import annotations
+
+    import sqlite3
+
+    from fastapi import APIRouter, Request
+    from fastapi.responses import RedirectResponse
+
+    from app.orders.model import OrderState
+
+
+    routes = APIRouter()
+
+
+    @routes.get("/orders")
+    def list_orders(request: Request, db: sqlite3.Connection):
+        rows = db.execute("SELECT number, state FROM orders ORDER BY number").fetchall()
+        return {"orders": [{"number": number, "state": state} for number, state in rows]}
+
+
+    @routes.post("/orders/{number}/cancel")
+    def cancel(number: str, db: sqlite3.Connection) -> RedirectResponse:
+        db.execute("UPDATE orders SET state = ? WHERE number = ? AND state <> ?",
+                   (OrderState.CANCELLED.value, number, OrderState.SHIPPED.value))
+        return RedirectResponse("/orders", status_code=303)
+
+    ACTIVE = ("new", "confirmed")
+
+
+    def active(number: str, state: str) -> bool:
+        return state in ACTIVE and bool(number)
+- id: C18-07
+  card: C18
+  expected: dirty
+  path: app/mail/scan.py
+  why: The function fetches messages over IMAP and in the same function decides which of them are invoices by their subject, so transport and the domain decision share one body.
+  source: An IMAP scan that picks invoices by subject.
+  code: |
+    from __future__ import annotations
+
+    import imaplib
+
+    from app.mail.model import Message, Kind
+
+
+    def open_box(host: str, user: str, password: str) -> imaplib.IMAP4:
+        connection = imaplib.IMAP4_SSL(host)
+        connection.login(user, password)
+        return connection
+
+
+    def scan(host: str, user: str, password: str, folder: str) -> list[Message]:
+        """Read new messages and keep the invoices."""
+        connection = open_box(host, user, password)
+        try:
+            connection.select(folder)
+            _, found = connection.search(None, "UNSEEN")
+            messages = []
+            for uid in found[0].split():
+                _, data = connection.fetch(uid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT)])")
+                subject = data[0][1].decode(errors="replace").strip()
+                kind = Kind.INVOICE if "invoice" in subject.lower() else Kind.LETTER
+                if kind is Kind.INVOICE:
+                    messages.append(Message(uid=uid.decode(), subject=subject, kind=kind))
+            return messages
+        finally:
+            connection.logout()
+
+    def subject_of(data: list) -> str:
+        return data[0][1].decode(errors="replace").strip()
+- id: C18-08
+  card: C18
+  expected: dirty
+  path: app/warehouse/document.py
+  why: The function inserts a document row and computes its number from a config table inside the same function, so the business numbering rule sits in the SQL-writing body.
+  source: A document insert that computes its own number.
+  code: |
+    from __future__ import annotations
+
+    import sqlite3
+
+    from app.warehouse.model import Document, Kind
+
+
+    def plain(text: str) -> str:
+        return " ".join(text.split())
+
+
+    def next_number(db: sqlite3.Connection, kind: Kind, prefix: str) -> str:
+        row = db.execute("SELECT MAX(number) AS last FROM documents WHERE kind = ?",
+                         (kind.value,)).fetchone()
+        last = int((row["last"] or "0").rsplit("-", 1)[-1])
+        return f"{prefix}-{last + 1:05d}"
+
+
+    def store(document: Document, db: sqlite3.Connection, prefixes: dict[str, str]) -> Document:
+        """Write the document under the next free number of its kind."""
+        prefix = prefixes[document.kind.value]
+        number = next_number(db, document.kind, prefix)
+        document = document.with_number(number)
+        db.execute("INSERT INTO documents (number, kind, body, created_at) VALUES (?, ?, ?, ?)",
+                   (number, document.kind.value, plain(document.body), document.created_at))
+        return document
+
+    def kind_of(row: sqlite3.Row) -> Kind:
+        return Kind(row[1])
+
+
+    def prefix_for(kind: Kind, prefixes: dict[str, str]) -> str:
+        return prefixes[kind.value]
+- id: C18-09
+  card: C18
+  expected: dirty
+  path: app/shipments/assign.py
+  why: One function checks for an active assignment with SQL and then inserts a new one, so the one-active rule is enforced by the I/O body instead of the state writer.
+  source: An assignment guarded by an active-courier check.
+  code: |
+    from __future__ import annotations
+
+    import sqlite3
+
+    from app.shipments.model import Assignment, Refused
+
+
+    def current(db: sqlite3.Connection, order: str) -> str | None:
+        row = db.execute("SELECT courier FROM assignments WHERE order = ? AND active = 1",
+                         (order,)).fetchone()
+        return row[0] if row else None
+
+
+    def assign(order: str, courier: str, db: sqlite3.Connection) -> Assignment:
+        """Give the order to the courier unless somebody already holds it."""
+        held = current(db, order)
+        if held is not None:
+            raise Refused(f"the order is already held by {held}")
+        db.execute("INSERT INTO assignments (order, courier, active) VALUES (?, ?, 1)",
+                   (order, courier))
+        return Assignment(order=order, courier=courier, active=True)
+
+    def free_order(db: sqlite3.Connection, order: str) -> bool:
+        return current(db, order) is None
+
+
+    def release(order: str, db: sqlite3.Connection) -> None:
+        db.execute("UPDATE assignments SET active = 0 WHERE \"order\" = ?", (order,))
+
+
+    def of_courier(courier: str, db: sqlite3.Connection) -> list[str]:
+        rows = db.execute("SELECT \"order\" FROM assignments WHERE courier = ? AND active = 1",
+                          (courier,))
+        return [row[0] for row in rows]
+- id: C18-10
+  card: C18
+  expected: dirty
+  path: app/reports/export.py
+  why: The loop writes every part with its own INSERT and sets the whole report to failed on the first part that fails, so the database calls and the all-or-nothing rule share one function.
+  source: A report writer that fails the whole on one part.
+  code: |
+    from __future__ import annotations
+
+    import sqlite3
+
+    from app.reports.model import Part, Report, ReportState
+
+
+    def save_part(db: sqlite3.Connection, report: Report, part: Part) -> None:
+        db.execute("INSERT INTO report_parts (report, name, body) VALUES (?, ?, ?)",
+                   (report.id, part.name, part.body))
+
+
+    def build(report: Report, parts: list[Part], db: sqlite3.Connection) -> Report:
+        """Write the report from its parts; one bad part fails the whole report."""
+        for part in parts:
+            try:
+                save_part(db, report, part)
+            except sqlite3.OperationalError:
+                report.state = ReportState.FAILED
+                db.execute("DELETE FROM report_parts WHERE report = ?", (report.id,))
+                return report
+        report.state = ReportState.READY
+        return report
+
+    def parts_of(db: sqlite3.Connection, report: Report) -> list[tuple]:
+        return list(db.execute("SELECT name, body FROM report_parts WHERE report = ?",
+                               (report.id,)))
+
+
+    def ready(report: Report) -> bool:
+        return report.state is ReportState.READY
+- id: C18-11
+  card: C18
+  expected: clean
+  path: app/mail/imap.py
+  why: The module is the mail adapter — every driver call is the whole job of its function and the only decision is mapping a driver error to a code.
+  source: The mail adapter; every driver call is the whole job.
+  code: |
+    from __future__ import annotations
+
+    import imaplib
+    from collections.abc import Iterator
+    from contextlib import contextmanager
+
+
+    class Unavailable(Exception):
+        """The mailbox did not answer."""
+
+        code = "unavailable"
+
+
+    @contextmanager
+    def session(host: str, user: str, password: str) -> Iterator[imaplib.IMAP4]:
+        try:
+            connection = imaplib.IMAP4_SSL(host)
+            connection.login(user, password)
+        except (OSError, imaplib.IMAP4.error) as error:
+            raise Unavailable(str(error)) from error
+        try:
+            yield connection
+        finally:
+            try:
+                connection.logout()
+            except (OSError, imaplib.IMAP4.error):
+                pass
+
+
+    def uids(connection: imaplib.IMAP4, folder: str, criteria: str) -> list[bytes]:
+        connection.select(folder)
+        _, found = connection.search(None, criteria)
+        return found[0].split() if found and found[0] else []
+- id: C18-12
+  card: C18
+  expected: clean
+  path: app/runs/finish.py
+  why: The rule function decides through the state writer and calls adapter methods; the driver stay behind save() and forget(), so the I/O is not in this body.
+  source: A state rule that calls adapter methods.
+  code: |
+    from __future__ import annotations
+
+    from app.runs.model import Actor, Refused, Run, RunState, write_state
+    from app.runs.repository import Runs
+    from app.runs.scenario import Scenario
+
+
+    FINISHABLE = frozenset({RunState.GOING, RunState.NOT_STARTED})
+
+
+    def writing(store, scenario: Scenario) -> bool:
+        return any(task.kind in store.writes and task.state == "taken"
+                   for number in scenario.numbers for task in store.tasks_of(number))
+
+
+    def finish(store, runs: Runs, scenario: Scenario, now) -> Refused | None:
+        """Stop the run: forget its scenario data on the stand and hand the cleanup on."""
+        run = runs.open(scenario.slug)
+        if run is None or run.state not in FINISHABLE:
+            return None
+        if run.state is RunState.GOING:
+            if writing(store, scenario):
+                return Refused.WRITING
+            for number in scenario.numbers:
+                store.forget_trip(number)
+        run = write_state(run, RunState.CLEANING, Actor.ENGINEER)
+        runs.save(run)
+        return None
+
+    def open_run(runs: Runs, scenario: Scenario):
+        return runs.open(scenario.slug)
+- id: C18-13
+  card: C18
+  expected: clean
+  path: app/storage/schema.py
+  why: The function only opens the connection and creates the tables; there is no domain rule and nothing else in the body, so this is adapter set-up.
+  source: Connection and schema setup with no rule.
+  code: |
+    from __future__ import annotations
+
+    import sqlite3
+    from pathlib import Path
+
+
+    SCHEMA = """
+    CREATE TABLE IF NOT EXISTS orders (
+        id INTEGER PRIMARY KEY,
+        number TEXT NOT NULL,
+        state TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS order_lines (
+        id INTEGER PRIMARY KEY,
+        order_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        quantity TEXT NOT NULL
+    );
+    """
+
+
+    def connect(path: Path) -> sqlite3.Connection:
+        db = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+        db.row_factory = sqlite3.Row
+        db.executescript(SCHEMA)
+        return db
+
+
+    def close(db: sqlite3.Connection) -> None:
+        db.execute("PRAGMA optimize")
+        db.close()
+- id: C18-14
+  card: C18
+  expected: clean
+  path: app/notices/envelope.py
+  why: The fragment names an SMTP policy of the email library to keep long header lines; no socket is opened and no rule is decided.
+  source: An SMTP policy for long header lines.
+  code: |
+    from __future__ import annotations
+
+    from dataclasses import dataclass
+    from email import policy
+    from email.message import EmailMessage
+    from email.utils import format_datetime
+
+
+    WHOLE_LINES = policy.SMTP.clone(max_line_length=None)
+
+
+    @dataclass(frozen=True)
+    class Envelope:
+        sender: str
+        to: str
+        subject: str
+        at: object
+
+
+    def build(envelope: Envelope, text: str) -> EmailMessage:
+        message = EmailMessage(policy=WHOLE_LINES)
+        message["From"] = envelope.sender
+        message["To"] = envelope.to
+        message["Subject"] = envelope.subject
+        message["Date"] = format_datetime(envelope.at)
+        message.set_content(text)
+        return message
+
+    def subject(envelope: Envelope, number: str) -> str:
+        return f"{envelope.subject} {number}"
+
+
+    def recipient(envelope: Envelope) -> str:
+        return envelope.to
+- id: C18-15
+  card: C18
+  expected: clean
+  path: app/warehouse/query.py
+  why: The function builds a SELECT string and returns it; nothing is executed, so there is no driver call in the fragment.
+  source: A query string built but not executed.
+  code: |
+    from __future__ import annotations
+
+    from datetime import date
+    from decimal import Decimal
+
+
+    COLUMNS = ("number", "buyer", "amount", "shipped")
+
+
+    def numbers(marks: set[str]) -> str:
+        return ", ".join(f"'{mark}'" for mark in sorted(marks))
+
+
+    def balances(buyer: str, since: date, marks: set[str]) -> str:
+        """Text of the balance query; the caller hands it to the driver."""
+        return ("SELECT number, buyer, amount, shipped FROM invoices "
+                f"WHERE buyer = '{buyer}' AND day >= '{since.isoformat()}' "
+                f"AND state IN ({numbers(marks)}) ORDER BY number")
+
+
+    def leftover(amount: Decimal, shipped: Decimal) -> Decimal:
+        return amount - shipped
+
+    def columns() -> list[str]:
+        return list(COLUMNS)
+
+
+    def described(buyer: str, since: date) -> str:
+        return f"{buyer} since {since.isoformat()}"
+
+
+    def only_positive(amounts: list[Decimal]) -> list[Decimal]:
+        return [amount for amount in amounts if amount > 0]
+- id: C18-16
+  card: C18
+  expected: clean
+  path: app/site/forms.py
+  why: Reading the request body is the transport job of this parser; the function only turns form fields into plain values and decides nothing about the domain.
+  source: A request-body parser that decides nothing.
+  code: |
+    from __future__ import annotations
+
+    from urllib.parse import parse_qs
+
+    from fastapi import Request
+
+
+    async def fields(request: Request) -> dict[str, list[str]]:
+        raw = (await request.body()).decode()
+        return parse_qs(raw, keep_blank_values=True)
+
+
+    async def picked(request: Request, name: str) -> list[str]:
+        return (await fields(request)).get(name, [])
+
+
+    async def one(request: Request, name: str, default: str = "") -> str:
+        found = await picked(request, name)
+        return found[0] if found else default
+
+    def flags(fields: dict[str, list[str]], name: str) -> bool:
+        return fields.get(name, [""])[0] in {"1", "on", "true"}
+
+
+    def number(fields: dict[str, list[str]], name: str, default: int = 0) -> int:
+        try:
+            return int(fields[name][0])
+        except (KeyError, ValueError, IndexError):
+            return default
+
+
+    def summary(fields: dict[str, list[str]]) -> str:
+        return ", ".join(sorted(fields))
+- id: C18-17
+  card: C18
+  expected: clean
+  path: app/mail/settings.py
+  why: The function checks the shape of mail settings (host, port, tls) and raises on a bad value; it opens no connection and decides nothing about messages.
+  source: Mail access settings read into typed fields.
+  code: |
+    from __future__ import annotations
+
+    import os
+    from dataclasses import dataclass
+
+
+    @dataclass(frozen=True)
+    class Access:
+        host: str
+        port: int
+        tls: bool
+
+
+    def configured(settings: dict) -> bool:
+        return bool(settings.get("host")) and int(settings.get("port", 0)) > 0
+
+
+    def access(settings: dict) -> Access:
+        """Mail access of the contour: the environment wins over the config file."""
+        host = os.environ.get("MAIL_HOST", settings["host"])
+        port = int(os.environ.get("MAIL_PORT", settings["port"]))
+        tls = os.environ.get("MAIL_TLS", str(settings["tls"])).lower() == "true"
+        if not host or port <= 0:
+            raise ValueError("mail access is not configured")
+        return Access(host=host, port=port, tls=tls)
+
+    def tls_of(access: Access) -> str:
+        return "tls" if access.tls else "plain"
+
+
+    def address(access: Access) -> str:
+        return f"{access.host}:{access.port}"
+- id: C18-18
+  card: C18
+  expected: clean
+  path: app/storage/errors.py
+  why: The function catches a driver error and re-raises it as the adapter's code; it performs no I/O of its own and makes no domain decision.
+  source: A driver error re-raised as an adapter code.
+  code: |
+    from __future__ import annotations
+
+    import sqlite3
+    from collections.abc import Callable
+    from contextlib import contextmanager
+
+
+    class StorageDown(Exception):
+        """The storage did not answer; the pass stops and retries later."""
+
+        code = "storage_down"
+
+
+    @contextmanager
+    def translated():
+        try:
+            yield
+        except sqlite3.Error as error:
+            raise StorageDown(str(error)) from error
+
+
+    def run(write: Callable[[], None]) -> None:
+        with translated():
+            write()
+
+
+    def known(db: sqlite3.Connection, key: str) -> bool:
+        row = db.execute("SELECT 1 FROM seen WHERE key = ?", (key,)).fetchone()
+        return row is not None
+
+    def missing(error: StorageDown) -> str:
+        return error.code
+- id: C18-19
+  card: C18
+  expected: clean
+  path: app/storage/orders.py
+  why: A repository method — it executes one SELECT and decodes rows into typed objects; the driver call is the whole job and no rule is decided on the way.
+  source: A repository that decodes rows into objects.
+  code: |
+    from __future__ import annotations
+
+    import sqlite3
+    from dataclasses import dataclass
+    from datetime import datetime
+
+
+    @dataclass(frozen=True)
+    class Order:
+        number: str
+        state: str
+        created_at: datetime
+
+
+    def order_of(row: sqlite3.Row) -> Order:
+        return Order(number=row["number"], state=row["state"],
+                     created_at=datetime.fromisoformat(row["created_at"]))
+
+
+    class Orders:
+        def __init__(self, db: sqlite3.Connection) -> None:
+            self.db = db
+
+        def all(self) -> list[Order]:
+            rows = self.db.execute(
+                "SELECT number, state, created_at FROM orders ORDER BY number").fetchall()
+            return [order_of(row) for row in rows]
+
+        def one(self, number: str) -> Order | None:
+            row = self.db.execute(
+                "SELECT number, state, created_at FROM orders WHERE number = ?",
+                (number,)).fetchone()
+            return order_of(row) if row else None
+
+    def numbers(orders: list[Order]) -> list[str]:
+        return [order.number for order in orders]
+- id: C18-20
+  card: C18
+  expected: clean
+  path: app/service.py
+  why: The composition root builds the storage and hands it to the wiring; the only driver use is the constructor, and the function computes no rule.
+  source: The composition root that wires the storage.
+  code: |
+    from __future__ import annotations
+
+    import os
+    from pathlib import Path
+
+    from fastapi import FastAPI
+
+    from app.inbox import Inbox, Target
+    from app.mail import mailbox_adapter
+    from app.site import pages
+    from app.storage.schema import connect
+
+
+    STORE = connect(Path(os.environ["STATE"]))
+    MAIL = mailbox_adapter.access_from_env()
+    TARGET = Inbox.Target(STORE, os.environ["INSTALLATION"]) if MAIL else None
+
+
+    def build() -> FastAPI:
+        app = FastAPI()
+        app.include_router(pages.section(STORE).router)
+        return app
+
+
+    def start_mail() -> None:
+        if TARGET is None or MAIL is None:
+            return
+        TARGET.inbox = Inbox(STORE, MAIL)
+
+
+    def health() -> dict[str, str]:
+        return {"state": "ok" if STORE else "down"}

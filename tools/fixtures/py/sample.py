@@ -152,3 +152,38 @@ if role === "admin": pass
 # C9
 TERMINAL = set("done failed".split())
 ORDER = tuple("new done".split())
+
+# C18
+import sqlite3
+import smtplib
+import imaplib
+import urllib.request
+import requests
+import httpx
+
+def direct_io(db, host, port, to, raw):
+    db.execute("UPDATE runs SET later = later WHERE id = ?")
+    db.executemany("INSERT INTO runs VALUES (?)", [])
+    db.executescript("CREATE TABLE runs (id INTEGER PRIMARY KEY)")
+    smtp = smtplib.SMTP(host, port)
+    smtp.sendmail("robot@example.invalid", [to], raw)
+    urllib.request.urlopen("http://example.invalid")
+    imaplib.IMAP4_SSL(host)
+
+# C19
+from fastapi import APIRouter
+import click
+import importlib
+importlib.import_module("app.cli.confirm")
+__import__("app.cli.confirm")
+from typing import TYPE_CHECKING
+from app.web.stand import SendOutcome
+
+# C20
+SETTINGS = config.load("site")
+data = json.load(open("x.json"))
+data = json.loads(raw)
+request.json()
+parse_qs(body)
+SETTINGS["documents"]
+SETTINGS.get("documents")
