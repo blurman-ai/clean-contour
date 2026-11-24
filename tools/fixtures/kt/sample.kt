@@ -108,3 +108,19 @@ val showRetry = status == "failed"
 val disabled = status == "submitted"
 if (attempts < 3) pass
 if (role == "admin") pass
+
+// C18
+DriverManager.getConnection(url)
+connection.prepareStatement(sql)
+jdbcTemplate.query(sql)
+Transport.send(message)
+smtp.SendMail(message)
+
+// C19
+import org.springframework.web.bind.annotation.GetMapping
+import io.ktor.server.application.*
+class OrderController
+class OrderHandler
+
+// C20
+val key = JsonObject["key"]

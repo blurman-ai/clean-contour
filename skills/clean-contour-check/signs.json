@@ -623,6 +623,77 @@
         "@if\\s*\\([^)]*(Status|State)\\s*[!=]=",
         "(IsVisible|IsEnabled|disabled)\\s*=\\s*\"?@?\\(?[^;\"]*Status\\s*[!=]="
       ]
+    },
+    "C18": {
+      "py": [
+        "\\bsqlite3\\b",
+        "\\bsmtplib\\b",
+        "\\bimaplib\\b",
+        "\\burllib\\b",
+        "\\brequests\\b",
+        "\\bhttpx\\b",
+        "\\.execute\\(",
+        "\\.executemany\\(",
+        "\\.executescript\\(",
+        "\\bsendmail\\(",
+        "\\burlopen\\(",
+        "\\bSMTP\\(",
+        "\\bIMAP4",
+        "\"(?:SELECT|INSERT INTO|UPDATE|DELETE FROM|CREATE TABLE)\\b"
+      ],
+      "kt": [
+        "DriverManager\\.getConnection\\(",
+        "prepareStatement\\(",
+        "jdbcTemplate\\.query\\(",
+        "Transport\\.send\\(",
+        "smtp\\.SendMail\\("
+      ],
+      "go": [
+        "sql\\.Open\\(",
+        "db\\.Exec\\(",
+        "db\\.QueryRow\\(",
+        "http\\.Post\\(",
+        "smtp\\.SendMail\\("
+      ]
+    },
+    "C19": {
+      "py": [
+        "^from\\s+(fastapi|starlette|flask)\\b",
+        "^import\\s+(fastapi|starlette|flask|click|argparse)\\b",
+        "importlib\\.import_module\\(",
+        "__import__\\(",
+        "TYPE_CHECKING",
+        "from\\s+app\\.(web|site|cli)\\."
+      ],
+      "kt": [
+        "org\\.springframework\\.web",
+        "io\\.ktor\\.server",
+        "\\w*Controller",
+        "\\w*Handler"
+      ],
+      "go": [
+        "cobra\\.Command",
+        "net/http"
+      ]
+    },
+    "C20": {
+      "py": [
+        "config\\.load\\(",
+        "json\\.load\\(",
+        "json\\.loads\\(",
+        "request\\.json\\(\\)",
+        "parse_qs",
+        "\\[\"[a-z_]+\"\\]",
+        "\\.get\\(\""
+      ],
+      "kt": [
+        "JsonObject\\[\""
+      ],
+      "go": [
+        "viper\\.Get\\(\"",
+        "json\\.Unmarshal",
+        "map\\[string\\]"
+      ]
     }
   }
 }
