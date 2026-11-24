@@ -626,19 +626,13 @@
     },
     "C18": {
       "py": [
-        "\\bsqlite3\\b",
-        "\\bsmtplib\\b",
-        "\\bimaplib\\b",
-        "\\burllib\\b",
-        "\\brequests\\b",
-        "\\bhttpx\\b",
-        "\\.execute\\(",
-        "\\.executemany\\(",
-        "\\.executescript\\(",
-        "\\bsendmail\\(",
-        "\\burlopen\\(",
-        "\\bSMTP\\(",
+        "sqlite3\\.connect\\(",
+        "\\.(?:execute|executemany|executescript)\\(",
+        "\\bSMTP(?:_SSL)?\\(",
+        "\\.sendmail\\(",
         "\\bIMAP4",
+        "\\burlopen\\(",
+        "\\b(?:requests|httpx)\\.(?:get|post|put|patch|delete|request)\\(",
         "\"(?:SELECT|INSERT INTO|UPDATE|DELETE FROM|CREATE TABLE)\\b"
       ],
       "ts": [
@@ -669,15 +663,14 @@
     },
     "C19": {
       "py": [
-        "^from\\s+(fastapi|starlette|flask)\\b",
-        "^import\\s+(fastapi|starlette|flask|click|argparse)\\b",
+        "^from\\s+(?:fastapi|starlette|flask)\\b",
+        "^import\\s+(?:fastapi|starlette|flask|click|argparse)\\b",
         "importlib\\.import_module\\(",
         "__import__\\(",
-        "if\\s+TYPE_CHECKING:",
         "from\\s+[\\w.]*(?:web|site|cli|routes|pages|api)\\b"
       ],
       "ts": [
-        "from\\s+[\"'](?:express|fastify|next/|react|@nestjs/common)",
+        "from\\s+[\"'](?:express|fastify|@nestjs/common)",
         "from\\s+[\"'][^\"']*(?:/pages/|/routes/|/controllers/|/cli/)"
       ],
       "kt": [
@@ -703,8 +696,8 @@
         "json\\.loads\\(",
         "request\\.json\\(\\)",
         "parse_qs",
-        "\\[\"[a-z_]+\"\\]",
-        "\\.get\\(\""
+        "(?i)\\b(?:settings|config|cfg|payload|body|raw)\\[\"[a-zA-Z0-9_-]+\"\\]",
+        "(?i)\\b(?:settings|config|cfg|payload|body|raw)\\.get\\(\""
       ],
       "ts": [
         "JSON\\.parse\\(",

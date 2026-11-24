@@ -162,12 +162,14 @@ import requests
 import httpx
 
 def direct_io(db, host, port, to, raw):
+    conn = sqlite3.connect(":memory:")
     db.execute("UPDATE runs SET later = later WHERE id = ?")
     db.executemany("INSERT INTO runs VALUES (?)", [])
     db.executescript("CREATE TABLE runs (id INTEGER PRIMARY KEY)")
     smtp = smtplib.SMTP(host, port)
     smtp.sendmail("robot@example.invalid", [to], raw)
     urllib.request.urlopen("http://example.invalid")
+    requests.post("http://example.invalid")
     imaplib.IMAP4_SSL(host)
 
 # C19
