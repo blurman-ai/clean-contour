@@ -77,3 +77,19 @@ var vis = IsVisible = order.Status == "submitted";
 if (shipment.Order.Status == OrderStatus.Paid) { }
 <div *ngIf="order.status == 1"></div>
 <button [disabled]="order.status"></button>
+
+// C18
+var cmd = new SqlCommand("SELECT 1", conn);
+var client = new HttpClient();
+var smtp = new SmtpClient();
+db.Database.ExecuteSqlRaw("UPDATE orders SET status = 'done'");
+
+// C19
+using Microsoft.AspNetCore.Mvc;
+IActionResult Handle(HttpContext ctx) => null;
+
+// C20
+var doc = JsonDocument.Parse(raw);
+var node = JsonNode.Parse(raw);
+var v = IConfiguration["Key"];
+var name = doc.RootElement.GetProperty("name");

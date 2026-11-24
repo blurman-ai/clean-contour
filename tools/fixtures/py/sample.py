@@ -177,7 +177,8 @@ import importlib
 importlib.import_module("app.cli.confirm")
 __import__("app.cli.confirm")
 from typing import TYPE_CHECKING
-from app.web.stand import SendOutcome
+if TYPE_CHECKING:
+    from app.web.stand import SendOutcome
 
 # C20
 SETTINGS = config.load("site")

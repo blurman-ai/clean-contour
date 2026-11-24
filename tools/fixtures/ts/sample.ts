@@ -123,3 +123,18 @@ const disabled = order.status === "submitted";
 if (Date.now() < deadline) pass;
 if (attempts < 3) pass;
 if (role === "admin") pass;
+
+// C18
+fetch("/api/orders");
+axios.post("/api/orders", body);
+db.query("SELECT id FROM orders WHERE status = 'open'");
+nodemailer.createTransport(opts);
+
+// C19
+import { Request } from "express";
+import { OrderDto } from "../controllers/order";
+
+// C20
+const raw = JSON.parse(text);
+const title = req.body["title"];
+const host = config["host"];

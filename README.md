@@ -142,14 +142,20 @@ answer line, so it plugs straight into `--model-cmd` / `--cheap-cmd`:
 ```bash
 python3 tools/jev_judge.py                    # judge: argmax of dirty/clean/unclear
 python3 tools/jev_judge.py --clean-threshold 0.85   # prefilter: drop confident clean
+
+# Prefilter every card (including strong ones) before escalating to a strong model:
+python3 tools/check.py --repo /path/to/repo --diff HEAD~1..HEAD --prefilter \
+  --cheap-cmd "python3 tools/jev_judge.py --clean-threshold 0.85" \
+  --strong-cmd "claude -p --model sonnet --tools '' --no-session-persistence --system-prompt '$SYS'"
 ```
 
 It calls `https://api.typesafe.ai/v1/systemone` with the `TYPESAFE_API_KEY`
 environment variable, and returns calibrated probabilities
 `p_dirty` / `p_clean` / `p_unclear`. In prefilter mode a fragment with
 `p_clean >= T` is printed as `clean` (dropped) and everything else as `unclear`,
-which `tools/check.py` escalates to the strong model; a missing key, a failed
-request or an unparsable answer is also `unclear`, never a confident `clean`.
+which `tools/check.py` escalates to the strong model (pass `--prefilter` to
+`tools/check.py` so strong cards go through the prefilter too); a missing key,
+a failed request or an unparsable answer is also `unclear`, never a confident `clean`.
 
 Measured on the C1–C17 corpus: Jev passes 12 of 17 cards on the official gate
 and, as a prefilter, drops **63.5%** of clean fragments at **99.5%** recall

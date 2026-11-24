@@ -127,7 +127,7 @@ def format_line(prompt: str, verdict: str, probs: dict[str, float],
                   f"jev prefilter escalate p_clean={clean:.2f} < {threshold}")
     else:
         reason = f"jev p_clean={clean:.2f} p_dirty={dirty:.2f} p_unclear={unclear:.2f}"
-    return f"{file_of(prompt)}:1 | {card_of(prompt)} | yes, yes | {verdict} | {reason}"
+    return f"{file_of(prompt)}:1 | {card_of(prompt)} | - | {verdict} | {reason}"
 
 
 def run(prompt: str, threshold: float | None, timeout: float) -> tuple[str, int]:
@@ -217,11 +217,17 @@ def selftest() -> int:
 
     prompt = "# Card\n\n## C18. Direct I/O inside a rule\n\n# Fragment (file app/notices/dispatch.py)\n\ncode"
     real = urllib.request.urlopen
+    prev_key = os.environ.get(KEY_ENV)
+    os.environ[KEY_ENV] = "test-key"
     urllib.request.urlopen = fake_urlopen
     try:
         line, code = run(prompt, None, timeout=30)
     finally:
         urllib.request.urlopen = real
+        if prev_key is None:
+            os.environ.pop(KEY_ENV, None)
+        else:
+            os.environ[KEY_ENV] = prev_key
     case("the request goes to the systemone endpoint", captured.get("url") == URL)
     case("the bearer key is sent", captured["headers"].get("Authorization") == "Bearer test-key")
     body = captured.get("body", {})
@@ -244,7 +250,6 @@ def selftest() -> int:
 
 def main(argv: list[str]) -> int:
     if "--selftest" in argv:
-        os.environ.setdefault(KEY_ENV, "test-key")
         return selftest()
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)

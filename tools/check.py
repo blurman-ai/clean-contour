@@ -157,10 +157,12 @@ def filter_by_diff(candidates: list[Candidate], changed: dict[str, set[int]]) ->
 # --------------------------------------------------------------------------
 
 def run_models(candidates: list[Candidate], skill, routing: dict, cheap_cmd: str,
-               strong_cmd: str | None, jobs: int, timeout: int, retries: int) -> dict[int, dict]:
+               strong_cmd: str | None, jobs: int, timeout: int, retries: int,
+               prefilter: bool = False) -> dict[int, dict]:
     """Run the cheap model on cheap-card candidates and the strong model on
-    strong-card candidates plus cheap `dirty`/`unclear`. Returns a map from
-    candidate index to a result dict with `cheap` and `strong` sub-results."""
+    strong-card candidates plus cheap `dirty`/`unclear`. With `prefilter=True`,
+    the cheap command runs on every candidate first (including strong cards)
+    and anything not marked `clean` escalates to the strong model."""
     exam = _exam
     results: dict[int, dict] = {}
 
@@ -170,8 +172,12 @@ def run_models(candidates: list[Candidate], skill, routing: dict, cheap_cmd: str
         v, reason = exam.parse_verdict(r["raw"]) if not r["error"] else (None, "")
         return dict(r, verdict=v, reason=reason)
 
-    cheap_idx = [i for i, c in enumerate(candidates) if card_route(routing, c.card) == "cheap"]
-    strong_idx = [i for i, c in enumerate(candidates) if card_route(routing, c.card) == "strong"]
+    if prefilter:
+        cheap_idx = list(range(len(candidates)))
+        strong_idx: list[int] = []
+    else:
+        cheap_idx = [i for i, c in enumerate(candidates) if card_route(routing, c.card) == "cheap"]
+        strong_idx = [i for i, c in enumerate(candidates) if card_route(routing, c.card) == "strong"]
 
     def one_cheap(i):
         return i, ask(cheap_cmd, candidates[i])
@@ -179,18 +185,23 @@ def run_models(candidates: list[Candidate], skill, routing: dict, cheap_cmd: str
     def one_strong(i):
         return i, ask(strong_cmd, candidates[i])
 
-    # Phase 1: cheap cards -> cheap model; strong cards -> strong model (or skip).
+    # Phase 1: cheap cards (or all cards in prefilter mode) -> cheap model;
+    # strong cards -> strong model (when not prefiltering).
     with cf.ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
         for i, r in ex.map(one_cheap, cheap_idx):
             results.setdefault(i, {})["cheap"] = r
-        if strong_cmd:
+        if strong_cmd and strong_idx:
             for i, r in ex.map(one_strong, strong_idx):
                 results.setdefault(i, {})["strong"] = r
 
-    # Phase 2: cheap dirty/unclear -> strong model.
+    # Phase 2: cheap dirty/unclear (and any non-clean in prefilter mode) -> strong model.
     if strong_cmd:
-        escalate = [i for i in cheap_idx
-                    if results[i]["cheap"].get("verdict") in ("dirty", "unclear")]
+        if prefilter:
+            escalate = [i for i in cheap_idx
+                        if results[i]["cheap"].get("verdict") != "clean"]
+        else:
+            escalate = [i for i in cheap_idx
+                        if results[i]["cheap"].get("verdict") in ("dirty", "unclear")]
         with cf.ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
             for i, r in ex.map(one_strong, escalate):
                 results.setdefault(i, {})["strong"] = r
@@ -223,7 +234,7 @@ def render(candidates: list[Candidate], results: dict[int, dict], routing: dict,
         r = results.get(i, {})
         # The final verdict is the strong model's when it was asked.
         final = r.get("strong") or r.get("cheap")
-        if route == "strong" and not strong_cmd:
+        if route == "strong" and not strong_cmd and not (final and final.get("verdict") == "clean"):
             out.append(f"{c.path} | {c.card} |  | not checked | strong card, no --strong-cmd")
             continue
         if final is None:
@@ -364,6 +375,29 @@ def selftest() -> int:
         case("over --max-candidates exits 2 without calling the model",
              p.returncode == 2 and not marker.exists())
 
+        # --prefilter runs --cheap-cmd on strong cards too: clean drops, unclear escalates.
+        (repo / "strong.py").write_text("order.status = 'paid'\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "strong"], check=True)
+        marker.unlink(missing_ok=True)
+        p = subprocess.run([sys.executable, str(Path(__file__).resolve()),
+                            "--repo", str(repo), "--diff", "HEAD~1..HEAD",
+                            "--prefilter",
+                            "--cheap-cmd", f"{me} --fake clean",
+                            "--strong-cmd", strong],
+                           capture_output=True, text=True, check=False)
+        case("--prefilter: strong card dropped as clean does not call strong",
+             p.returncode == 0 and not marker.exists())
+        marker.unlink(missing_ok=True)
+        p = subprocess.run([sys.executable, str(Path(__file__).resolve()),
+                            "--repo", str(repo), "--diff", "HEAD~1..HEAD",
+                            "--prefilter",
+                            "--cheap-cmd", f"{me} --fake unclear",
+                            "--strong-cmd", strong],
+                           capture_output=True, text=True, check=False)
+        case("--prefilter: strong card marked unclear escalates to strong",
+             p.returncode == 0 and marker.exists())
+
         # An unknown card in routing is an error.
         bad_routing = {"cheap": ["C2"], "strong": ["C1"], "measured": "x"}
         try:
@@ -390,6 +424,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--all", action="store_true", help="every candidate")
     ap.add_argument("--cheap-cmd", help="shell command for the cheap model")
     ap.add_argument("--strong-cmd", help="shell command for the strong model")
+    ap.add_argument("--prefilter", action="store_true",
+                    help="run --cheap-cmd over strong cards too; drop clean, escalate the rest")
     ap.add_argument("--dry-run", action="store_true", help="print candidates and the plan, no model calls")
     ap.add_argument("--max-candidates", type=int, default=DEFAULT_MAX)
     ap.add_argument("--jobs", type=int, default=4)
@@ -446,9 +482,14 @@ def main(argv: list[str]) -> int:
             for code in sorted(per, key=lambda x: int(x[1:])):
                 route = card_route(routing, code)
                 print(f"  {code} ({route}): {per[code]}")
-            print(f"\nPlan: {len(candidates)} candidates; "
-                  f"cheap model on cheap cards, strong model on strong cards"
-                  f"{' and cheap dirty/unclear' if a.strong_cmd else ''}.")
+            if a.prefilter:
+                print(f"\nPlan: {len(candidates)} candidates; "
+                      f"prefilter all cards with cheap model"
+                      f"{', escalate non-clean to strong model' if a.strong_cmd else ''}.")
+            else:
+                print(f"\nPlan: {len(candidates)} candidates; "
+                      f"cheap model on cheap cards, strong model on strong cards"
+                      f"{' and cheap dirty/unclear' if a.strong_cmd else ''}.")
             for c in candidates:
                 print(f"  {c.path} | {c.card}")
             return 0
@@ -459,7 +500,7 @@ def main(argv: list[str]) -> int:
         skill = _exam.parse_skill(
             (ROOT / "skills" / "clean-contour-check" / "SKILL.md").read_text(encoding="utf-8"))
         results = run_models(candidates, skill, routing, a.cheap_cmd, a.strong_cmd,
-                             a.jobs, a.timeout, a.retries)
+                             a.jobs, a.timeout, a.retries, prefilter=a.prefilter)
         print(render(candidates, results, routing, a.strong_cmd))
         return 0
     except CheckError as e:

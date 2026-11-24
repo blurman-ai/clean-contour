@@ -641,12 +641,17 @@
         "\\bIMAP4",
         "\"(?:SELECT|INSERT INTO|UPDATE|DELETE FROM|CREATE TABLE)\\b"
       ],
+      "ts": [
+        "\\bfetch\\(",
+        "axios\\.(get|post|put|delete)\\(",
+        "\\.query\\(\\s*[\"'`](?:SELECT|INSERT INTO|UPDATE|DELETE FROM)\\b",
+        "createTransport\\("
+      ],
       "kt": [
         "DriverManager\\.getConnection\\(",
         "prepareStatement\\(",
         "jdbcTemplate\\.query\\(",
-        "Transport\\.send\\(",
-        "smtp\\.SendMail\\("
+        "Transport\\.send\\("
       ],
       "go": [
         "sql\\.Open\\(",
@@ -654,6 +659,12 @@
         "db\\.QueryRow\\(",
         "http\\.Post\\(",
         "smtp\\.SendMail\\("
+      ],
+      "cs": [
+        "\\bnew\\s+SqlCommand\\(",
+        "\\bnew\\s+HttpClient\\(",
+        "\\bnew\\s+SmtpClient\\(",
+        "ExecuteSqlRaw\\("
       ]
     },
     "C19": {
@@ -662,8 +673,12 @@
         "^import\\s+(fastapi|starlette|flask|click|argparse)\\b",
         "importlib\\.import_module\\(",
         "__import__\\(",
-        "TYPE_CHECKING",
-        "from\\s+app\\.(web|site|cli)\\."
+        "if\\s+TYPE_CHECKING:",
+        "from\\s+[\\w.]*(?:web|site|cli|routes|pages|api)\\b"
+      ],
+      "ts": [
+        "from\\s+[\"'](?:express|fastify|next/|react|@nestjs/common)",
+        "from\\s+[\"'][^\"']*(?:/pages/|/routes/|/controllers/|/cli/)"
       ],
       "kt": [
         "org\\.springframework\\.web",
@@ -674,6 +689,11 @@
       "go": [
         "cobra\\.Command",
         "net/http"
+      ],
+      "cs": [
+        "using\\s+Microsoft\\.AspNetCore\\.",
+        "\\bIActionResult\\b",
+        "\\bHttpContext\\b"
       ]
     },
     "C20": {
@@ -686,6 +706,11 @@
         "\\[\"[a-z_]+\"\\]",
         "\\.get\\(\""
       ],
+      "ts": [
+        "JSON\\.parse\\(",
+        "req\\.body\\[\"",
+        "config\\[\""
+      ],
       "kt": [
         "JsonObject\\[\""
       ],
@@ -693,6 +718,12 @@
         "viper\\.Get\\(\"",
         "json\\.Unmarshal",
         "map\\[string\\]"
+      ],
+      "cs": [
+        "JsonDocument\\.Parse\\(",
+        "JsonNode\\.Parse\\(",
+        "IConfiguration\\[",
+        "GetProperty\\(\""
       ]
     }
   }

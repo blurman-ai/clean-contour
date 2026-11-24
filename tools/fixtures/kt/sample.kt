@@ -114,7 +114,6 @@ DriverManager.getConnection(url)
 connection.prepareStatement(sql)
 jdbcTemplate.query(sql)
 Transport.send(message)
-smtp.SendMail(message)
 
 // C19
 import org.springframework.web.bind.annotation.GetMapping
