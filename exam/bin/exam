@@ -59,6 +59,16 @@ class ExamError(Exception):
     """Input error: cards, corpus, call. The measurement is void."""
 
 
+def print_case_result(ok: bool, text: str) -> None:
+    """Print a selftest result without depending on a UTF-8 locale."""
+    line = f"  {'✓' if ok else '✗'} {text}"
+    try:
+        print(line)
+    except UnicodeEncodeError:
+        encoding = sys.stdout.encoding or "utf-8"
+        print(line.encode(encoding, errors="backslashreplace").decode(encoding))
+
+
 # --------------------------------------------------------------------------
 # Cards
 # --------------------------------------------------------------------------
@@ -391,7 +401,8 @@ def call_model(cmd: str, prompt: str, timeout: int, retries: int) -> dict:
             last = f"exit {p.returncode}: {(p.stderr or p.stdout).strip()[:200] or 'empty answer'}"
         except subprocess.TimeoutExpired:
             last = f"timeout {timeout} s"
-        time.sleep(min(2 * attempt, 5))
+        if attempt < retries:
+            time.sleep(min(2 * attempt, 5))
     return dict(raw="", error=last, seconds=0.0)
 
 
@@ -523,14 +534,14 @@ def selftest() -> int:
         nonlocal n
         n += 1
         if good and sabotaged_still_ok:
-            print(f"  ✓ {name}")
+            print_case_result(True, name)
         else:
             why = []
             if not good:
                 why.append("the tool did not refuse/pass as it must")
             if not sabotaged_still_ok:
                 why.append("the case stays green with the condition broken")
-            print(f"  ✗ {name}: {'; '.join(why)}")
+            print_case_result(False, f"{name}: {'; '.join(why)}")
             fails.append(name)
 
     skill_path = find_skill(None)
@@ -818,9 +829,13 @@ def main(argv: list[str]) -> int:
     if unparsed:
         print(f"\nUnparsed answers: {unparsed} (a miss on dirty, `unclear` on clean).")
     if a.out:
-        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
-        Path(a.out).write_text(json.dumps(build_report(a, skill, items, res, per, pol),
-                                          ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        try:
+            Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+            Path(a.out).write_text(json.dumps(build_report(a, skill, items, res, per, pol),
+                                              ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        except OSError as e:
+            print(f"exam: {e}", file=sys.stderr)
+            return 2
         print(f"Report: {a.out}")
     if errors:
         print(f"\nModel call errors: {errors}. The measurement is void.", file=sys.stderr)
