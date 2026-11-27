@@ -168,3 +168,14 @@ val day = LocalDate.now()
 
 // C26
 val fast = System.getenv("PAYMENTS_FAST_REFUND") == "1"
+
+// C12
+val phase = remember { mutableStateOf<Phase>(Phase.Idle) }
+LaunchedEffect(orderId) { refresh(orderId) }
+handler.postDelayed({ markStale() }, 1000)
+val late = System.currentTimeMillis() - dto.startedAt > 90_000
+
+// C13
+lifecycleScope.launch {
+    binding.address.setText(prewill.value)
+}

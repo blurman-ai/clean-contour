@@ -144,3 +144,6 @@ n := rand.Intn(100)
 // C26
 if os.Getenv("PAYMENTS_FAST_REFUND") == "1" { return 60 }
 host, ok := os.LookupEnv("PAYMENTS_HOST")
+
+// C12
+var page = template.Must(template.New("x").Funcs(template.FuncMap{"expiredSince": expiredSince}).Parse("{{if eq .Status \"failed\"}}down{{end}}"))

@@ -623,6 +623,16 @@ The same applies to `.js`/`.jsx` files and to vanilla JS that rebuilds the page
 after `fetch(…).then` (`.value =`, `innerHTML =`), and to conditions over the
 server object in server templates.
 
+**Kotlin:** Compose: a `remember { mutableStateOf(` named `status`/`phase`/
+`ready` that is set in `LaunchedEffect(` or by a `Handler.postDelayed(`, a
+`when` ladder of three or more branches over the server object; Android View:
+a view model property `Phase`/`IsReady` computed from several DTO fields,
+`System.currentTimeMillis() - dto.startedAt >` deciding an expiry.
+**Go:** html/template: a ladder of `{{if` over `eq .Status` that picks the
+screen, or a FuncMap helper (`expiredSince`, `*Needs*`) that computes a state
+for the template; a template that draws by one field of the server object is
+the clean case.
+
 **C#:** Blazor: a field `phase`, `status`, `isReady` in `@code` set in
 `OnAfterRenderAsync`/`OnParametersSetAsync`, by a `System.Threading.Timer`, or
 from `ProtectedLocalStorage`/`ILocalStorageService`; an `@if` ladder over the
@@ -668,6 +678,13 @@ writes values into a form or into the user's choice (`prefill`, `seed`,
 `apply*`, `onSuccess`, `.then(` with `set*`), while the user can change the
 same fields before the response.
 
+**Kotlin:** `lifecycleScope.launch {` that awaits a response and then writes
+into two-way bound fields (`binding.field.setText(`, a `mutableStateOf(` the
+form reads), with no gate in the fragment (`binding.isEnabled = false`, an
+`isLoading` check, `progressBar.isVisible`).
+**Go:** no signs — the card's race does not arise in a server-rendered
+template: the render happens after the response data is already complete.
+
 **C#:** Blazor: fields bound with `@bind` or an `EditForm` model filled after
 `await Http.GetFromJsonAsync` in `OnInitializedAsync`, while the form is already
 rendered; WPF, MAUI, Avalonia: an async command or `async void` handler that
@@ -705,7 +722,7 @@ request.
 creates them and who reads them; separately, `GET` handlers that contain
 `commit`, `add`, `update`, `insert`.
 
-**Routes:** Spring `@GetMapping`, Ktor `get("/…") {`, Go `r.GET(`, `r.Get(`,
+**Kotlin and Go (routes):** Spring `@GetMapping`, Ktor `get("/…") {`, Go `r.GET(`, `r.Get(`,
 `http.MethodGet`; Go often registers routes in `routes*.go` apart from the
 handlers. The write is usually one call away: list the service methods named
 `list`, `get`, `count` that contain `update`, `INSERT`, `Exec(`, `.Save(`,

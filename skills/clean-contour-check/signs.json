@@ -458,6 +458,16 @@
     "DispatcherTimer",
     "ProtectedLocalStorage|ILocalStorageService",
     "@if\\s*\\([^)]*Status\\s*==[^)]*&&"
+   ],
+   "kt": [
+    "remember\\s*\\{\\s*mutableStateOf",
+    "LaunchedEffect\\(",
+    "postDelayed\\(",
+    "System\\.currentTimeMillis\\(\\)\\s*-"
+   ],
+   "go": [
+    "\\{\\{\\s*if ",
+    "FuncMap"
    ]
   },
   "C13": {
@@ -467,6 +477,10 @@
     "apply\\w*",
     "onSuccess",
     "\\.then\\("
+   ],
+   "kt": [
+    "lifecycleScope\\.launch",
+    "\\.setText\\("
    ]
   },
   "C14": {
