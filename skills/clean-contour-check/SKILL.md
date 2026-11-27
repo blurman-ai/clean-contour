@@ -33,13 +33,6 @@ file:line | C<number> | answers, comma separated | dirty / clean / unclear | one
 A dirty place in your own diff is fixed before the task is closed. A dirty
 place outside the diff is a line in the report, not a fix "while at it".
 
-**Which cards go to whom.** A weak model (cheap, without reasoning) gets the
-cards that passed the exam from the `exam/` directory with threshold 90/10; on
-11.11.2026 (DeepSeek flash) C1, C4, C7, C8, C14 and C15 were not passed, and C10
-passed but was mostly wrong on real code, so their candidates are checked by a
-strong model or a human. A weak model's `dirty` is a candidate: a strong model
-reads it before it is reported.
-
 Signs that a machine looks for without reading, such as a new state field
 without a declaration or a set of values outside the declaring module, sit in
 the project's CI; here they appear only where a question to the code is needed.
@@ -56,6 +49,13 @@ pages compiled into `*.cshtml.cs`) are excluded from every search; a hit there
 is read in its source (`.cshtml`, `.razor`).
 
 ---
+
+**Which cards go to whom.** A weak model (cheap, without reasoning) gets the
+cards that passed the exam from the `exam/` directory with threshold 90/10; on
+11.11.2026 (DeepSeek flash) C1, C4, C7, C8, C14 and C15 were not passed, and C10
+passed but was mostly wrong on real code, so their candidates are checked by a
+strong model or a human. A weak model's `dirty` is a candidate: a strong model
+reads it before it is reported.
 
 ## C1. State derived from an event log
 

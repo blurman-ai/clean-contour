@@ -568,6 +568,19 @@ def selftest() -> int:
             tolerated = False
         case("a card without a section is refused", refused, tolerated)
 
+        # the routing meta must sit below the `---` after Procedure: inside it the
+        # paragraph lands in every prompt and tells the model which cards recently failed
+        live_text = skill_path.read_text(encoding="utf-8")
+        para_at = live_text.index("**Which cards go to whom.")
+        proc_at = live_text.index("## Procedure")
+        sep_at = live_text.index("\n---\n", proc_at)
+        para = live_text[para_at:live_text.index("\n\n", para_at)]
+        old_style = live_text[:sep_at] + "\n" + para + live_text[sep_at:]
+        leaked = "Which cards go to whom" in parse_skill(old_style).order
+        case("the exam prompt does not embed the 'Which cards go to whom' routing paragraph",
+             "Which cards go to whom" not in skill.order
+             and "Which cards go to whom" not in build_prompt(skill, items[0]), leaked)
+
         problems = check_corpus(items, skill)
         case("corpus intact: every card has at least 10+10, 15–60 lines, no hints",
              not problems and {it.card for it in items} == set(codes), True)
