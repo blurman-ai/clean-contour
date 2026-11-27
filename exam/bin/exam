@@ -53,6 +53,8 @@ SECTIONS = ("**Search:**", "**Questions", "**Dirty if:**", "**Does not count:**"
 FIELDS = ("id", "card", "expected", "path", "why", "source", "code")
 HINT = re.compile(r"(?<![A-Za-z_])(?:dirty|clean|unclear)(?![A-Za-z_])|(?<![A-Za-z0-9_])C\d{1,2}(?![0-9])",
                   re.IGNORECASE)
+# paths are read by segment (src/cleanup/ stays legal); the path also reaches the prompt
+HINT_PATH = re.compile(r"(?:^|[/_\-.])(?:dirty|clean|unclear|C\d{1,2})(?:$|[/_\-.])", re.IGNORECASE)
 
 
 class ExamError(Exception):
@@ -249,8 +251,13 @@ def check_corpus(items: list[Item], skill: Skill, *, cards: list[str] | None = N
         n = len(it.code.rstrip("\n").split("\n"))
         if lines and not lines[0] <= n <= lines[1]:
             bad.append(f"{it.id}: {n} lines, need {lines[0]}–{lines[1]}")
-        if hints and HINT.search(it.code):
-            bad.append(f"{it.id}: the code hints at the answer ({HINT.search(it.code).group(0)})")
+        if hints:
+            h = HINT.search(it.code)
+            if h:
+                bad.append(f"{it.id}: the code hints at the answer ({h.group(0)})")
+            p = HINT_PATH.search(it.path)
+            if p:
+                bad.append(f"{it.id}: the path hints at the answer ({p.group(0)})")
         count.setdefault(it.card, {DIRTY: 0, CLEAN: 0})
         if it.expected in count[it.card]:
             count[it.card][it.expected] += 1
@@ -623,6 +630,11 @@ def selftest() -> int:
         case("a hint at the answer in the code is refused",
              any("hints at the answer" in p for p in check_corpus(leak, skill)),
              not any("hints at the answer" in p for p in check_corpus(leak, skill, hints=False)))
+
+        leak_path = mut(lambda c: setattr(c[0], "path", "src/order/dirty_helpers.ts"))
+        case("a hint at the answer in the path is refused (src/cleanup/ stays legal)",
+             any("path hints at the answer" in p for p in check_corpus(leak_path, skill)),
+             not any("path hints at the answer" in p for p in check_corpus(leak_path, skill, hints=False)))
 
         bad_expected = mut(lambda c: setattr(c[0], "expected", UNCLEAR))
         case("expected `unclear` is refused",
