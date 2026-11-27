@@ -25,6 +25,7 @@ import concurrent.futures as cf
 import importlib.machinery
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -37,6 +38,10 @@ ROUTING_PATH = ROOT / "skills" / "clean-contour-check" / "routing.json"
 EXAM_PATH = ROOT / "exam" / "bin" / "exam"
 
 FRAGMENT_LINES = 40          # lines centred on the hit line, clipped to the file
+FRAGMENT_LOOKBACK = 14       # extra lines searched upwards for an enclosing header
+HEADER_RX = re.compile(
+    r"^(?:def |class |async def |func |export (?:default )?(?:async )?(?:function|class) "
+    r"|public |private |internal |static |interface |type |const |var |final )")
 DEFAULT_MAX = 300
 
 
@@ -97,14 +102,20 @@ class Candidate:
 
 
 def fragment_for(repo: Path, relpath: str, line: int) -> str:
-    """40 lines centred on the hit line, clipped to the file."""
+    """Lines centred on the hit line, clipped to the file; widened upwards to
+    include an enclosing function/class header found just above the window, so
+    a decoder or a main() living above the hit is not cut off (C19/C20)."""
     p = repo / relpath
     try:
         lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return ""
     start = max(0, line - 1 - FRAGMENT_LINES // 2)
-    end = min(len(lines), start + FRAGMENT_LINES)
+    headers = [i for i in range(max(0, start - FRAGMENT_LOOKBACK), start + 1)
+               if HEADER_RX.match(lines[i].lstrip())]
+    if headers:
+        start = headers[0]          # the topmost header in reach: the whole block above
+    end = min(len(lines), start + FRAGMENT_LINES + FRAGMENT_LOOKBACK)
     return "\n".join(lines[start:end])
 
 
@@ -310,6 +321,27 @@ def selftest() -> int:
 
     with tempfile.TemporaryDirectory() as td:
         repo = Path(td)
+        # a decoder header sitting just above the centred window: the fragment
+        # must reach up and include it, or a C19/C20 read loses the decoder
+        header_pad = [f"pad_line_{i} = {i}" for i in range(48)]
+        decoder = [
+            "def load_payload(raw):",
+            "    return json.loads(raw)",
+            "",
+            "def main():",
+            "    cfg = load_payload(open('x.json').read())",
+            "",
+        ]
+        body = [f"tail_line_{i} = {i}" for i in range(30)]
+        deep = (repo / "deep.py")
+        deep.write_text("\n".join(header_pad + decoder + body) + "\n", encoding="utf-8")
+        hit_line = len(header_pad) + len(decoder) + 21       # inside the tail block
+        frag = fragment_for(repo, "deep.py", hit_line)
+        old_start = max(0, hit_line - 1 - FRAGMENT_LINES // 2)
+        old_frag = "\n".join(deep.read_text(encoding="utf-8").splitlines()[old_start:old_start + FRAGMENT_LINES])
+        case("the fragment widens up to an enclosing header the centre window would cut off",
+             "def load_payload" in frag and "def main" in frag
+             and "def load_payload" not in old_frag)
         (repo / "app.py").write_text(
             "def f():\n"
             "    x = 1\n"

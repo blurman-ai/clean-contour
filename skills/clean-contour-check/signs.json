@@ -10,7 +10,9 @@
    "\\.min\\.",
    "/dist/",
    "/obj/",
-   "/bin/"
+   "/bin/",
+   "(^|/)(testkit|acceptance|experiments?)/",
+   "(?:^|.*/)[^/]*(fixture|harness|proof)[^/]*$"
   ],
   "ts": [
    "(^|/)(tests?|test|__tests__)/",
@@ -20,7 +22,9 @@
    "/dist/",
    "/obj/",
    "/bin/",
-   "wwwroot/(lib|vendor)"
+   "wwwroot/(lib|vendor)",
+   "(^|/)(testkit|acceptance|experiments?)/",
+   "(?:^|.*/)[^/]*(fixture|harness|proof)[^/]*$"
   ],
   "kt": [
    "(^|/)src/test/",
@@ -30,7 +34,9 @@
    "\\.min\\.",
    "/dist/",
    "/obj/",
-   "/bin/"
+   "/bin/",
+   "(^|/)(testkit|acceptance|experiments?)/",
+   "(?:^|.*/)[^/]*(fixture|harness|proof)[^/]*$"
   ],
   "go": [
    "_test\\.go$",
@@ -38,10 +44,14 @@
    "\\.min\\.",
    "/dist/",
    "/obj/",
-   "/bin/"
+   "/bin/",
+   "(^|/)(testkit|acceptance|experiments?)/",
+   "(?:^|.*/)[^/]*(fixture|harness|proof)[^/]*$"
   ],
   "cs": [
-   "(/obj/|/bin/|Migrations/|\\.g\\.cs$|\\.Designer\\.cs$|[Tt]ests?/|\\.Tests?\\b|Tests?\\.cs$|/samples?/|/Benchmarks?/|node_modules|\\.spec\\.ts$|wwwroot/(lib|vendor)|\\.min\\.|/dist/)"
+   "(/obj/|/bin/|Migrations/|\\.g\\.cs$|\\.Designer\\.cs$|[Tt]ests?/|\\.Tests?\\b|Tests?\\.cs$|/samples?/|/Benchmarks?/|node_modules|\\.spec\\.ts$|wwwroot/(lib|vendor)|\\.min\\.|/dist/)",
+   "(^|/)(testkit|acceptance|experiments?)/",
+   "(?:^|.*/)[^/]*(fixture|harness|proof)[^/]*$"
   ]
  },
  "extensions": {

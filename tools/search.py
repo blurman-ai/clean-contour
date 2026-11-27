@@ -11,6 +11,7 @@ language, as the skill's "Languages" paragraph says.
 """
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -42,10 +43,17 @@ def skip_regex(signs: dict, lang: str):
 
 
 def walk_files(root: Path, extensions: list, skip_rx) -> list:
+    """os.walk with in-place directory pruning: skipped trees (node_modules,
+    .venv, testkit, ...) are never descended into, which keeps large
+    repositories from being traversed whole just to be filtered after."""
+    root = Path(root)
     files = []
-    for ext in extensions:
-        for p in root.rglob(f"*{ext}"):
-            if skip_rx.search(str(p)):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if not skip_rx.search(str(Path(dirpath) / d) + "/")]
+        for name in filenames:
+            p = Path(dirpath) / name
+            if p.suffix not in extensions or skip_rx.search(str(p)):
                 continue
             files.append(p)
     return sorted(files)
@@ -142,6 +150,35 @@ def selftest() -> int:
         for f in test_files:
             if not skip_rx.search(str(f)):
                 failures.append(f"{lang}: test file {f.name} not dropped by skip list")
+        # Harness/fixture files outside tests/ are dropped by the same list.
+        harness = [f for f in sorted(lang_dir.iterdir())
+                   if f.is_file() and any(w in f.name.lower() for w in ("fixture", "harness", "proof"))]
+        if not harness:
+            failures.append(f"{lang}: no fixture-named file present to check the skip list")
+        for f in harness:
+            if not skip_rx.search(str(f)):
+                failures.append(f"{lang}: harness file {f.name} not dropped by skip list")
+
+    # A tree under a harness directory (testkit/) must be pruned, not scanned.
+    pruned_root = fixtures_root / "py" / "testkit"
+    if pruned_root.is_dir():
+        for lang in ALL_LANGS:
+            skip_rx = skip_regex(signs, lang)
+            got = walk_files(fixtures_root, signs["extensions"][lang], skip_rx)
+            if any("testkit" in str(f) for f in got):
+                failures.append("walk_files descended into testkit/")
+            found = hits_for(fixtures_root, signs, ALL_LANGS, list(signs["cards"]))
+            if any("testkit" in rel for _, rel, _, _ in found):
+                failures.append("a hit inside testkit/")
+        # The pruned walk must return the same files as the old rglob+filter.
+        for lang in ALL_LANGS:
+            skip_rx = skip_regex(signs, lang)
+            walked = walk_files(fixtures_root, signs["extensions"][lang], skip_rx)
+            reference = sorted(p for ext in signs["extensions"][lang]
+                               for p in fixtures_root.rglob(f"*{ext}")
+                               if not skip_rx.search(str(p)))
+            if walked != reference:
+                failures.append(f"{lang}: pruned walk differs from rglob reference")
 
     # The search itself, over the fixtures directory: every language gives hits,
     # and no hit comes from a test file.
