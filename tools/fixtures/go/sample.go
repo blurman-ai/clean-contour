@@ -114,3 +114,7 @@ http.Error(w, "no", 409)
 var cfg = viper.Get("key")
 var m map[string]any
 json.Unmarshal(data, &m)
+
+// C21
+func ResolvePayloadState(p EnginePayload) string { return p.State }
+var artifactPath = p.AudioPath

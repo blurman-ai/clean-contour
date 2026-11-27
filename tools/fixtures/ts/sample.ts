@@ -138,3 +138,8 @@ import { OrderDto } from "../controllers/order";
 const raw = JSON.parse(text);
 const title = req.body["title"];
 const host = config["host"];
+
+// C21
+function resolveRenderStatus(job) { return job.status; }
+const implied = job.outputUrl ?? "ready";
+const artifact = job.audioPath;

@@ -96,3 +96,7 @@ var node = JsonNode.Parse(raw);
 var v = IConfiguration["Key"];
 var name = doc.RootElement.GetProperty("name");
 var section = config.GetSection("cookie");
+
+// C21
+public static string ResolvePayloadState(EnginePayload payload) => payload.State;
+var artifactPath = payload.AudioPath;

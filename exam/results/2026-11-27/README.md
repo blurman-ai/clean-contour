@@ -49,6 +49,7 @@ counts. Dev and holdout are disjoint and together cover the card's 30 fragments.
 | deepseek-v4-flash, holdout × 3, C21 | 5/5 | 100% | 0/5 | 0% | PASS |
 
 Reports: `exam/runs/2026-11-27-deepseek-c21-dev.json` and
-`exam/runs/2026-11-27-deepseek-c21-holdout.json`. C21 joins the cheap list in
-`routing.json`.
+`exam/runs/2026-11-27-deepseek-c21-holdout.json`. The exact
+`engine_payload_state` fragment from issue #39 was also checked separately and
+answered `dirty` (`yes, yes, yes`). C21 joins the cheap list in `routing.json`.
 

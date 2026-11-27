@@ -125,3 +125,7 @@ class OrderHandler
 // C20
 val key = JsonObject["key"]
 val attempts = settings["login_attempts"]
+
+// C21
+fun resolvePayloadState(payload: EnginePayload): String = payload.state
+val artifactPath = payload.audioPath

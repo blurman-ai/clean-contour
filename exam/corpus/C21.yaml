@@ -1,0 +1,1041 @@
+# C21 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C21-01
+  card: C21
+  expected: dirty
+  path: app/podcasts/engine.py
+  why: The stored engine state is read, but an old audio artifact can still turn a generating row into ready.
+  source: Podcast engine payload classifier from the retry path.
+  code: |
+    from __future__ import annotations
+
+    TERMINAL_ENGINE_STATES = {"failed", "resource_limit_exceeded"}
+
+
+    def engine_payload_state(payload):
+        state = str(payload.get("state") or "").strip().lower()
+        if state in TERMINAL_ENGINE_STATES:
+            return "failed"
+        if state == "ready" or payload.get("audio_url") or payload.get("audio_path"):
+            return "ready"
+        return "generating"
+
+
+    def podcast_view(row):
+        payload = {
+            "state": row.engine_state,
+            "audio_url": row.audio_url,
+            "audio_path": row.audio_path,
+        }
+        return {
+            "id": row.id,
+            "state": engine_payload_state(payload),
+            "audio_url": row.audio_url,
+        }
+
+
+    def retry_podcast(row):
+        row.engine_state = "generating"
+        return podcast_view(row)
+
+- id: C21-02
+  card: C21
+  expected: dirty
+  path: app/voice/attempts.py
+  why: Retry stores generating, but resolve_voice_state reads the stale audio_path before that stored state.
+  source: Voice-over attempt retry with the previous file kept on the row.
+  code: |
+    from __future__ import annotations
+
+    from datetime import datetime
+
+
+    def resolve_voice_state(attempt):
+        if attempt.audio_path:
+            return "ready"
+        if attempt.state == "failed":
+            return "failed"
+        return attempt.state
+
+
+    def retry_voice(attempt, now):
+        attempt.state = "generating"
+        attempt.started_at = now
+        attempt.error = None
+        return attempt
+
+
+    def attempt_view(attempt):
+        return {
+            "id": attempt.id,
+            "state": resolve_voice_state(attempt),
+            "audio_path": attempt.audio_path,
+        }
+
+
+    def retry_and_show(attempt):
+        retry_voice(attempt, datetime.utcnow())
+        return attempt_view(attempt)
+
+- id: C21-03
+  card: C21
+  expected: dirty
+  path: tests/podcasts/test_engine_state.py
+  why: The test fixes a contract where generating plus an old audio_path is reported as ready.
+  source: Unit test for the podcast engine state mapper.
+  code: |
+    from app.podcasts.engine import engine_payload_state
+
+
+    def test_engine_payload_state_priority():
+        assert engine_payload_state({"state": "generating", "audio_path": "a"}) == "ready"
+        assert engine_payload_state({"state": "generating", "audio_url": "u"}) == "ready"
+        assert engine_payload_state({"state": "ready"}) == "ready"
+        assert engine_payload_state({"state": "failed", "audio_path": "a"}) == "failed"
+
+
+    def test_engine_payload_state_without_artifact():
+        assert engine_payload_state({"state": "generating"}) == "generating"
+        assert engine_payload_state({"state": "resource_limit_exceeded"}) == "failed"
+
+
+    def test_engine_payload_state_namespaces():
+        payload = {"state": " generating ", "audio_path": "old.mp3"}
+        assert engine_payload_state(payload) == "ready"
+
+
+    def test_engine_payload_state_empty_state():
+        assert engine_payload_state({"state": ""}) == "generating"
+
+- id: C21-04
+  card: C21
+  expected: dirty
+  path: app/video/renders.py
+  why: A completion timestamp outranks the stored render state, so a restarted render still looks ready.
+  source: Video render state resolution after re-rendering.
+  code: |
+    from __future__ import annotations
+
+    from dataclasses import dataclass
+    from datetime import datetime
+
+
+    @dataclass
+    class VideoRender:
+        state: str
+        output_path: str | None
+        completed_at: datetime | None
+        error: str | None
+
+
+    def compute_render_state(render):
+        if render.completed_at is not None:
+            return "ready"
+        if render.error:
+            return "failed"
+        return render.state
+
+
+    def restart_render(render):
+        render.state = "rendering"
+        render.error = None
+        return compute_render_state(render)
+
+
+    def render_view(render):
+        return {"state": compute_render_state(render), "output": render.output_path}
+
+- id: C21-05
+  card: C21
+  expected: dirty
+  path: app/transcription/classify.py
+  why: The lifecycle state is the fallback while output, duration and error decide the returned state.
+  source: Transcription row classifier used by the progress endpoint.
+  code: |
+    from __future__ import annotations
+
+
+    def classify_transcription_state(row):
+        if row.error:
+            return "failed"
+        if row.output:
+            return "ready"
+        if row.duration and row.duration > 0:
+            return "ready"
+        return row.state
+
+
+    def transcription_progress(row):
+        state = classify_transcription_state(row)
+        return {
+            "id": row.id,
+            "state": state,
+            "duration": row.duration,
+        }
+
+
+    def restart_transcription(row):
+        row.state = "processing"
+        row.error = None
+        return transcription_progress(row)
+
+
+    def transcript_text(row):
+        return row.output or ""
+
+- id: C21-06
+  card: C21
+  expected: dirty
+  path: app/images/state.py
+  why: generated_at is treated as proof of the current generation even when the stored state says queued.
+  source: Image generation state resolver.
+  code: |
+    from __future__ import annotations
+
+    from datetime import datetime
+
+
+    def resolve_image_state(image):
+        if image.generated_at is not None:
+            return "done"
+        if image.state == "failed":
+            return "failed"
+        if image.state == "queued":
+            return "queued"
+        return image.state
+
+
+    def enqueue_regeneration(image):
+        image.state = "queued"
+        return resolve_image_state(image)
+
+
+    def image_view(image):
+        return {
+            "id": image.id,
+            "state": resolve_image_state(image),
+            "generated_at": image.generated_at,
+        }
+
+
+    def mark_generated(image, when: datetime):
+        image.generated_at = when
+
+- id: C21-07
+  card: C21
+  expected: dirty
+  path: app/episodes/sync.py
+  why: The synchronizer overwrites lifecycle state from file_path and error instead of moving the stored state through transitions.
+  source: Episode synchronization with object storage.
+  code: |
+    from __future__ import annotations
+
+
+    def sync_episode_state(episode, storage):
+        if episode.file_path:
+            episode.state = "ready"
+        elif episode.error:
+            episode.state = "failed"
+        else:
+            episode.state = "generating"
+        storage.save(episode)
+        return episode.state
+
+
+    def episode_response(episode, storage):
+        state = sync_episode_state(episode, storage)
+        return {
+            "id": episode.id,
+            "state": state,
+            "file_path": episode.file_path,
+        }
+
+
+    def retry_episode(episode, storage):
+        episode.state = "generating"
+        return episode_response(episode, storage)
+
+- id: C21-08
+  card: C21
+  expected: dirty
+  path: app/exports/status.py
+  why: download_url and result outrank the stored export status in the status resolver.
+  source: Payroll export status resolver.
+  code: |
+    from __future__ import annotations
+
+
+    def resolve_export_status(export):
+        if export.download_url:
+            return "complete"
+        if export.result:
+            return "complete"
+        if export.error:
+            return "failed"
+        return export.status
+
+
+    def restart_export(export):
+        export.status = "running"
+        export.error = None
+        return resolve_export_status(export)
+
+
+    def export_view(export):
+        return {
+            "id": export.id,
+            "status": resolve_export_status(export),
+            "download_url": export.download_url,
+        }
+
+
+    def export_file_name(export):
+        return f"export-{export.id}.csv"
+
+- id: C21-09
+  card: C21
+  expected: dirty
+  path: app/jobs/status.py
+  why: finished_at and duration decide success before the stored job status is consulted.
+  source: Batch job status derivation.
+  code: |
+    from __future__ import annotations
+
+
+    def derive_job_status(job):
+        if job.error is not None:
+            return "failed"
+        if job.finished_at is not None and job.duration > 0:
+            return "succeeded"
+        if job.result is not None:
+            return "succeeded"
+        return job.status
+
+
+    def requeue_job(job):
+        job.status = "queued"
+        job.error = None
+        return derive_job_status(job)
+
+
+    def job_view(job):
+        return {
+            "id": job.id,
+            "status": derive_job_status(job),
+            "duration": job.duration,
+        }
+
+
+    def job_result_size(job):
+        return len(job.result or b"")
+
+- id: C21-10
+  card: C21
+  expected: dirty
+  path: app/podcasts/api.py
+  why: The API copies the stored state into a variable and then lets audio_url replace it before serialization.
+  source: Podcast API serializer.
+  code: |
+    from __future__ import annotations
+
+
+    def podcast_status_payload(episode):
+        state = episode.state
+        if episode.audio_url:
+            state = "ready"
+        if episode.error:
+            state = "failed"
+        return {
+            "id": episode.id,
+            "state": state,
+            "audio_url": episode.audio_url,
+        }
+
+
+    def podcast_list_payload(episodes):
+        return [podcast_status_payload(episode) for episode in episodes]
+
+
+    def retry_podcast(episode):
+        episode.state = "generating"
+        episode.error = None
+        return podcast_status_payload(episode)
+
+
+    def podcast_title(episode):
+        return episode.title.strip()
+
+- id: C21-11
+  card: C21
+  expected: dirty
+  path: web/src/render/status.ts
+  why: outputUrl and error are consulted before the stored render status.
+  source: TypeScript render status resolver.
+  code: |
+    export type RenderStatus = "queued" | "processing" | "ready" | "failed";
+
+    export type RenderJob = {
+      id: string;
+      status: RenderStatus;
+      outputUrl?: string;
+      error?: string;
+      finishedAt?: string;
+    };
+
+    export function resolveRenderStatus(job: RenderJob): RenderStatus {
+      if (job.outputUrl) {
+        return "ready";
+      }
+      if (job.error) {
+        return "failed";
+      }
+      return job.status;
+    }
+
+    export function restartRender(job: RenderJob): RenderStatus {
+      job.status = "processing";
+      job.error = undefined;
+      return resolveRenderStatus(job);
+    }
+
+    export function renderJobView(job: RenderJob) {
+      return { id: job.id, status: resolveRenderStatus(job), outputUrl: job.outputUrl };
+    }
+
+- id: C21-12
+  card: C21
+  expected: dirty
+  path: web/src/render/status.test.ts
+  why: The test fixes processing plus outputUrl as ready, making the stale artifact part of the contract.
+  source: TypeScript unit test for render status resolution.
+  code: |
+    import { describe, expect, it } from "vitest";
+    import { resolveRenderStatus, type RenderJob } from "./status";
+
+    function job(patch: Partial<RenderJob>): RenderJob {
+      return {
+        id: "r1",
+        status: "processing",
+        ...patch,
+      };
+    }
+
+    describe("resolveRenderStatus", () => {
+      it("uses the stored status without an artifact", () => {
+        expect(resolveRenderStatus(job({}))).toBe("processing");
+      });
+
+      it("treats an output as ready", () => {
+        expect(resolveRenderStatus(job({ outputUrl: "/out/r1.mp4" }))).toBe("ready");
+      });
+
+      it("keeps failures failed", () => {
+        expect(resolveRenderStatus(job({ status: "failed", outputUrl: "/out/r1.mp4" }))).toBe("ready");
+      });
+    });
+
+- id: C21-13
+  card: C21
+  expected: dirty
+  path: app/src/main/kotlin/podcasts/EngineState.kt
+  why: The Kotlin mapper lets a retained audio path outrank payload.state.
+  source: Kotlin podcast engine payload mapper.
+  code: |
+    package podcasts
+
+    data class EnginePayload(
+        val state: String,
+        val audioPath: String?,
+        val audioUrl: String?,
+        val error: String?,
+    )
+
+    fun enginePayloadState(payload: EnginePayload): String {
+        val state = payload.state.lowercase()
+        if (state == "failed" || state == "resource_limit_exceeded") {
+            return "failed"
+        }
+        if (!payload.audioPath.isNullOrBlank() || !payload.audioUrl.isNullOrBlank()) {
+            return "ready"
+        }
+        return state
+    }
+
+    fun payloadView(payload: EnginePayload): Map<String, String?> {
+        return mapOf(
+            "state" to enginePayloadState(payload),
+            "audioUrl" to payload.audioUrl,
+        )
+    }
+
+- id: C21-14
+  card: C21
+  expected: dirty
+  path: internal/podcast/engine_state.go
+  why: The Go mapper returns ready from AudioPath before it returns the stored State.
+  source: Go podcast engine payload mapper.
+  code: |
+    package podcast
+
+    type EnginePayload struct {
+    	State     string
+    	AudioPath string
+    	AudioURL  string
+    	Error     string
+    }
+
+    func PayloadState(p EnginePayload) string {
+    	if p.State == "failed" || p.State == "resource_limit_exceeded" {
+    		return "failed"
+    	}
+    	if p.AudioPath != "" || p.AudioURL != "" {
+    		return "ready"
+    	}
+    	return p.State
+    }
+
+    func PayloadView(p EnginePayload) map[string]string {
+    	return map[string]string{
+    		"state":   PayloadState(p),
+    		"audioUrl": p.AudioURL,
+    	}
+    }
+
+    func RetryState(p EnginePayload) string {
+    	p.State = "generating"
+    	return PayloadState(p)
+    }
+
+- id: C21-15
+  card: C21
+  expected: dirty
+  path: src/Podcasts/EnginePayloadState.cs
+  why: The C# resolver puts AudioPath and AudioUrl ahead of the stored State.
+  source: C# podcast engine payload mapper.
+  code: |
+    namespace Podcasts;
+
+    public sealed record EnginePayload(
+        string State,
+        string? AudioPath,
+        string? AudioUrl,
+        string? Error);
+
+    public static class EnginePayloadState
+    {
+        public static string Resolve(EnginePayload payload)
+        {
+            if (payload.State is "failed" or "resource_limit_exceeded")
+            {
+                return "failed";
+            }
+            if (!string.IsNullOrEmpty(payload.AudioPath) || !string.IsNullOrEmpty(payload.AudioUrl))
+            {
+                return "ready";
+            }
+            return payload.State;
+        }
+
+        public static object View(EnginePayload payload) => new
+        {
+            state = Resolve(payload),
+            audioUrl = payload.AudioUrl,
+        };
+    }
+
+- id: C21-16
+  card: C21
+  expected: clean
+  path: app/podcasts/engine.py
+  why: The lifecycle state is passed through; audio is exposed only as a separate availability field.
+  source: Podcast engine payload mapper after the state transition is stored.
+  code: |
+    from __future__ import annotations
+
+
+    def engine_payload_state(payload):
+        return payload["state"]
+
+
+    def podcast_view(row):
+        payload = {"state": row.engine_state}
+        return {
+            "id": row.id,
+            "state": engine_payload_state(payload),
+            "playable_audio_url": row.audio_url,
+            "has_audio": bool(row.audio_path or row.audio_url),
+        }
+
+
+    def retry_podcast(row):
+        row.engine_state = "generating"
+        row.audio_url = None
+        row.audio_path = None
+        return podcast_view(row)
+
+
+    def podcast_title(row):
+        return row.title.strip()
+
+- id: C21-17
+  card: C21
+  expected: clean
+  path: app/episodes/api.py
+  why: The response returns row.state as the lifecycle state and keeps the artifact URL in a separate field.
+  source: Episode response serializer.
+  code: |
+    from __future__ import annotations
+
+
+    def episode_response(row):
+        return {
+            "id": row.id,
+            "state": row.state,
+            "playable_audio_url": row.audio_url,
+        }
+
+
+    def episode_list_response(rows):
+        return [episode_response(row) for row in rows]
+
+
+    def episode_detail_response(row):
+        body = episode_response(row)
+        body["title"] = row.title
+        body["duration"] = row.duration
+        return body
+
+
+    def retry_episode(row):
+        row.state = "generating"
+        return episode_response(row)
+
+- id: C21-18
+  card: C21
+  expected: clean
+  path: migrations/backfill_podcast_state.py
+  why: A one-time backfill uses artifacts only to fill the stored state column; reads after that use the column.
+  source: Migration that backfills podcast state once.
+  code: |
+    from __future__ import annotations
+
+
+    def backfill_podcast_state(conn):
+        rows = conn.execute(
+            "SELECT id, audio_path, error FROM podcasts WHERE state IS NULL"
+        ).fetchall()
+        for row in rows:
+            if row.error:
+                state = "failed"
+            elif row.audio_path:
+                state = "ready"
+            else:
+                state = "generating"
+            conn.execute(
+                "UPDATE podcasts SET state = ? WHERE id = ? AND state IS NULL",
+                (state, row.id),
+            )
+        conn.commit()
+
+
+    def rollback(conn):
+        conn.execute("UPDATE podcasts SET state = NULL WHERE source = 'backfill'")
+
+- id: C21-19
+  card: C21
+  expected: clean
+  path: app/reports/audio_weekly.py
+  why: The report counts artifact presence as a metric and never returns the lifecycle state of an episode.
+  source: Weekly report over generated audio files.
+  code: |
+    from __future__ import annotations
+
+    from collections import Counter
+
+
+    def count_rows_with_audio(rows):
+        return sum(1 for row in rows if row.audio_path)
+
+
+    def count_rows_with_error(rows):
+        return sum(1 for row in rows if row.error)
+
+
+    def weekly_audio_report(rows):
+        states = Counter(row.state for row in rows)
+        return {
+            "rows": len(rows),
+            "with_audio": count_rows_with_audio(rows),
+            "with_error": count_rows_with_error(rows),
+            "states": dict(states),
+        }
+
+
+    def report_text(rows):
+        report = weekly_audio_report(rows)
+        return f"{report['with_audio']} of {report['rows']} rows have audio"
+
+- id: C21-20
+  card: C21
+  expected: clean
+  path: tests/podcasts/test_engine_state.py
+  why: The test requires the stored generating state to survive even when an artifact field is present.
+  source: Unit test for the corrected podcast engine state mapper.
+  code: |
+    from app.podcasts.engine import engine_payload_state
+
+
+    def test_engine_payload_state_passes_state_through():
+        assert engine_payload_state({"state": "generating", "audio_path": "a"}) == "generating"
+        assert engine_payload_state({"state": "ready", "audio_path": "a"}) == "ready"
+        assert engine_payload_state({"state": "failed"}) == "failed"
+
+
+    def test_engine_payload_state_does_not_infer():
+        payload = {"state": "generating", "audio_url": "https://cdn.example/old.mp3"}
+        assert engine_payload_state(payload) == "generating"
+
+
+    def test_engine_payload_state_keeps_unknown_text():
+        assert engine_payload_state({"state": "resource_limit_exceeded"}) == "resource_limit_exceeded"
+
+- id: C21-21
+  card: C21
+  expected: clean
+  path: app/episodes/availability.py
+  why: The helper answers artifact availability and uses the stored state only as an input to that separate question.
+  source: Audio availability helper for the player.
+  code: |
+    from __future__ import annotations
+
+
+    def playable_audio_path(episode):
+        if episode.state != "ready":
+            return None
+        return episode.audio_path
+
+
+    def playable_audio_url(episode):
+        if episode.state != "ready":
+            return None
+        return episode.audio_url
+
+
+    def player_payload(episode):
+        return {
+            "state": episode.state,
+            "audio_path": playable_audio_path(episode),
+            "audio_url": playable_audio_url(episode),
+        }
+
+
+    def has_playable_audio(episode):
+        return playable_audio_path(episode) is not None or playable_audio_url(episode) is not None
+
+- id: C21-22
+  card: C21
+  expected: clean
+  path: app/podcasts/payload.py
+  why: The decoder types the external payload once, and the state reader returns only the typed state field.
+  source: Typed decoder for the podcast engine payload.
+  code: |
+    from __future__ import annotations
+
+    from dataclasses import dataclass
+
+
+    @dataclass(frozen=True)
+    class EnginePayload:
+        state: str
+        audio_path: str | None
+        audio_url: str | None
+        error: str | None
+
+
+    def decode_engine_payload(raw):
+        return EnginePayload(
+            state=raw["state"],
+            audio_path=raw.get("audio_path"),
+            audio_url=raw.get("audio_url"),
+            error=raw.get("error"),
+        )
+
+
+    def engine_payload_state(payload: EnginePayload) -> str:
+        return payload.state
+
+
+    def payload_view(payload: EnginePayload):
+        return {"state": payload.state, "audio_url": payload.audio_url}
+
+- id: C21-23
+  card: C21
+  expected: clean
+  path: app/episodes/transitions.py
+  why: The writer stores ready and the audio artifact together as one transition instead of deriving state later.
+  source: Episode lifecycle transition writer.
+  code: |
+    from __future__ import annotations
+
+
+    class Refused(Exception):
+        pass
+
+
+    def mark_ready(episode, audio_path, storage):
+        if episode.state != "generating":
+            raise Refused("not_generating")
+        episode.state = "ready"
+        episode.audio_path = audio_path
+        episode.error = None
+        storage.save(episode)
+        return episode
+
+
+    def mark_failed(episode, error, storage):
+        if episode.state != "generating":
+            raise Refused("not_generating")
+        episode.state = "failed"
+        episode.error = error
+        storage.save(episode)
+        return episode
+
+
+    def episode_state(episode):
+        return episode.state
+
+- id: C21-24
+  card: C21
+  expected: clean
+  path: app/episodes/failure_view.py
+  why: The error is returned as failure detail next to the stored state, not as a replacement for it.
+  source: Episode failure details for the API.
+  code: |
+    from __future__ import annotations
+
+
+    def failure_view(row):
+        return {
+            "id": row.id,
+            "state": row.state,
+            "failure_reason": row.error,
+        }
+
+
+    def result_view(row):
+        return {
+            "id": row.id,
+            "state": row.state,
+            "audio_url": row.audio_url,
+            "duration": row.duration,
+        }
+
+
+    def episode_view(row):
+        body = result_view(row)
+        body.update(failure_view(row))
+        return body
+
+
+    def retry_requested(row):
+        row.state = "generating"
+        row.error = None
+
+- id: C21-25
+  card: C21
+  expected: clean
+  path: app/video/transitions.py
+  why: The completion data is written with the stored ready state by the transition writer.
+  source: Video render completion transition.
+  code: |
+    from __future__ import annotations
+
+    from datetime import datetime
+
+
+    class Refused(Exception):
+        pass
+
+
+    def complete_render(render, output_path, duration, storage, now=None):
+        if render.state != "processing":
+            raise Refused("not_processing")
+        render.state = "ready"
+        render.output_path = output_path
+        render.duration = duration
+        render.completed_at = now or datetime.utcnow()
+        storage.save(render)
+        return render
+
+
+    def render_state(render):
+        return render.state
+
+
+    def render_view(render):
+        return {"state": render.state, "output_path": render.output_path}
+
+- id: C21-26
+  card: C21
+  expected: clean
+  path: web/src/render/status.ts
+  why: TypeScript status resolution returns the stored status and keeps outputUrl as separate download data.
+  source: TypeScript render status view.
+  code: |
+    export type RenderStatus = "queued" | "processing" | "ready" | "failed";
+
+    export type RenderJob = {
+      id: string;
+      status: RenderStatus;
+      outputUrl?: string;
+      error?: string;
+      finishedAt?: string;
+    };
+
+    export function resolveRenderStatus(job: RenderJob): RenderStatus {
+      return job.status;
+    }
+
+    export function renderJobView(job: RenderJob) {
+      return {
+        id: job.id,
+        status: resolveRenderStatus(job),
+        downloadUrl: job.status === "ready" ? job.outputUrl ?? null : null,
+        error: job.error ?? null,
+      };
+    }
+
+    export function renderJobsView(jobs: RenderJob[]) {
+      return jobs.map(renderJobView);
+    }
+
+- id: C21-27
+  card: C21
+  expected: clean
+  path: web/src/render/transitions.ts
+  why: The transition writer stores ready together with outputUrl instead of letting outputUrl define status later.
+  source: TypeScript render completion writer.
+  code: |
+    export type RenderStatus = "queued" | "processing" | "ready" | "failed";
+
+    export type RenderJob = {
+      status: RenderStatus;
+      outputUrl?: string;
+      error?: string;
+      finishedAt?: string;
+    };
+
+    export function completeRender(job: RenderJob, outputUrl: string, finishedAt: string) {
+      if (job.status !== "processing") {
+        throw new Error("not_processing");
+      }
+      job.status = "ready";
+      job.outputUrl = outputUrl;
+      job.finishedAt = finishedAt;
+      job.error = undefined;
+      return job;
+    }
+
+    export function renderStatus(job: RenderJob): RenderStatus {
+      return job.status;
+    }
+
+- id: C21-28
+  card: C21
+  expected: clean
+  path: app/src/main/kotlin/podcasts/EngineState.kt
+  why: The Kotlin DTO keeps state and audioUrl as separate typed fields.
+  source: Kotlin typed podcast payload mapping.
+  code: |
+    package podcasts
+
+    data class EnginePayload(
+        val state: String,
+        val audioPath: String?,
+        val audioUrl: String?,
+        val error: String?,
+    )
+
+    fun enginePayloadState(payload: EnginePayload): String {
+        return payload.state
+    }
+
+    fun payloadView(payload: EnginePayload): Map<String, String?> {
+        return mapOf(
+            "state" to payload.state,
+            "playableAudioUrl" to payload.audioUrl,
+            "error" to payload.error,
+        )
+    }
+
+    fun retryPayload(payload: EnginePayload): EnginePayload {
+        return payload.copy(state = "generating", audioPath = null, audioUrl = null, error = null)
+    }
+
+- id: C21-29
+  card: C21
+  expected: clean
+  path: internal/podcast/engine_state.go
+  why: The Go mapper returns State and exposes AudioURL only as artifact data.
+  source: Go typed podcast payload mapping.
+  code: |
+    package podcast
+
+    type EnginePayload struct {
+    	State     string
+    	AudioPath string
+    	AudioURL  string
+    	Error     string
+    }
+
+    func PayloadState(p EnginePayload) string {
+    	return p.State
+    }
+
+    func PayloadView(p EnginePayload) map[string]string {
+    	return map[string]string{
+    		"state":           p.State,
+    		"playableAudioUrl": p.AudioURL,
+    		"error":           p.Error,
+    	}
+    }
+
+    func RetryPayload(p EnginePayload) EnginePayload {
+    	p.State = "generating"
+    	p.AudioPath = ""
+    	p.AudioURL = ""
+    	p.Error = ""
+    	return p
+    }
+
+- id: C21-30
+  card: C21
+  expected: clean
+  path: src/Podcasts/EnginePayloadState.cs
+  why: The C# resolver returns State and returns AudioUrl separately in the view.
+  source: C# typed podcast payload mapping.
+  code: |
+    namespace Podcasts;
+
+    public sealed record EnginePayload(
+        string State,
+        string? AudioPath,
+        string? AudioUrl,
+        string? Error);
+
+    public static class EnginePayloadState
+    {
+        public static string Resolve(EnginePayload payload)
+        {
+            return payload.State;
+        }
+
+        public static object View(EnginePayload payload) => new
+        {
+            state = payload.State,
+            playableAudioUrl = payload.AudioUrl,
+            error = payload.Error,
+        };
+
+        public static EnginePayload Retry(EnginePayload payload) =>
+            payload with { State = "generating", AudioPath = null, AudioUrl = null, Error = null };
+    }

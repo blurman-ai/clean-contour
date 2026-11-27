@@ -726,6 +726,36 @@
         "GetProperty\\(\"",
         "GetSection\\(\""
       ]
+    },
+    "C21": {
+      "py": [
+        "\\b(?:audio_path|audio_url|file_path|result_url|output_path|download_url|completed_at|generated_at|finished_at)\\b",
+        "\\.get\\([\"\\'](?:audio_path|audio_url|file_path|result_url|output_path|download_url|result|output|error|duration)[\"\\']\\)",
+        "\\b(?:resolve|compute|classify|derive)_\\w*(?:state|status)\\s*\\(",
+        {
+          "manual": "a test that passes state together with an artifact field and expects the state implied by the artifact"
+        }
+      ],
+      "ts": [
+        "\\b(?:audioPath|audioUrl|filePath|resultUrl|outputPath|downloadUrl|completedAt|generatedAt|finishedAt)\\b",
+        "\\?\\?\\s*[\"\\'](?:ready|done|complete|completed|success|succeeded|failed)[\"\\']",
+        "\\b(?:resolve|compute|classify|derive)[A-Za-z]*(?:State|Status)\\s*\\(",
+        {
+          "manual": "a test that passes status together with an artifact field and expects the state implied by the artifact"
+        }
+      ],
+      "kt": [
+        "\\b(?:audioPath|audioUrl|filePath|resultUrl|outputPath|downloadUrl|completedAt|generatedAt|finishedAt)\\b",
+        "fun\\s+(?:resolve|compute|classify|derive)\\w*(?:State|Status)\\s*\\("
+      ],
+      "go": [
+        "\\b(?:AudioPath|AudioURL|FilePath|ResultURL|OutputPath|DownloadURL|CompletedAt|GeneratedAt|FinishedAt)\\b",
+        "func\\s+(?:Resolve|Compute|Classify|Derive)\\w*(?:State|Status)\\w*\\s*\\("
+      ],
+      "cs": [
+        "\\b(?:AudioPath|AudioUrl|AudioURL|FilePath|ResultUrl|ResultURL|OutputPath|DownloadUrl|DownloadURL|CompletedAt|GeneratedAt|FinishedAt)\\b",
+        "\\b(?:Resolve|Compute|Classify|Derive)\\w*(?:State|Status)\\s*\\("
+      ]
     }
   }
 }

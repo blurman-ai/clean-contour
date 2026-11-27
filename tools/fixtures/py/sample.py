@@ -190,3 +190,8 @@ request.json()
 parse_qs(body)
 SETTINGS["documents"]
 SETTINGS.get("documents")
+
+# C21
+def resolve_payload_status(payload): pass
+if episode.audio_path: pass
+row.get("audio_path")

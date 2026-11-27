@@ -1102,3 +1102,69 @@ def load_settings(raw: dict) -> Settings:      # the one decoder of the config f
     return Settings(documents={name: Document(name=body["name"], title=body["print"]["title"])
                                for name, body in raw["documents"].items()})
 ```
+
+## C21. State derived from another field of the same entity
+
+**Search:** functions that return or write a lifecycle state — names like
+`*_state`, `*_status`, `resolve_*`, `compute_*`, `classify_*`, `derive_*` — and
+branches in which a state literal is chosen from a non-state field of the same
+object. The non-state field is usually an artifact or an outcome: `audio_path`,
+`audio_url`, `file_path`, `result_url`, `output_path`, `download_url`,
+`completed_at`, `generated_at`, `finished_at`, `result`, `output`, `error`,
+`duration`. Signs: `if …path…: return "ready"`, `or payload.get("audio_path")`,
+`?? "ready"`, `payload.AudioPath is not null ? "ready"`. Look at tests that
+pass a stored `state` together with such a field and expect the state implied
+by the artifact.
+**Kotlin:** `payload.audioPath != null`, `completedAt != null`,
+`resultUrl.isNotBlank()`, `?: GenerationState.READY` or a `when` branch that
+returns a lifecycle state from one of these fields.
+**Go:** `if p.AudioPath != "" { return "ready" }`, `p.CompletedAt != nil`,
+`len(p.Output) > 0`, `p.Error != ""` in a function returning a state or status.
+**C#:** `payload.AudioPath is not null`, `payload.CompletedAt.HasValue`,
+`!string.IsNullOrEmpty(payload.ResultUrl)`, a ternary or `switch` arm that
+returns `Ready`/`Completed`/`Failed` from one of these fields.
+
+**Questions:**
+1. Does the fragment return or write a lifecycle state of an entity, or assert
+   the exact state returned by such a function?
+2. Is the choice of that state influenced by another field of the same entity
+   that is not its lifecycle state: an artifact path or URL, a result, output,
+   error, duration, or a completion timestamp? In a test, an input-output pair
+   in which the stored state says one thing and the artifact makes the result
+   another is "yes".
+3. Is a stored `state`/`status` of the entity visible in the fragment, while
+   the other field ignores it or has higher priority?
+
+**Dirty if:** 1 = yes and 2 = yes and 3 = yes.
+
+**Does not count:** a separate artifact-availability field (`playable_audio_path`,
+`download_url`) returned next to the lifecycle state; a migration or backfill
+that fills the stored state once; a report or metric that does not return the
+entity's lifecycle state; a writer that stores the new state and the artifact
+as data of the same transition. Tests that only mirror a pass-through of the
+stored state are not separate places; a test whose input-output pair requires
+an artifact to outrank the stored state is a dirty expectation and a signal to
+find the production derivation.
+
+**Dirty:**
+```python
+def engine_payload_state(payload):
+    state = payload["state"]
+    if state in {"failed", "resource_limit_exceeded"}:
+        return "failed"
+    if state == "ready" or payload.get("audio_path"):
+        return "ready"
+    return "generating"
+```
+**Clean:**
+```python
+def engine_payload_state(payload):
+    return payload["state"]
+
+
+def payload_view(row):
+    return {
+        "state": row.state,
+        "playable_audio_url": row.audio_url,
+    }
+```
