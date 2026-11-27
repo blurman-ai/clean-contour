@@ -159,3 +159,35 @@ Sonnet column stays unmeasured.
 Reports: `exam/runs/2026-11-27-deepseek-c15-split.json` (first pass),
 `exam/runs/2026-11-27-deepseek-c7-c27-fix.json` (final). C7, C15, C27 and
 C28 join the cheap list; C1, C4, C8, C10, C14 remain strong.
+
+## DeepSeek table for all cards (issue #18)
+
+One provider (deepseek-v4-flash through `pi`), worst answer of 3 per fragment.
+Each row keeps the date of its latest measurement of the current card text;
+rows measured before a card edit carry the old text and are marked so.
+
+| Card | date | dirty found | clean flagged | verdict |
+|---|---|---|---|---|
+| C1 | 03.11 pass, 11.11 fail (drift) | — | — | strong list |
+| C2, C3, C5, C6, C9, C11, C12, C13, C16, C17 | 11.11 | pass 90/10 | ≤10% | cheap list |
+| C4 | 11.11 | fail | ≤10% | strong list |
+| C8 | 11.11 | fail | fail | strong list |
+| C10 | 11.11 | pass (wrong on real code) | pass | strong list (policy) |
+| C14 | 11.11 | fail | ≤10% | strong list |
+| C18 | 27.11 | 15/15 | 0/15 | cheap list |
+| C19 | 27.11 | 15/15 | 0/15 | cheap list |
+| C20 | 27.11 | 15/15 | 0/15 | cheap list |
+| C21 | 27.11 | dev 10/10, holdout 5/5 | 0 | cheap list |
+| C22 | 27.11 | 10/10 | 0/10 | cheap list |
+| C23 | 27.11 | 10/10 (re-run after one clean fragment rewritten) | 0/10 | cheap list |
+| C24 | 27.11 | 10/10 | 1/10 (at the gate) | cheap list |
+| C25 | 27.11 | 10/10 (re-run after card clarified) | 0/11 | cheap list |
+| C26 | 27.11 | 10/10 | 0/10 | cheap list |
+| C7 | 27.11 (rewritten Q1) | 10/10 | 0/12 | cheap list |
+| C15 | 27.11 (split, code-not-read half) | 10/10 | 0/10 | cheap list |
+| C27 | 27.11 (new) | 10/10 | 1/10 (at the gate) | cheap list |
+| C28 | 27.11 (new) | 9/10 (at the gate) | 1/10 (at the gate) | cheap list |
+
+Haiku and Sonnet were not re-measured after the C15 split and the new cards:
+this run's model budget is DeepSeek only, so those columns stand as of 11.11
+and are not comparable with the new rows.
