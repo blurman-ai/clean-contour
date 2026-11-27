@@ -165,3 +165,8 @@ function onPaid(payment: Payment) {
 }
   void sendReceipt(payment);
 pullFeed(supplier).then(() => {
+
+// C25
+const overdue = Date.now() > task.dueAt;
+const bucket = Math.random() < 0.5 ? "a" : "b";
+const stamped = new Date();

@@ -158,3 +158,10 @@ fun onPaid(payment: Payment) {
     GlobalScope.launch { receiptMailer.send(payment) }
 }
 thread(start = true) { syncLedger(payment) }
+
+// C25
+val expired = Instant.now() > coupon.validUntil
+val dedup = UUID.randomUUID().toString()
+val pick = Random.nextInt(100)
+val stamp = LocalDateTime.now()
+val day = LocalDate.now()

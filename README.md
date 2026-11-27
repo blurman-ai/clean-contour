@@ -11,8 +11,8 @@ Measured results on agent-written open-source projects: [FIELD-RESULTS.md](FIELD
 | Path | What it is | Who reads it |
 |---|---|---|
 | `RULES.md` | 17 principles, signs of a dirty contour, how to move an entity into the clean contour | an agent that writes or changes an entity with a lifecycle |
-| `skills/clean-contour-check/SKILL.md` | 24 cards (C1–C24): search pattern, closed questions, verdict rule, exclusions, dirty and clean example | an agent that checks code |
-| `exam/` | runner and corpus of 557 labelled fragments | whoever edits a card or picks a model for checking |
+| `skills/clean-contour-check/SKILL.md` | 25 cards (C1–C25): search pattern, closed questions, verdict rule, exclusions, dirty and clean example | an agent that checks code |
+| `exam/` | runner and corpus of 578 labelled fragments | whoever edits a card or picks a model for checking |
 
 ## Install as a Claude Code plugin
 
@@ -91,11 +91,11 @@ C18, C19 and C20 were added on 24.11.2026 and measured the same way (3 answers p
 
 C21 was added on 27.11.2026 and measured on deepseek-v4-flash with 3 answers per fragment, worst answer counts: dev 10/10 dirty found and 0/10 clean flagged, holdout 5/5 dirty found and 0/5 clean flagged (see `exam/results/2026-11-27/`), so it joins the cheap list.
 
-C22 (an external call without a deadline) was added the same day and measured the same way, whole corpus (20 fragments × 3): 10/10 dirty found, 0/10 clean flagged (see `exam/results/2026-11-27/`), and joins the cheap list. C23 (a side effect hidden in a constructor, a getter, or an ORM hook) passed the same gate after one clean fragment was rewritten to the card's own clean case (see `exam/results/2026-11-27/`). C24 (a background task whose failure is lost) passed with 10/10 dirty and 1/10 clean flagged, exactly at the gate (see `exam/results/2026-11-27/`).
+C22 (an external call without a deadline) was added the same day and measured the same way, whole corpus (20 fragments × 3): 10/10 dirty found, 0/10 clean flagged (see `exam/results/2026-11-27/`), and joins the cheap list. C23 (a side effect hidden in a constructor, a getter, or an ORM hook) passed the same gate after one clean fragment was rewritten to the card's own clean case (see `exam/results/2026-11-27/`). C24 (a background task whose failure is lost) passed with 10/10 dirty and 1/10 clean flagged, exactly at the gate (see `exam/results/2026-11-27/`). C25 (the clock or the random generator called inside a rule) failed its first pass with 8/10 recall and passed 10/10 / 0/11 after the card named the boundary caller and the writer-computed stored deadline explicitly (see `exam/results/2026-11-27/`).
 
 | Cards | Who runs them |
 |---|---|
-| C2, C3, C5, C6, C9, C11, C12, C13, C16, C17, C18, C19, C20, C21, C22, C23, C24 | a cheap model is enough |
+| C2, C3, C5, C6, C9, C11, C12, C13, C16, C17, C18, C19, C20, C21, C22, C23, C24, C25 | a cheap model is enough |
 | C1, C4, C7, C8, C10, C14, C15 | a strong model or a human |
 
 C10 passes the exam but goes to a strong model: on a real backend 2 of 15 places it flagged were dirty. A dirty verdict from a cheap model on real code is a candidate for reading, not a finding: on that product 7 of the 60 places DeepSeek flagged held up when read, on the C# projects below about half.

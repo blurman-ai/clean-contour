@@ -1,0 +1,615 @@
+# C25 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C25-01
+  card: C25
+  expected: dirty
+  path: app/dispatch/retry.py
+  why: The worker's own clock decides whether a delivery may retry, so a skewed clock moves the rule.
+  source: A dispatch worker gating retries by a deadline.
+  code: |
+    from datetime import datetime, timedelta
+
+    RETRY_AFTER = timedelta(seconds=90)
+
+
+    def retry_allowed(attempt) -> bool:
+        if attempt.tries >= 5:
+            return False
+        return attempt.last_error_at + RETRY_AFTER <= datetime.now()
+
+
+    def next_run(attempt, now: datetime) -> datetime:
+        return attempt.last_error_at + RETRY_AFTER
+
+
+    def pump(queue) -> int:
+        sent = 0
+        for attempt in queue.pending():
+            if retry_allowed(attempt):
+                deliver(attempt)
+                sent += 1
+        return sent
+
+- id: C25-02
+  card: C25
+  expected: dirty
+  path: app/access/sessions.py
+  why: The expiry rule reads utcnow directly and writes a state on the session, so the transition depends on the process clock.
+  source: A session service forcing a logout on expiry.
+  code: |
+    from datetime import datetime, timezone
+
+
+    def session_state(user) -> str:
+        valid_until = user.session_valid_until
+        if valid_until is None:
+            return "anonymous"
+        if datetime.now(timezone.utc) > valid_until:
+            user.session_state = "expired"
+            return "expired"
+        return user.session_state
+
+
+    def require_user(user) -> None:
+        state = session_state(user)
+        if state in ("anonymous", "expired"):
+            raise NotAuthenticated(state)
+
+
+    def open_session(user, ttl_seconds: int) -> datetime:
+        user.session_valid_until = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+        return user.session_valid_until
+
+- id: C25-03
+  card: C25
+  expected: dirty
+  path: app/payments/submit.py
+  why: A fresh random idempotency key per attempt — retries can no longer be deduplicated, the random value decides the key.
+  source: A payment submit generating its own dedup key.
+  code: |
+    import uuid
+
+
+    def submit(payment, gateway) -> str:
+        key = uuid.uuid4().hex
+        return gateway.charge(
+            card=payment.card_token,
+            amount=payment.amount,
+            currency=payment.currency,
+            idempotency_key=key,
+        )
+
+
+    def submit_with_retry(payment, gateway, tries: int = 3) -> str:
+        last = None
+        for _ in range(tries):
+            try:
+                return submit(payment, gateway)
+            except GatewayTimeout as e:
+                last = e
+        raise last
+
+- id: C25-04
+  card: C25
+  expected: dirty
+  path: src/tasks/overdue.ts
+  why: The browser clock decides the expired state of a stored task — the rule reads Date.now() instead of a server field.
+  source: A task tracker marking overdue items in a rule module.
+  code: |
+    type Task = { id: string; dueAt: number; state: "open" | "expired" | "done" };
+
+    export function isOverdue(task: Task): boolean {
+      return task.state === "open" && Date.now() > task.dueAt;
+    }
+
+    export function applyOverdue(task: Task): Task {
+      if (isOverdue(task)) {
+        return { ...task, state: "expired" };
+      }
+      return task;
+    }
+
+    export function rollup(tasks: Task[]): { open: number; expired: number } {
+      const next = tasks.map(applyOverdue);
+      return {
+        open: next.filter((t) => t.state === "open").length,
+        expired: next.filter((t) => t.state === "expired").length,
+      };
+    }
+
+- id: C25-05
+  card: C25
+  expected: dirty
+  path: src/flags/bucket.ts
+  why: Math.random() decides which pricing variant a customer lands in — the same order can flip variant between calls, the rule has no stored assignment.
+  source: A feature flag splitting customers by coin flip at read time.
+  code: |
+    type Variant = "control" | "treatment";
+
+    export function pickVariant(orderId: string): Variant {
+      return Math.random() < 0.5 ? "control" : "treatment";
+    }
+
+    export function shippingFee(orderId: string, base: number): number {
+      const variant = pickVariant(orderId);
+      return variant === "treatment" ? Math.round(base * 0.9) : base;
+    }
+
+    export function renderBadge(orderId: string): string {
+      return pickVariant(orderId) === "treatment" ? "sale" : "";
+    }
+
+    export function summarize(rows: { fee: number }[]): number {
+      return rows.reduce((s, r) => s + r.fee, 0);
+    }
+
+- id: C25-06
+  card: C25
+  expected: dirty
+  path: internal/lease/holder.go
+  why: The takeover decision reads time.Now() directly inside the rule — whether a lease counts as lost depends on the local clock.
+  source: A job lease holder deciding to take over stalled work.
+  code: |
+    package lease
+
+    import "time"
+
+    type Lease struct {
+        JobID string
+        Owner string
+        Until time.Time
+    }
+
+    func Stalled(l Lease) bool {
+        return time.Now().After(l.Until)
+    }
+
+    func TakeOver(l Lease, newOwner string) (Lease, bool) {
+        if !Stalled(l) {
+            return l, false
+        }
+        next := Lease{JobID: l.JobID, Owner: newOwner, Until: time.Now().Add(5 * time.Minute)}
+        return next, true
+    }
+
+- id: C25-07
+  card: C25
+  expected: clean
+  path: app/src/main/kotlin/promo/Coupon.kt
+  why: The coupon rule judge takes the moment as a parameter and apply is the thin boundary caller that reads the clock once to hand it in.
+  source: A promo module judging coupons.
+  code: |
+    package promo
+
+    import java.time.Instant
+
+    data class Coupon(val code: String, val validUntil: Instant, val redeemed: Int, val limit: Int)
+
+    sealed class Verdict {
+        object Ok : Verdict()
+        data class Refused(val why: String) : Verdict()
+    }
+
+    fun judge(coupon: Coupon, at: Instant): Verdict {
+        if (coupon.redeemed >= coupon.limit) return Verdict.Refused("limit")
+        if (at > coupon.validUntil) return Verdict.Refused("expired")
+        return Verdict.Ok
+    }
+
+    fun apply(coupon: Coupon): Verdict = judge(coupon, Instant.now())
+
+- id: C25-08
+  card: C25
+  expected: dirty
+  path: Services/Reservations/Expiry.cs
+  why: The reservation expiry reads UtcNow inside the rule and writes a terminal state from it.
+  source: A booking service cancelling lapsed reservations.
+  code: |
+    using System;
+
+    namespace Services.Reservations;
+
+    public enum ReservationState { Hold, Confirmed, Cancelled }
+
+    public sealed class Reservation
+    {
+        public Guid Id { get; init; }
+        public ReservationState State { get; set; }
+        public DateTime HoldsUntil { get; init; }
+    }
+
+    public static class Expiry
+    {
+        public static bool Lapsed(Reservation r) => DateTime.UtcNow > r.HoldsUntil;
+
+        public static void Sweep(Reservation r)
+        {
+            if (r.State == ReservationState.Hold && Lapsed(r))
+            {
+                r.State = ReservationState.Cancelled;
+            }
+        }
+    }
+
+- id: C25-09
+  card: C25
+  expected: dirty
+  path: app/api/limits.py
+  why: The rate-limit window is measured by time.time() inside the rule — the limit depends on the process clock and resets silently on restart.
+  source: An API limiter with a hand-rolled sliding window.
+  code: |
+    import time
+
+    WINDOW = 60.0
+    LIMIT = 30
+
+
+    def allow(client: str, ledger: dict) -> bool:
+        hits = ledger.get(client, [])
+        now = time.time()
+        fresh = [t for t in hits if now - t < WINDOW]
+        if len(fresh) >= LIMIT:
+            ledger[client] = fresh
+            return False
+        fresh.append(now)
+        ledger[client] = fresh
+        return True
+
+
+    def remaining(client: str, ledger: dict) -> int:
+        now = time.time()
+        fresh = [t for t in ledger.get(client, []) if now - t < WINDOW]
+        return max(0, LIMIT - len(fresh))
+
+- id: C25-10
+  card: C25
+  expected: dirty
+  path: Services/Webhooks/Delivery.cs
+  why: The idempotency key is a fresh GUID per attempt — retries reach the receiver under different keys and cannot be deduplicated.
+  source: A webhook dispatcher inventing its event id per attempt.
+  code: |
+    using System;
+
+    namespace Services.Webhooks;
+
+    public sealed class Dispatcher
+    {
+        private readonly Sender _sender = new Sender();
+
+        public async Task DeliverAsync(Subscription sub, Payload payload)
+        {
+            var attempt = new OutgoingEvent
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                SubscriptionId = sub.Id,
+                Body = payload.Body,
+            };
+            await _sender.SendAsync(sub.Url, attempt, idempotencyKey: attempt.Id);
+        }
+
+        public async Task DeliverWithRetryAsync(Subscription sub, Payload payload, int tries = 3)
+        {
+            for (var i = 0; i < tries; i++)
+            {
+                try
+                {
+                    await DeliverAsync(sub, payload);
+                    return;
+                }
+                catch (SendException) when (i < tries - 1) { }
+            }
+        }
+    }
+
+- id: C25-11
+  card: C25
+  expected: clean
+  path: app/dispatch/retry.py
+  why: Near miss of the deadline rule — now arrives as a parameter, so the rule is clock-independent and testable.
+  source: The same dispatcher, the injected variant.
+  code: |
+    from datetime import datetime, timedelta
+
+    RETRY_AFTER = timedelta(seconds=90)
+
+
+    def retry_allowed(attempt, now: datetime) -> bool:
+        if attempt.tries >= 5:
+            return False
+        return attempt.last_error_at + RETRY_AFTER <= now
+
+
+    def pump(queue, clock) -> int:
+        sent = 0
+        for attempt in queue.pending():
+            if retry_allowed(attempt, clock.now()):
+                deliver(attempt)
+                sent += 1
+        return sent
+
+- id: C25-12
+  card: C25
+  expected: clean
+  path: app/access/sessions.py
+  why: Near miss of the expiry — utcnow only stamps created_at together with the transition data; the rule itself reads the stored field.
+  source: The same service, the stamping variant.
+  code: |
+    from datetime import datetime, timezone, timedelta
+
+
+    def open_session(user, ttl_seconds: int) -> None:
+        user.session_valid_until = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+        user.session_state = "active"
+        user.session_opened_at = datetime.now(timezone.utc)
+
+
+    def session_state(user) -> str:
+        return user.session_state
+
+
+    def close_session(user) -> None:
+        user.session_state = "closed"
+        user.session_closed_at = datetime.now(timezone.utc)
+
+- id: C25-13
+  card: C25
+  expected: clean
+  path: app/clock.py
+  why: The clock adapter itself — the one place in the project that wraps the system clock; rules take its value as a parameter.
+  source: The project clock module.
+  code: |
+    from datetime import datetime, timezone
+
+
+    class SystemClock:
+        def now(self) -> datetime:
+            return datetime.now(timezone.utc)
+
+
+    class FixedClock:
+        def __init__(self, moment: datetime):
+            self._moment = moment
+
+        def now(self) -> datetime:
+            return self._moment
+
+
+    def default_clock() -> SystemClock:
+        return SystemClock()
+
+
+    def iso_now(clock) -> str:
+        return clock.now().isoformat()
+
+- id: C25-14
+  card: C25
+  expected: clean
+  path: src/ui/timeago.ts
+  why: Near miss of Date.now() — it only formats a stored timestamp for display, no rule reads the value.
+  source: A UI helper rendering ages of stored items.
+  code: |
+    export function timeAgo(storedAt: number, now: number = Date.now()): string {
+      const seconds = Math.max(0, Math.floor((now - storedAt) / 1000));
+      if (seconds < 60) return `${seconds}s ago`;
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return `${minutes}m ago`;
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return `${hours}h ago`;
+      return `${Math.floor(hours / 24)}d ago`;
+    }
+
+    export function renderRow(item: { label: string; createdAt: number }): string {
+      return `${item.label} — ${timeAgo(item.createdAt)}`;
+    }
+
+    export function sortNewestFirst<T extends { createdAt: number }>(items: T[]): T[] {
+      return [...items].sort((a, b) => b.createdAt - a.createdAt);
+    }
+
+- id: C25-15
+  card: C25
+  expected: clean
+  path: src/orders/newId.ts
+  why: Near miss of Math.random — the random value only names a new row; it decides no rule and no key that must survive retries.
+  source: An id factory for new rows.
+  code: |
+    export function newOrderId(): string {
+      const rnd = Math.random().toString(36).slice(2, 10);
+      return `ord_${rnd}`;
+    }
+
+    export function createOrderRow(customerId: string, total: number) {
+      return {
+        id: newOrderId(),
+        customerId,
+        total,
+        createdAt: new Date().toISOString(),
+      };
+    }
+
+    export function rowsForCustomer(rows: OrderRow[], customerId: string): OrderRow[] {
+      return rows.filter((r) => r.customerId === customerId);
+    }
+
+- id: C25-16
+  card: C25
+  expected: clean
+  path: internal/clock/clock.go
+  why: The clock adapter itself in Go — the one place that calls time.Now(); rules receive the value.
+  source: The project clock package.
+  code: |
+    package clock
+
+    import "time"
+
+    type Clock interface {
+        Now() time.Time
+    }
+
+    type Real struct{}
+
+    func (Real) Now() time.Time { return time.Now() }
+
+    type Fixed struct {
+        Moment time.Time
+    }
+
+    func (f Fixed) Now() time.Time { return f.Moment }
+
+    func Default() Clock { return Real{} }
+
+- id: C25-17
+  card: C25
+  expected: clean
+  path: app/src/main/kotlin/promo/Audit.kt
+  why: Near miss of Instant.now() — the value lands in a log line only; the coupon rule reads the stored redemption row.
+  source: The same promo module, the logging variant.
+  code: |
+    package promo
+
+    import java.time.Instant
+
+    class Audit(private val log: (String) -> Unit) {
+        fun judged(coupon: Coupon, verdict: Verdict) {
+            log("coupon ${coupon.code} judged ${verdict::class.simpleName} at ${Instant.now()}")
+        }
+    }
+
+    fun applyStored(coupon: Coupon, redemption: Redemption?): Verdict {
+        if (redemption != null && redemption.at > coupon.validUntil) {
+            return Verdict.Refused("expired")
+        }
+        if (coupon.redeemed >= coupon.limit) {
+            return Verdict.Refused("limit")
+        }
+        return Verdict.Ok
+    }
+
+- id: C25-18
+  card: C25
+  expected: clean
+  path: Services/Reservations/Factory.cs
+  why: Near miss of UtcNow and NewGuid — the factory stamps a new row's key and creation time, which the card's does-not-count names.
+  source: A reservation factory creating new rows.
+  code: |
+    using System;
+
+    namespace Services.Reservations;
+
+    public sealed class ReservationFactory
+    {
+        private readonly TimeSpan _hold;
+
+        public ReservationFactory(TimeSpan hold) => _hold = hold;
+
+        public Reservation New(Guid listingId, Guid customer)
+        {
+            return new Reservation
+            {
+                Id = Guid.NewGuid(),
+                ListingId = listingId,
+                CustomerId = customer,
+                State = ReservationState.Hold,
+                CreatedAt = DateTime.UtcNow,
+                HoldsUntil = DateTime.UtcNow + _hold,
+            };
+        }
+    }
+
+- id: C25-19
+  card: C25
+  expected: clean
+  path: app/dispatch/backoff.py
+  why: Near miss of random — the jitter only spaces the sleep between retries; it decides neither the outcome nor any key.
+  source: A retry loop with jittered backoff.
+  code: |
+    import random
+    import time
+
+    BASE_DELAY = 2.0
+    MAX_DELAY = 30.0
+
+
+    def sleep_jitter(tries: int) -> None:
+        cap = min(MAX_DELAY, BASE_DELAY * 2 ** tries)
+        time.sleep(random.uniform(0, cap))
+
+
+    def deliver(attempt) -> bool:
+        for try_no in range(4):
+            try:
+                send(attempt)
+                return True
+            except TransportError:
+                if try_no == 3:
+                    raise
+                sleep_jitter(try_no)
+        return False
+
+- id: C25-20
+  card: C25
+  expected: clean
+  path: Services/Webhooks/Delivery.cs
+  why: Near miss of NewGuid per attempt — the key comes from the payload's stored event id, so retries deduplicate; the GUID only names the local row.
+  source: The same dispatcher, the stable-key variant.
+  code: |
+    using System;
+
+    namespace Services.Webhooks;
+
+    public sealed class Dispatcher
+    {
+        private readonly Sender _sender = new Sender();
+
+        public async Task DeliverAsync(Subscription sub, Payload payload)
+        {
+            var attempt = new OutgoingEvent
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                SubscriptionId = sub.Id,
+                Body = payload.Body,
+            };
+            await _sender.SendAsync(sub.Url, attempt, idempotencyKey: payload.EventId);
+        }
+
+        public async Task DeliverWithRetryAsync(Subscription sub, Payload payload, int tries = 3)
+        {
+            for (var i = 0; i < tries; i++)
+            {
+                try
+                {
+                    await DeliverAsync(sub, payload);
+                    return;
+                }
+                catch (SendException) when (i < tries - 1) { }
+            }
+        }
+    }
+- id: C25-21
+  card: C25
+  expected: dirty
+  path: app/src/main/kotlin/promo/Expiry.kt
+  why: The expiry rule calls Instant.now() at decision time — whether a coupon counts as expired depends on the device clock.
+  source: A promo expiry rule reading the clock itself.
+  code: |
+    package promo
+
+    import java.time.Instant
+
+    data class Coupon(val code: String, val validUntil: Instant, val redeemed: Int, val limit: Int)
+
+    sealed class Verdict {
+        object Ok : Verdict()
+        data class Refused(val why: String) : Verdict()
+    }
+
+    fun isExpired(coupon: Coupon): Boolean = Instant.now() > coupon.validUntil
+
+    fun judge(coupon: Coupon): Verdict {
+        if (coupon.redeemed >= coupon.limit) return Verdict.Refused("limit")
+        if (isExpired(coupon)) return Verdict.Refused("expired")
+        return Verdict.Ok
+    }
+
+    fun usable(coupons: List<Coupon>): List<Coupon> {
+        return coupons.filter { judge(it) is Verdict.Ok }
+    }

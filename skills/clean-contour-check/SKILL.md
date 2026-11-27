@@ -1293,3 +1293,44 @@ def on_payment(payment, tasks: TaskSet):
     tasks.add(t)                        # the registry holds it
     t.add_done_callback(tasks.record)   # and records the failure
 ```
+
+## C25. The clock or the random generator called inside a rule
+
+**Search:** `datetime.now(`, `datetime.utcnow(`, `time.time(`, `uuid.uuid4(`,
+`random.`; **TS:** `Date.now(`, `new Date(`, `Math.random(`. **Go:** `time.Now(`,
+`uuid.New(`, `rand.`. **Kotlin:** `Instant.now(`, `LocalDateTime.now(`,
+`LocalDate.now(`, `UUID.randomUUID(`, `Random.next`. **C#:** `DateTime.Now`,
+`DateTime.UtcNow`, `Guid.NewGuid(`, `Random.`.
+
+**Questions:**
+1. Does the fragment contain the rule that decides, and does that rule call the
+   system clock or a random generator directly, rather than receive the value (a
+   timestamp, an id) or a clock/id provider as a parameter, or read a timestamp
+   the entity already stores? A thin boundary caller whose job is to read the
+   clock once and hand the value to the rule is not the rule; the rule is what
+   decides.
+2. Does that value decide a rule: a deadline or expiry, a state or transition,
+   a rate-limit window, a retry or deduplication key that must survive retries
+   (a key regenerated per attempt makes retries undetectable) — rather than
+   only a created-at/updated-at stamp written together with the transition
+   data, a log line, or display formatting of a stored value?
+
+**Dirty if:** 1 = yes and 2 = yes.
+
+**Does not count:** the clock/id adapter itself — the one place that wraps
+`now()`/`new_id()` for the project; a writer computing a stored deadline or
+stamp (`valid_until`, `holds_until`, `created_at`) from the clock as transition
+data — the later rule reads the stored value, the dirt is the rule that calls
+the clock at decision time; display formatting of a stored timestamp; a log
+line; a new row's primary key from a random generator; tests.
+
+**Dirty:**
+```python
+def retry_allowed(attempt):
+    return attempt.next_retry_at <= datetime.now()   # the worker's clock decides the rule
+```
+**Clean:**
+```python
+def retry_allowed(attempt, now: datetime) -> bool:
+    return attempt.next_retry_at <= now              # the caller hands the time in
+```

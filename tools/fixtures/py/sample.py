@@ -230,3 +230,11 @@ def on_paid(payment):
     threading.Thread(target=sync_ledger, args=(payment,)).start()
     t = loop.create_task(drain_queue())
     _thread.start_new_thread(beat, ())
+
+# C25
+def retry_allowed(attempt):
+    return attempt.next_retry_at <= datetime.now()
+key = uuid.uuid4().hex
+jitter = random.uniform(0, 1)
+stamp = time.time()
+legacy = datetime.utcnow()

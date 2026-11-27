@@ -134,3 +134,8 @@ void OnPaid(Payment payment)
     _ = Task.Run(() => receiptMailer.SendAsync(payment));
     Task.Factory.StartNew(() => SyncLedger(payment));
 }
+
+// C25
+var expired = DateTime.UtcNow > reservation.HoldsUntil;
+var dedup = Guid.NewGuid().ToString();
+var rng = new Random();

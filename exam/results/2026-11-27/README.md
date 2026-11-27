@@ -95,3 +95,23 @@ One answer on a dirty fragment wavered between dirty and unclear (unstable
 column), all three still landed dirty.
 
 Report: `exam/runs/2026-11-27-deepseek-c24.json`.
+
+## C25 on a weak model
+
+C25 (the clock or the random generator called inside a rule) failed the first
+pass: recall 8/10 — the boundary caller `apply = judge(coupon, Instant.now())`
+was authored as dirty while two answers read it clean (the rule itself takes
+the moment as a parameter), and C25-10 was authored wrong (the GUID filled the
+row's primary key, not the idempotency key); false 2/10 — two clean fragments
+were writers computing a stored deadline (`valid_until`, `holds_until`) from
+the clock, and the card had no writer-deadline exemption. The card text was
+clarified, not weakened into vagueness: question 1 targets the rule that
+decides (a thin boundary caller handing the value in is not the rule), and
+Does-not-count now names the writer computing a stored deadline as transition
+data. C25-07 relabeled clean, C25-10 fixed so the GUID is the idempotency key
+per attempt, C25-21 added (the rule reads the clock itself, Kotlin). Re-run on
+deepseek-v4-flash, same settings: 10/10 dirty found, 0/11 clean flagged.
+
+Reports: `exam/runs/2026-11-27-deepseek-c25.json` (first pass, fail),
+`exam/runs/2026-11-27-deepseek-c25-fix.json` (final). C25 joins the cheap
+list in `routing.json`.

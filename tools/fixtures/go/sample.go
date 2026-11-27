@@ -135,3 +135,8 @@ func onPaid(payment Payment) {
     go func() { receiptMailer.Send(payment) }()
     go syncLedger(payment)
 }
+
+// C25
+if time.Now().After(lease.Until) { takeover() }
+id := uuid.New()
+n := rand.Intn(100)

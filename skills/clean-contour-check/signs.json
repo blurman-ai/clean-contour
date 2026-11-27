@@ -844,6 +844,37 @@
     "Task\\.Factory\\.StartNew\\(",
     "^\\s*_\\s*=\\s*(async )?"
    ]
+  },
+  "C25": {
+   "py": [
+    "datetime\\.now\\(",
+    "datetime\\.utcnow\\(",
+    "\\btime\\.time\\(",
+    "uuid4\\(",
+    "\\brandom\\.(random|randint|randrange|choice|uniform|choices)\\("
+   ],
+   "ts": [
+    "Date\\.now\\(",
+    "new Date\\(",
+    "Math\\.random\\("
+   ],
+   "kt": [
+    "Instant\\.now\\(",
+    "LocalDateTime\\.now\\(",
+    "LocalDate\\.now\\(",
+    "UUID\\.randomUUID\\(",
+    "Random\\.(nextInt|nextLong|nextDouble)\\("
+   ],
+   "go": [
+    "time\\.Now\\(",
+    "uuid\\.New\\(",
+    "\\brand\\.(Int|Intn|Int31|Float64)\\("
+   ],
+   "cs": [
+    "DateTime\\.(Now|UtcNow)\\b",
+    "Guid\\.NewGuid\\(",
+    "\\bnew Random\\("
+   ]
   }
  }
 }
