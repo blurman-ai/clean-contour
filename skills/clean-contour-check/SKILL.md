@@ -1334,3 +1334,38 @@ def retry_allowed(attempt):
 def retry_allowed(attempt, now: datetime) -> bool:
     return attempt.next_retry_at <= now              # the caller hands the time in
 ```
+
+## C26. An environment variable read inside business logic
+
+**Search:** `os.environ[`, `os.environ.get(`, `os.getenv(`; **TS:**
+`process.env.X`, `process.env["X"]`. **Go:** `os.Getenv(`, `os.LookupEnv(`.
+**Kotlin:** `System.getenv(`. **C#:** `Environment.GetEnvironmentVariable(`.
+
+**Questions:**
+1. Does the fragment read an environment variable directly, outside the module
+   whose job is configuration (a settings module, a config loader, a
+   composition root or entry point)? If the module is the one place that loads
+   configuration, the answer is "no", even when several variables are read.
+2. Does that value drive the behavior of the domain: a branch, a URL or host of
+   another system, a limit or threshold, a secret, a feature flag, a state or
+   refusal — rather than only diagnostics (a log level, a verbose flag, a
+   sample rate)?
+
+**Dirty if:** 1 = yes and 2 = yes.
+
+**Does not count:** the settings or config module itself and the process entry
+point that read variables once and build typed values; a read used only for
+diagnostics; tests.
+
+**Dirty:**
+```python
+def refund_deadline(order):
+    if os.getenv("PAYMENTS_FAST_REFUND") == "1":
+        return 60            # the flag is read at the rule, the branch follows it
+    return 3600
+```
+**Clean:**
+```python
+def refund_deadline(order, settings: PaymentsSettings):
+    return settings.fast_refund_seconds   # the loader decides what the flag means
+```

@@ -170,3 +170,7 @@ pullFeed(supplier).then(() => {
 const overdue = Date.now() > task.dueAt;
 const bucket = Math.random() < 0.5 ? "a" : "b";
 const stamped = new Date();
+
+// C26
+if (process.env.PAYMENTS_FAST_REFUND === "1") { return 60; }
+const host = process.env["PAYMENTS_HOST"];

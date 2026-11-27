@@ -1,0 +1,537 @@
+# C26 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C26-01
+  card: C26
+  expected: dirty
+  path: app/payments/rules.py
+  why: The refund branch reads a feature flag straight from the environment at the rule, so deployment config silently changes payment behavior.
+  source: A payments service gating fast refunds by a flag.
+  code: |
+    import os
+
+
+    def refund_deadline(order) -> int:
+        if os.getenv("PAYMENTS_FAST_REFUND") == "1":
+            return 60
+        return 3600
+
+
+    def queue_refund(order, now_ts: float) -> dict:
+        deadline = now_ts + refund_deadline(order)
+        return {"order_id": order.id, "refund_after": deadline}
+
+
+    def eligible(order) -> bool:
+        return order.paid_at is not None and order.refund_id is None
+
+- id: C26-02
+  card: C26
+  expected: dirty
+  path: app/export/limit.py
+  why: The batch size limit comes from an env read inside the rule — one service instance can run with a different limit than another.
+  source: An export job reading its page limit from the environment.
+  code: |
+    import os
+
+    DEFAULT_LIMIT = 500
+
+
+    def page_limit() -> int:
+        raw = os.environ.get("EXPORT_PAGE_LIMIT")
+        if raw is None:
+            return DEFAULT_LIMIT
+        return max(50, int(raw))
+
+
+    def export_rows(cursor) -> int:
+        total = 0
+        while True:
+            rows = fetch_page(cursor, page_limit())
+            emit(rows)
+            total += len(rows)
+            if len(rows) < page_limit():
+                break
+        return total
+
+- id: C26-03
+  card: C26
+  expected: dirty
+  path: app/integrations/switch.py
+  why: The provider base URL is picked per request from an env variable, so the traffic split lives in the process environment instead of config.
+  source: A shipping integrator switching providers by env.
+  code: |
+    import os
+
+    PRIMARY = "https://post.example.invalid/api"
+    SHADOW = "https://post-sandbox.example.invalid/api"
+
+
+    def base_url(region: str) -> str:
+        if os.getenv("SHIPPING_USE_SANDBOX") == region:
+            return SHADOW
+        return PRIMARY
+
+
+    def book_shipment(order) -> dict:
+        url = base_url(order.region)
+        return post_json(f"{url}/shipments", payload=order.to_payload())
+
+- id: C26-04
+  card: C26
+  expected: dirty
+  path: src/search/boost.ts
+  why: The ranking weight is read from process.env at the rule — a config value decides search behavior where it runs, not where it is declared.
+  source: A search service weighting results by an env knob.
+  code: |
+    const DEFAULT_WEIGHT = 1.5;
+
+    export function recencyWeight(): number {
+      const raw = process.env.SEARCH_RECENCY_WEIGHT;
+      if (!raw) return DEFAULT_WEIGHT;
+      const parsed = Number(raw);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_WEIGHT;
+    }
+
+    export function score(row: { hits: number; ageDays: number }): number {
+      return row.hits * recencyWeight() / (1 + row.ageDays);
+    }
+
+    export function rank(rows: { hits: number; ageDays: number }[]): number[] {
+      return rows.map(score).sort((a, b) => b - a);
+    }
+
+- id: C26-05
+  card: C26
+  expected: dirty
+  path: src/notify/mailer.ts
+  why: The send path branches on an env flag at the call site, so the mail route depends on the environment of the worker that happens to pick up the job.
+  source: A notifier choosing a mail route from the environment.
+  code: |
+    type Letter = { to: string; body: string };
+
+    export async function route(letter: Letter): Promise<string> {
+      if (process.env.MAIL_VIA_RELAY === "1") {
+        return "https://relay.example.invalid/v2/send";
+      }
+      return "https://smtp.example.invalid/api";
+    }
+
+    export async function send(letter: Letter): Promise<void> {
+      const url = await route(letter);
+      await postJson(url, letter);
+    }
+
+    export async function sendBatch(letters: Letter[]): Promise<number> {
+      for (const letter of letters) {
+        await send(letter);
+      }
+      return letters.length;
+    }
+
+- id: C26-06
+  card: C26
+  expected: dirty
+  path: internal/ratelimit/window.go
+  why: The limit threshold is read from the environment inside the rule — a mis-set variable on one pod silently changes the public limit.
+  source: A Go service reading its rate limit from the environment.
+  code: |
+    package ratelimit
+
+    import (
+        "os"
+        "strconv"
+    )
+
+    const DefaultLimit = 100
+
+    func Limit() int {
+        raw := os.Getenv("API_RATE_LIMIT")
+        if raw == "" {
+            return DefaultLimit
+        }
+        n, err := strconv.Atoi(raw)
+        if err != nil || n <= 0 {
+            return DefaultLimit
+        }
+        return n
+    }
+
+    func Allow(client string, hits int) bool {
+        return hits < Limit()
+    }
+
+- id: C26-07
+  card: C26
+  expected: dirty
+  path: app/src/main/kotlin/ingest/Capture.kt
+  why: The ingest switch reads an env var per record — whether raw payloads are kept depends on the worker's environment.
+  source: A Kotlin ingest deciding payload retention by env.
+  code: |
+    package ingest
+
+    data class Record(val id: String, val body: ByteArray)
+
+    class Capture(private val store: Store) {
+
+        fun write(rec: Record) {
+            val keep = System.getenv("INGEST_KEEP_RAW") == "1"
+            if (keep) {
+                store.saveRaw(rec.id, rec.body)
+            }
+            store.saveParsed(rec.id, parse(rec.body))
+        }
+
+        fun written(rec: Record): Boolean = store.hasParsed(rec.id)
+    }
+
+- id: C26-08
+  card: C26
+  expected: dirty
+  path: Services/Billing/Dunning.cs
+  why: The dunning grace period comes from an environment read inside the rule, so the same customer can get different deadlines from different pods.
+  source: A C# dunning job reading its grace days from the environment.
+  code: |
+    using System;
+
+    namespace Services.Billing;
+
+    public static class Dunning
+    {
+        public static DateTime GraceUntil(Invoice invoice)
+        {
+            var days = 14;
+            var raw = Environment.GetEnvironmentVariable("BILLING_GRACE_DAYS");
+            if (int.TryParse(raw, out var parsed) && parsed > 0)
+            {
+                days = parsed;
+            }
+            return invoice.DueAt.AddDays(days);
+        }
+
+        public static bool SuspensionDue(Invoice invoice, DateTime now) => now > GraceUntil(invoice);
+    }
+
+- id: C26-09
+  card: C26
+  expected: dirty
+  path: app/vault/secrets.py
+  why: A signing secret is read from the environment at the point of use — the rule that signs tokens reaches into the process environment itself.
+  source: A token signer pulling its secret per call.
+  code: |
+    import hashlib
+    import hmac
+    import os
+
+
+    def sign_token(token_id: str) -> str:
+        secret = os.environ["TOKEN_SIGNING_SECRET"]
+        return hmac.new(secret.encode(), token_id.encode(), hashlib.sha256).hexdigest()
+
+
+    def verify(token_id: str, signature: str) -> bool:
+        expected = sign_token(token_id)
+        return hmac.compare_digest(expected, signature)
+
+
+    class TamperedToken(ValueError):
+        pass
+
+- id: C26-10
+  card: C26
+  expected: dirty
+  path: app/reports/mode.py
+  why: The report mode branch reads the environment at the rule — two runs of the same report can disagree because their environments differ.
+  source: A report builder choosing a mode from the environment.
+  code: |
+    import os
+
+    from app.reports.data import collect
+
+
+    def build_report(report_id: str) -> dict:
+        if os.getenv("REPORTS_LITE") == "1":
+            rows = collect(report_id, sample=100)
+        else:
+            rows = collect(report_id, sample=None)
+        return {"id": report_id, "rows": rows, "count": len(rows)}
+
+
+    def report_ref(report_id: str) -> str:
+        return f"reports/{report_id}.json"
+
+- id: C26-11
+  card: C26
+  expected: clean
+  path: app/settings.py
+  why: Near miss of the same reads — this module is the one configuration boundary — it reads the variables once and exposes typed values.
+  source: The settings module of the same service.
+  code: |
+    import os
+
+    from dataclasses import dataclass
+
+
+    def _int(name: str, default: int) -> int:
+        raw = os.environ.get(name)
+        try:
+            return int(raw) if raw else default
+        except ValueError:
+            return default
+
+
+    @dataclass(frozen=True)
+    class PaymentsSettings:
+        fast_refund: bool
+        fast_refund_seconds: int
+        refund_seconds: int
+        page_limit: int
+
+
+    def load_payments_settings() -> PaymentsSettings:
+        return PaymentsSettings(
+            fast_refund=os.getenv("PAYMENTS_FAST_REFUND") == "1",
+            fast_refund_seconds=_int("PAYMENTS_FAST_REFUND_SECONDS", 60),
+            refund_seconds=_int("PAYMENTS_REFUND_SECONDS", 3600),
+            page_limit=_int("EXPORT_PAGE_LIMIT", 500),
+        )
+
+- id: C26-12
+  card: C26
+  expected: clean
+  path: app/payments/rules.py
+  why: Near miss of the flag branch — the rule reads typed settings handed in at construction, the environment stays behind the loader.
+  source: The same rules, the settings-driven variant.
+  code: |
+    from app.settings import PaymentsSettings
+
+
+    def refund_deadline(order, settings: PaymentsSettings) -> int:
+        if order.region in settings.fast_refund_regions:
+            return settings.fast_refund_seconds
+        return settings.refund_seconds
+
+
+    def queue_refund(order, settings: PaymentsSettings, now_ts: float) -> dict:
+        deadline = now_ts + refund_deadline(order, settings)
+        return {"order_id": order.id, "refund_after": deadline}
+
+
+    def eligible(order) -> bool:
+        return order.paid_at is not None and order.refund_id is None
+
+- id: C26-13
+  card: C26
+  expected: clean
+  path: src/server/bootstrap.ts
+  why: Near miss of the reads — this is the composition root — it reads the variables once and builds the typed config object the app consumes.
+  source: The server entry point.
+  code: |
+    import { loadConfig } from "./config";
+
+    const config = loadConfig(process.env);
+
+    const server = createServer({
+      port: config.port,
+      mail: {
+        viaRelay: config.mail.viaRelay,
+        relayUrl: "https://relay.example.invalid/v2/send",
+      },
+      search: {
+        recencyWeight: config.search.recencyWeight,
+      },
+    });
+
+    server.listen(config.port, () => {
+      console.log(`listening on ${config.port}`);
+    });
+
+- id: C26-14
+  card: C26
+  expected: clean
+  path: src/log/level.ts
+  why: Near miss of the env read — the variable only sets the log level, which the card counts as diagnostics, not a domain branch.
+  source: A logger setup reading its level.
+  code: |
+    type Level = "debug" | "info" | "warn";
+
+    export function currentLevel(): Level {
+      const raw = process.env.LOG_LEVEL;
+      if (raw === "debug" || raw === "warn") return raw;
+      return "info";
+    }
+
+    export function debugEnabled(): boolean {
+      return currentLevel() === "debug";
+    }
+
+    export function logDebug(scope: string, message: string): void {
+      if (debugEnabled()) {
+        console.debug(`[${scope}] ${message}`);
+      }
+    }
+
+- id: C26-15
+  card: C26
+  expected: clean
+  path: internal/config/config.go
+  why: Near miss of the Go reads — the config package is the declared boundary — it parses the environment once into a struct.
+  source: The Go config package.
+  code: |
+    package config
+
+    import (
+        "os"
+        "strconv"
+    )
+
+    type RateConfig struct {
+        Limit     int
+        WindowSec int
+    }
+
+    func LoadRateConfig() RateConfig {
+        cfg := RateConfig{Limit: 100, WindowSec: 60}
+        if raw := os.Getenv("API_RATE_LIMIT"); raw != "" {
+            if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+                cfg.Limit = n
+            }
+        }
+        if raw := os.Getenv("API_RATE_WINDOW"); raw != "" {
+            if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+                cfg.WindowSec = n
+            }
+        }
+        return cfg
+    }
+
+- id: C26-16
+  card: C26
+  expected: clean
+  path: app/src/main/kotlin/ingest/Capture.kt
+  why: Near miss of the Kotlin read — retention arrives as a constructor flag built once at startup, the record path reads no environment.
+  source: The same capture, the injected variant.
+  code: |
+    package ingest
+
+    data class Record(val id: String, val body: ByteArray)
+
+    class Capture(
+        private val store: Store,
+        private val keepRaw: Boolean,
+    ) {
+
+        fun write(rec: Record) {
+            if (keepRaw) {
+                store.saveRaw(rec.id, rec.body)
+            }
+            store.saveParsed(rec.id, parse(rec.body))
+        }
+    }
+
+- id: C26-17
+  card: C26
+  expected: clean
+  path: Services/Startup/Options.cs
+  why: Near miss of the C# read — the options class binds the environment once at startup; the dunning rule consumes the typed value.
+  source: The options binding of the same service.
+  code: |
+    using System;
+
+    namespace Services.Startup;
+
+    public sealed class BillingOptions
+    {
+        public int GraceDays { get; init; } = 14;
+    }
+
+    public static class BillingOptionsLoader
+    {
+        public static BillingOptions Load()
+        {
+            var days = 14;
+            var raw = Environment.GetEnvironmentVariable("BILLING_GRACE_DAYS");
+            if (int.TryParse(raw, out var parsed) && parsed > 0)
+            {
+                days = parsed;
+            }
+            return new BillingOptions { GraceDays = days };
+        }
+    }
+
+- id: C26-18
+  card: C26
+  expected: clean
+  path: app/worker/main.py
+  why: Near miss of the py reads — the worker entry point reads its own knobs once at boot and passes them into the app graph.
+  source: The worker entry point.
+  code: |
+    import os
+
+    from app.payments.rules import build_rules
+    from app.settings import load_payments_settings
+
+
+    def main() -> None:
+        settings = load_payments_settings()
+        debug_probe = os.getenv("WORKER_DEBUG") == "1"
+        rules = build_rules(settings)
+        serve(rules, debug=debug_probe)
+
+
+    def serve(rules, debug: bool) -> None:
+        while True:
+            job = next_job()
+            rules.apply(job)
+
+
+    if __name__ == "__main__":
+        main()
+
+- id: C26-19
+  card: C26
+  expected: clean
+  path: app/vault/secrets.py
+  why: Near miss of the secret read — the signer receives the secret as a parameter from the settings built at boot; the rule reads no environment.
+  source: The same signer, the injected variant.
+  code: |
+    import hashlib
+    import hmac
+
+
+    class TokenSigner:
+        def __init__(self, secret: bytes):
+            self._secret = secret
+
+        def sign(self, token_id: str) -> str:
+            return hmac.new(self._secret, token_id.encode(), hashlib.sha256).hexdigest()
+
+        def verify(self, token_id: str, signature: str) -> bool:
+            return hmac.compare_digest(self.sign(token_id), signature)
+
+
+    def build_signer(secret: bytes) -> TokenSigner:
+        return TokenSigner(secret)
+
+- id: C26-20
+  card: C26
+  expected: clean
+  path: app/reports/mode.py
+  why: Near miss of the mode branch — the sample size arrives with the settings object, so both runs of the report behave the same.
+  source: The same report, the settings-driven variant.
+  code: |
+    from dataclasses import dataclass
+
+    from app.reports.data import collect
+
+
+    @dataclass(frozen=True)
+    class ReportSettings:
+        lite_sample: int | None
+
+
+    def build_report(report_id: str, settings: ReportSettings) -> dict:
+        rows = collect(report_id, sample=settings.lite_sample)
+        return {"id": report_id, "rows": rows, "count": len(rows)}
+
+
+    def report_ref(report_id: str) -> str:
+        return f"reports/{report_id}.json"

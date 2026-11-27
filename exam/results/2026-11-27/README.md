@@ -115,3 +115,12 @@ deepseek-v4-flash, same settings: 10/10 dirty found, 0/11 clean flagged.
 Reports: `exam/runs/2026-11-27-deepseek-c25.json` (first pass, fail),
 `exam/runs/2026-11-27-deepseek-c25-fix.json` (final). C25 joins the cheap
 list in `routing.json`.
+
+## C26 on a weak model
+
+C26 (an environment variable read inside business logic; issue #32 — numbered
+C26 because C21 was already taken by the card from issue #39) measured the
+same way: deepseek-v4-flash, 3 answers per fragment, worst counts, whole
+corpus — 10/10 dirty found, 0/10 clean flagged. Joins the cheap list.
+
+Report: `exam/runs/2026-11-27-deepseek-c26.json`.

@@ -139,3 +139,6 @@ void OnPaid(Payment payment)
 var expired = DateTime.UtcNow > reservation.HoldsUntil;
 var dedup = Guid.NewGuid().ToString();
 var rng = new Random();
+
+// C26
+var fast = Environment.GetEnvironmentVariable("PaymentsFastRefund") == "1";

@@ -165,3 +165,6 @@ val dedup = UUID.randomUUID().toString()
 val pick = Random.nextInt(100)
 val stamp = LocalDateTime.now()
 val day = LocalDate.now()
+
+// C26
+val fast = System.getenv("PAYMENTS_FAST_REFUND") == "1"

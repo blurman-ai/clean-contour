@@ -875,6 +875,28 @@
     "Guid\\.NewGuid\\(",
     "\\bnew Random\\("
    ]
+  },
+  "C26": {
+   "py": [
+    "\\bos\\.getenv\\(",
+    "os\\.environ\\.get\\(",
+    "os\\.environ\\[",
+    "\\bgetenv\\("
+   ],
+   "ts": [
+    "process\\.env\\.[A-Za-z_$][\\w$]*",
+    "process\\.env\\["
+   ],
+   "kt": [
+    "System\\.getenv\\("
+   ],
+   "go": [
+    "os\\.Getenv\\(",
+    "os\\.LookupEnv\\("
+   ],
+   "cs": [
+    "Environment\\.GetEnvironmentVariable\\("
+   ]
   }
  }
 }

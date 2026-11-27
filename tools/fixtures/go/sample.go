@@ -140,3 +140,7 @@ func onPaid(payment Payment) {
 if time.Now().After(lease.Until) { takeover() }
 id := uuid.New()
 n := rand.Intn(100)
+
+// C26
+if os.Getenv("PAYMENTS_FAST_REFUND") == "1" { return 60 }
+host, ok := os.LookupEnv("PAYMENTS_HOST")

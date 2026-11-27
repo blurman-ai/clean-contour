@@ -238,3 +238,11 @@ key = uuid.uuid4().hex
 jitter = random.uniform(0, 1)
 stamp = time.time()
 legacy = datetime.utcnow()
+
+# C26
+def refund_deadline(order):
+    if os.getenv("PAYMENTS_FAST_REFUND") == "1":
+        return 60
+    return os.environ.get("PAYMENTS_SLOW_REFUND")
+host = os.environ["PAYMENTS_HOST"]
+level = getenv("LOG_LEVEL")
