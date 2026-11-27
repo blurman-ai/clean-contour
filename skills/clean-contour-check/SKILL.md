@@ -1074,8 +1074,8 @@ literal is a key of the dict this fragment writes (a dict literal or an
 assignment target), not a read of a mapping that came from outside: reading the
 config or the payload that feeds the payload is still dirty; a mapping built and
 read in the same fragment; columns of a database row read by the storage adapter
-next to the SQL that produced them; one scalar environment variable read into a
-typed parameter; tests.
+next to the SQL that produced them; scalar environment variables read into
+typed parameters, even several of them; tests.
 
 **Dirty:**
 ```python

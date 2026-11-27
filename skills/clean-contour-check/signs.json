@@ -702,8 +702,8 @@
         "json\\.loads\\(",
         "request\\.json\\(\\)",
         "parse_qs",
-        "(?i)\\b(?:settings|config|cfg|payload|body|raw)\\[\"[a-zA-Z0-9_-]+\"\\]",
-        "(?i)\\b(?:settings|config|cfg|payload|body|raw)\\.get\\(\""
+        "(?i)\\b(?:settings|config|cfg|payload|body|raw|reply|response)\\[\"[a-zA-Z0-9_-]+\"\\]",
+        "(?i)\\b(?:settings|config|cfg|payload|body|raw|reply|response)\\.get\\(\""
       ],
       "ts": [
         "JSON\\.parse\\(",

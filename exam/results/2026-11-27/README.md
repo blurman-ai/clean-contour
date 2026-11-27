@@ -25,5 +25,30 @@ alike.
 The one flagged clean fragment is the older Python C20-15 (`app/service.py`,
 single environment values at the composition root), answered dirty once in
 three: the model called the separate accessors "no single decoder". The card's
-"Does not count" names exactly this case; the false rate stays under the
-threshold, so the fragment is kept as is.
+"Does not count" names exactly this case, but the wording "one scalar
+environment variable" read as exactly-one.
+
+Follow-up the same day: the exclusion was reworded to "scalar environment
+variables read into typed parameters, even several of them", and the C20
+python signs gained `reply`/`response` next to `payload`/`body`/`raw` — the
+card's search text names "a reply of another system", and the dirty C20-04
+reads exactly such a variable. C20 was re-measured with the new card text,
+same model and settings (`exam/runs/2026-11-27-deepseek-c20-envfix.json`):
+15/15 dirty found, 0/15 clean flagged, and C20-15 is clean in all three
+answers. The widened signs add no hits in any clean fragment of the corpus.
+
+## C21 on a weak model
+
+C21 (state derived from another field of the same entity) was measured on
+deepseek-v4-flash through `claude-ds`, 3 answers per fragment, worst answer
+counts. Dev and holdout are disjoint and together cover the card's 30 fragments.
+
+| Run | dirty found | recall | clean flagged | false | 90/10 |
+|---|---:|---:|---:|---:|---|
+| deepseek-v4-flash, dev × 3, C21 | 10/10 | 100% | 0/10 | 0% | PASS |
+| deepseek-v4-flash, holdout × 3, C21 | 5/5 | 100% | 0/5 | 0% | PASS |
+
+Reports: `exam/runs/2026-11-27-deepseek-c21-dev.json` and
+`exam/runs/2026-11-27-deepseek-c21-holdout.json`. C21 joins the cheap list in
+`routing.json`.
+
