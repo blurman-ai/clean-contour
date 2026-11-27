@@ -104,3 +104,36 @@ contiguous C1..C<N> range check stays green per commit.
   pending.
 - C26 (#32): environment variable reads inside business logic. Artifacts
   staged, exam pending.
+
+## Stage 4 — existing card work (issues #37, #28, #17)
+
+- #37 c715c06: skip lists gain testkit/acceptance/experiments + fixture/harness/
+  proof file names (anchored to the last path segment so this repo's own
+  tools/fixtures/ is not skipped whole); walk_files prunes directories in
+  place with os.walk; check.py fragments widen up to 14 lines to include the
+  topmost enclosing header above the centred window. Follow-up 6a93888: the
+  skip lists had no .venv/venv — found when the field dumps carried
+  site-packages candidates from a vendored virtualenv.
+- #28 b43b630: Kotlin/Go signs for C12 and C13 (Compose getters/ladders,
+  FuncMap/template ladders, lifecycleScope two-way writes; C13 Go declared
+  not applicable), C14's Routes label named.
+- #17 88b9025: C15 split into C15 (code not read) + C27 (one text for many
+  causes) + C28 (client-declared code lists); C7 Q1 rewritten as a fragment
+  test. DeepSeek: C7 10/10+0/12, C15 10/10+0/10, C27 10/10+1/10, C28 9/10+
+  1/10 — all four pass, C7/C15/C27/C28 join the cheap list, strong list is
+  C1/C4/C8/C10/C14. Two corpus corrections (C7-04/C7-10 were display-only,
+  contradicting the card's own does-not-count; the first C27 clean set folded
+  unknowns, contradicting Q2). Sonnet unmeasured — out of model budget.
+
+## Stage 6 — field run (in progress)
+
+Corpus: 12 python repos (prefect, crewAI, fastmcp, vllm, browser-use,
+pydantic-ai, mem0, llama_index, dspy, langchain, agno, autogen; OpenHands
+dropped — TS at HEAD). Structural prefilter raw 4053 → production 1319.
+Pipeline: structural_scan candidates → 30–60-line fragments → deepseek-v4-
+flash judges C21 questions → I curate every dirty/unclear and a sample of
+clean. C22–C26: search.py candidates per repo, ≤8 distinct files per
+(repo, card) following the 24.11 protocol (~480 sampled). idealab
+(dgtlu_backend/cogline/ldgn): stratified samples (all read-side + 25
+write-side per repo = 129) for recall checks; vocabulary fallback grep for
+prefilter blind spots; anonymized counters only in commits.
