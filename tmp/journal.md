@@ -51,3 +51,56 @@ bench list in case a take fails.
 
 Clones: `git clone --depth 1` into ~/projects/clean-contour-oss-2026-11-11/work/,
 next to the existing prefect, crewAI, tuti. Clones are never committed.
+
+## Stage 2 — exam instrument fixes (issues #25, #26, #27, #29, #30)
+
+All five committed, one commit per issue, each fix with a control case that
+the pre-fix code fails (verified by running a sabotaged copy in-process):
+
+- #25 d2b81b5: model pipe pinned to UTF-8 (encoding='utf-8', errors='replace'),
+  UnicodeError → call error (void 2). Control: a real pipe run in a child with
+  UTF-8 mode off + locale patched to cp1252 breaks on ₽; this machine has
+  PYTHONUTF8=1 globally, so the sensitivity leg must run in the child.
+- #26 99312de: 'Which cards go to whom' paragraph moved below the --- after
+  Procedure; parse_skill stops there, prompts stay clean. Control: paragraph
+  re-inserted inside Procedure → prompt contains it → case red.
+- #27 cef1744: HINT covers path (segment-bounded; src/cleanup/ stays legal).
+  Control: path src/order/dirty_helpers.ts refused.
+- #29 244cb31: the 15–60 exam window documented as deliberate (vs live 30–60);
+  new cards aim at 30–60 where the scenario allows. Decision, no behavior change.
+- #30 3f14088: eight nits — sabotage anchors in the card body; ASCII output;
+  real sensitivity switches (expectations=, unique_ids=, file_cards=,
+  Policy(max_false) for oracle-false); negated verdicts ('not clean') no
+  longer parse as verdicts; failure listing shows the decisive answer; no
+  sleep after the final attempt; report-write failure → void exit 2 (case runs
+  a sabotaged copy showing the pre-fix traceback rc=1); corpus file name must
+  match the card. Selftest 29 → 37 cases.
+
+## Stage 3 — new cards (issues #33–#36, #32)
+
+Numbering: issue #32's env card wanted 'C21', but C21 is taken by the card
+from issue #39 (already measured, in the cheap list). The env card is C26,
+the next free number; recorded here and in the report as a forced renumber.
+Cards are done in ascending numeric order C22→C26 so the search selftest's
+contiguous C1..C<N> range check stays green per commit.
+
+- C22 (#33) 1dbc89f: external call without a deadline. Exam deepseek-v4-flash,
+  whole corpus ×3 worst counts: 10/10 dirty, 0/10 clean → cheap list.
+- C23 (#34) ed8f465: side effect in constructor/getter/ORM hook. First pass
+  1/10 clean flagged: the model called @property-with-own-SELECT dirty, which
+  is what the card's question 2 says — the fragment was mislabeled, rewritten
+  to the card's clean case (card text untouched). Re-run: 10/10, 0/10 → cheap.
+- C24 (#35) 0e37e15: background task with lost failure. 10/10 dirty, 1/10
+  clean flagged = exactly the 10% gate (the flagged fragment is the card's own
+  Does-not-count case, read dirty once in three). Pass → cheap list.
+- C25 (#36): first pass FAILED — recall 8/10 (C25-07 boundary-caller read as
+  clean; C25-10 was authored wrong: the GUID filled the row key, not the
+  idempotency key) and 2/10 clean flagged (C25-12/C25-18: writers computing a
+  stored deadline; the card had no writer-deadline exemption). Card text
+  clarified: Q1 targets the rule itself (a thin boundary caller handing the
+  value in is not the rule), does-not-count gains the writer-computing-stored-
+  deadline case; C25-07 relabeled clean, C25-10 fixed to make the GUID the
+  idempotency key, C25-21 (kt, rule reads the clock itself) added. Re-run
+  pending.
+- C26 (#32): environment variable reads inside business logic. Artifacts
+  staged, exam pending.
