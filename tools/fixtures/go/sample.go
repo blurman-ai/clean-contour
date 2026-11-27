@@ -118,3 +118,8 @@ json.Unmarshal(data, &m)
 // C21
 func ResolvePayloadState(p EnginePayload) string { return p.State }
 var artifactPath = p.AudioPath
+
+// C22
+resp, err := http.Get("https://rates.example.invalid/x")
+out, err := exec.Command("git", "status").Output()
+r2, err := http.DefaultClient.Do(req)

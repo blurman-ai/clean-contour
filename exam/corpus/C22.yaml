@@ -1,0 +1,618 @@
+# C22 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C22-01
+  card: C22
+  expected: dirty
+  path: services/pricing/rates.py
+  why: The rate comes from a provider request with no timeout on the call or the session; a stalled provider hangs the worker.
+  source: A courier pricing service pulling exchange rates on a refresh job.
+  code: |
+    import requests
+    from decimal import Decimal
+
+    RATES_URL = "https://rates.provider.example/api/v3/quote"
+
+
+    def fetch_rate(pair: str) -> Decimal:
+        r = requests.get(RATES_URL, params={"pair": pair})
+        r.raise_for_status()
+        payload = r.json()
+        if payload.get("stale"):
+            return LAST_KNOWN[pair]
+        return Decimal(payload["rate"])
+
+
+    def price_job(weight_kg: Decimal, distance_km: Decimal, pair: str) -> Decimal:
+        rate = fetch_rate(pair)
+        base = weight_kg * distance_km * rate
+        return base.quantize(Decimal("0.01"))
+
+
+    def refresh_all() -> None:
+        for pair in ("EURUSD", "GBPUSD"):
+            rate = fetch_rate(pair)
+            print(f"{pair} -> {rate}")
+
+- id: C22-02
+  card: C22
+  expected: dirty
+  path: app/notify/hooks.py
+  why: The outbound webhook post has no timeout anywhere in the fragment; one slow receiver blocks the dispatch loop and the run stays mid-flight.
+  source: An order notification dispatcher calling customer webhooks.
+  code: |
+    import httpx
+
+    from app.orders.models import OrderEvent
+
+
+    async def dispatch(event: OrderEvent, targets: list[str]) -> None:
+        body = {"event": event.kind, "order_id": event.order_id, "at": event.created_at.isoformat()}
+        async with httpx.AsyncClient() as client:
+            for url in targets:
+                resp = await client.post(url, json=body)
+                if resp.status_code >= 400:
+                    event.delivery_error = f"http_{resp.status_code}"
+                    break
+
+
+    async def on_order_paid(event: OrderEvent, targets: list[str]) -> None:
+        await dispatch(event, targets)
+        event.dispatched = True
+
+- id: C22-03
+  card: C22
+  expected: dirty
+  path: builder/render.py
+  why: The render subprocess runs with no timeout, so a wedged renderer pins the builder task forever.
+  source: A report builder shelling out to a renderer binary.
+  code: |
+    import subprocess
+    from pathlib import Path
+
+
+    def render_pdf(template_id: str, out_dir: Path) -> Path:
+        out = out_dir / f"{template_id}.pdf"
+        proc = subprocess.run(
+            [RENDERER_BIN, "--template", template_id, "--out", str(out)],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            raise RenderFailed(proc.stderr.strip() or "renderer exited non-zero")
+        return out
+
+
+    def build_report(claim_id: str, out_dir: Path) -> Path:
+        try:
+            pdf = render_pdf(claim_id, out_dir)
+        except RenderFailed as e:
+            return build_fallback(claim_id, out_dir, reason=str(e))
+        return pdf
+
+- id: C22-04
+  card: C22
+  expected: dirty
+  path: src/integrations/feed.ts
+  why: The feed fetch passes no abort signal and no client timeout; a hung supplier stalls the import inside the transaction window.
+  source: A supplier catalog import in a marketplace app.
+  code: |
+    type FeedRow = { sku: string; stock: number; price: number };
+
+    export async function pullFeed(supplier: string): Promise<FeedRow[]> {
+      const url = `https://feeds.example.invalid/${supplier}/stock.json`;
+      const resp = await fetch(url);
+      if (!resp.ok) {
+        throw new Error(`feed ${supplier} answered ${resp.status}`);
+      }
+      const rows = (await resp.json()) as FeedRow[];
+      return rows.filter((r) => r.stock > 0);
+    }
+
+    export async function importSupplier(supplier: string): Promise<number> {
+      const rows = await pullFeed(supplier);
+      for (const row of rows) {
+        await upsertOffer(supplier, row.sku, row.price);
+      }
+      return rows.length;
+    }
+
+- id: C22-05
+  card: C22
+  expected: dirty
+  path: src/notify/sms.ts
+  why: The SMS gateway call has no timeout configured on the axios call or a client default; the send waits indefinitely and the receipt stays queued.
+  source: A receipt sender over an SMS gateway.
+  code: |
+    import axios from "axios";
+
+    type SmsResult = { accepted: boolean; providerId?: string };
+
+    export async function sendReceipt(phone: string, text: string): Promise<SmsResult> {
+      const resp = await axios.post("https://sms-gateway.example.invalid/v2/send", {
+        to: phone,
+        text,
+        channel: "receipt",
+      });
+      return { accepted: resp.data.accepted, providerId: resp.data.id };
+    }
+
+    export async function notifyCustomer(order: { phone: string; id: string }) {
+      const result = await sendReceipt(order.phone, `order ${order.id} is paid`);
+      if (!result.accepted) {
+        await queueRetry(order.id);
+      }
+    }
+
+- id: C22-06
+  card: C22
+  expected: dirty
+  path: internal/linkcheck/check.go
+  why: The link probe uses http.Get with the default client (no Timeout field anywhere); a dead site holds the checker goroutine.
+  source: A documentation link checker.
+  code: |
+    package linkcheck
+
+    import (
+        "fmt"
+        "net/http"
+    )
+
+    type Verdict struct {
+        URL    string
+        Status int
+    }
+
+    func Probe(url string) (Verdict, error) {
+        resp, err := http.Get(url)
+        if err != nil {
+            return Verdict{}, fmt.Errorf("probe %s: %w", url, err)
+        }
+        defer resp.Body.Close()
+        return Verdict{URL: url, Status: resp.StatusCode}, nil
+    }
+
+    func CheckAll(urls []string) []Verdict {
+        var out []Verdict
+        for _, u := range urls {
+            v, err := Probe(u)
+            if err != nil {
+                v = Verdict{URL: u, Status: 0}
+            }
+            out = append(out, v)
+        }
+        return out
+    }
+
+- id: C22-07
+  card: C22
+  expected: dirty
+  path: app/src/main/kotlin/billing/Fetcher.kt
+  why: A bare OkHttpClient() with no callTimeout, and the invoice call goes through it; a silent gateway blocks the billing thread.
+  source: An invoice fetcher in a Kotlin billing module.
+  code: |
+    package billing
+
+    import okhttp3.OkHttpClient
+    import okhttp3.Request
+    import java.time.LocalDate
+
+    data class Invoice(val id: String, val total: Long, val issued: LocalDate)
+
+    class InvoiceFetcher(private val basePath: String) {
+        private val client = OkHttpClient()
+
+        fun fetch(invoiceId: String): Invoice {
+            val req = Request.Builder()
+                .url("$basePath/invoices/$invoiceId")
+                .header("Accept", "application/json")
+                .build()
+            val resp = client.newCall(req).execute()
+            resp.use {
+                check(it.isSuccessful) { "invoice $invoiceId answered ${it.code}" }
+                val body = it.body!!.string()
+                return parseInvoice(body)
+            }
+        }
+    }
+
+- id: C22-08
+  card: C22
+  expected: dirty
+  path: Services/Probe/PriceProbe.cs
+  why: The client is constructed without a Timeout and the probe passes no CancellationToken; the 100 s library default is the only thing standing between the job and a dead peer.
+  source: A price probe over competitor endpoints in a C# worker.
+  code: |
+    using System.Net.Http;
+    using System.Text.Json;
+
+    namespace Services.Probe;
+
+    public record PriceQuote(string Sku, decimal Amount);
+
+    public sealed class PriceProbe
+    {
+        private readonly HttpClient _http = new HttpClient();
+
+        public async Task<PriceQuote?> ProbeAsync(string sku)
+        {
+            var url = $"https://quotes.example.invalid/{sku}";
+            using var resp = await _http.GetAsync(url);
+            if (!resp.IsSuccessStatusCode)
+            {
+                return null;
+            }
+            var stream = await resp.Content.ReadAsStreamAsync();
+            return await JsonSerializer.DeserializeAsync<PriceQuote>(stream) is { } q ? q : null;
+        }
+    }
+
+- id: C22-09
+  card: C22
+  expected: dirty
+  path: app/warehouse/scale.py
+  why: The scale socket is opened with no settimeout before the state line is read; a wedged scale freezes the intake rule.
+  source: A warehouse intake reading a scale over a TCP socket.
+  code: |
+    import socket
+
+    SCALE_HOST = "scale.intake.example.invalid"
+
+
+    def read_weight(ticket_id: str) -> str:
+        with socket.create_connection((SCALE_HOST, 4001)) as sock:
+            sock.sendall(f"WEIGHT? ticket={ticket_id}\n".encode())
+            data = sock.recv(64).decode().strip()
+        if not data.startswith("WT "):
+            raise ScaleError(f"unexpected scale reply: {data!r}")
+        return data.split()[1]
+
+
+    def intake(ticket_id: str, expected_kg: float) -> bool:
+        weight = float(read_weight(ticket_id))
+        return abs(weight - expected_kg) <= 0.5
+
+- id: C22-10
+  card: C22
+  expected: dirty
+  path: internal/thumbs/render.go
+  why: The thumbnailer subprocess has no context and no timeout; a hung encoder keeps the upload row in its waiting state.
+  source: A media service generating thumbnails through an external encoder.
+  code: |
+    package thumbs
+
+    import (
+        "os/exec"
+        "path/filepath"
+    )
+
+    func MakeThumb(src string, dstDir string) (string, error) {
+        dst := filepath.Join(dstDir, filepath.Base(src)+".thumb.jpg")
+        cmd := exec.Command(ENCODER_BIN, "-i", src, "-frames:v", "1", dst)
+        if err := cmd.Run(); err != nil {
+            return "", err
+        }
+        return dst, nil
+    }
+
+    func PrepareUpload(src string, dstDir string) (string, error) {
+        thumb, err := MakeThumb(src, dstDir)
+        if err != nil {
+            return "", err
+        }
+        return thumb, nil
+    }
+
+- id: C22-11
+  card: C22
+  expected: clean
+  path: services/pricing/rates.py
+  why: Near miss of the same fetch — the call carries an explicit connect/read timeout, so the deadline is declared in the fragment.
+  source: The same pricing service, the guarded variant.
+  code: |
+    import requests
+    from decimal import Decimal
+
+    RATES_URL = "https://rates.provider.example/api/v3/quote"
+    TIMEOUT = (3, 10)
+
+
+    def fetch_rate(pair: str) -> Decimal:
+        r = requests.get(RATES_URL, params={"pair": pair}, timeout=TIMEOUT)
+        r.raise_for_status()
+        payload = r.json()
+        if payload.get("stale"):
+            return LAST_KNOWN[pair]
+        return Decimal(payload["rate"])
+
+
+    def refresh_all() -> None:
+        for pair in ("EURUSD", "GBPUSD"):
+            rate = fetch_rate(pair)
+            print(f"{pair} -> {rate}")
+
+- id: C22-12
+  card: C22
+  expected: clean
+  path: builder/render.py
+  why: Near miss of the renderer subprocess — it runs with timeout= and a declared refusal on expiry, so a wedged renderer cannot pin the task.
+  source: The same builder, the guarded variant.
+  code: |
+    import subprocess
+    from pathlib import Path
+
+    RENDER_TIMEOUT = 120
+
+
+    class RenderFailed(RuntimeError):
+        pass
+
+
+    def render_pdf(template_id: str, out_dir: Path) -> Path:
+        out = out_dir / f"{template_id}.pdf"
+        try:
+            proc = subprocess.run(
+                [RENDERER_BIN, "--template", template_id, "--out", str(out)],
+                capture_output=True,
+                text=True,
+                timeout=RENDER_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            raise RenderFailed(f"renderer exceeded {RENDER_TIMEOUT}s") from None
+        if proc.returncode != 0:
+            raise RenderFailed(proc.stderr.strip() or "renderer exited non-zero")
+        return out
+
+- id: C22-13
+  card: C22
+  expected: clean
+  path: src/integrations/feed.ts
+  why: Near miss of the feed pull — the fetch is bound by AbortSignal.timeout, the deadline sits in the fragment.
+  source: The same import, the guarded variant.
+  code: |
+    type FeedRow = { sku: string; stock: number; price: number };
+
+    export async function pullFeed(supplier: string): Promise<FeedRow[]> {
+      const url = `https://feeds.example.invalid/${supplier}/stock.json`;
+      const resp = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+      if (!resp.ok) {
+        throw new Error(`feed ${supplier} answered ${resp.status}`);
+      }
+      const rows = (await resp.json()) as FeedRow[];
+      return rows.filter((r) => r.stock > 0);
+    }
+
+    export async function importSupplier(supplier: string): Promise<number> {
+      const rows = await pullFeed(supplier);
+      for (const row of rows) {
+        await upsertOffer(supplier, row.sku, row.price);
+      }
+      return rows.length;
+    }
+
+- id: C22-14
+  card: C22
+  expected: clean
+  path: src/notify/sms.ts
+  why: Near miss of the gateway call — the axios client is created with a timeout and the send inherits it.
+  source: The same sender, the guarded variant.
+  code: |
+    import axios from "axios";
+
+    type SmsResult = { accepted: boolean; providerId?: string };
+
+    const gateway = axios.create({
+      baseURL: "https://sms-gateway.example.invalid/v2",
+      timeout: 8_000,
+    });
+
+    export async function sendReceipt(phone: string, text: string): Promise<SmsResult> {
+      const resp = await gateway.post("/send", { to: phone, text, channel: "receipt" });
+      return { accepted: resp.data.accepted, providerId: resp.data.id };
+    }
+
+    export async function notifyCustomer(order: { phone: string; id: string }) {
+      const result = await sendReceipt(order.phone, `order ${order.id} is paid`);
+      if (!result.accepted) {
+        await queueRetry(order.id);
+      }
+    }
+
+- id: C22-15
+  card: C22
+  expected: clean
+  path: internal/linkcheck/check.go
+  why: Near miss of the probe — the client is declared with a Timeout field in the fragment and every probe goes through it.
+  source: The same checker, the guarded variant.
+  code: |
+    package linkcheck
+
+    import (
+        "fmt"
+        "net/http"
+        "time"
+    )
+
+    type Verdict struct {
+        URL    string
+        Status int
+    }
+
+    var probeClient = &http.Client{Timeout: 10 * time.Second}
+
+    func Probe(url string) (Verdict, error) {
+        req, err := http.NewRequest(http.MethodGet, url, nil)
+        if err != nil {
+            return Verdict{}, err
+        }
+        resp, err := probeClient.Do(req)
+        if err != nil {
+            return Verdict{}, fmt.Errorf("probe %s: %w", url, err)
+        }
+        defer resp.Body.Close()
+        return Verdict{URL: url, Status: resp.StatusCode}, nil
+    }
+
+- id: C22-16
+  card: C22
+  expected: clean
+  path: app/src/main/kotlin/billing/Fetcher.kt
+  why: Near miss of the invoice fetch — the builder sets callTimeout and readTimeout before build(), the deadline is in the fragment.
+  source: The same fetcher, the guarded variant.
+  code: |
+    package billing
+
+    import okhttp3.OkHttpClient
+    import okhttp3.Request
+    import java.time.LocalDate
+    import java.util.concurrent.TimeUnit
+
+    data class Invoice(val id: String, val total: Long, val issued: LocalDate)
+
+    class InvoiceFetcher(private val basePath: String) {
+        private val client = OkHttpClient.Builder()
+            .callTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
+            .build()
+
+        fun fetch(invoiceId: String): Invoice {
+            val req = Request.Builder()
+                .url("$basePath/invoices/$invoiceId")
+                .header("Accept", "application/json")
+                .build()
+            val resp = client.newCall(req).execute()
+            resp.use {
+                check(it.isSuccessful) { "invoice $invoiceId answered ${it.code}" }
+                val body = it.body!!.string()
+                return parseInvoice(body)
+            }
+        }
+    }
+
+- id: C22-17
+  card: C22
+  expected: clean
+  path: Services/Probe/PriceProbe.cs
+  why: Near miss of the probe — the client carries an explicit Timeout and the request a CancellationToken.
+  source: The same probe, the guarded variant.
+  code: |
+    using System.Net.Http;
+    using System.Text.Json;
+
+    namespace Services.Probe;
+
+    public record PriceQuote(string Sku, decimal Amount);
+
+    public sealed class PriceProbe
+    {
+        private readonly HttpClient _http;
+
+        public PriceProbe()
+        {
+            _http = new HttpClient();
+            _http.Timeout = TimeSpan.FromSeconds(15);
+        }
+
+        public async Task<PriceQuote?> ProbeAsync(string sku, CancellationToken ct)
+        {
+            var url = $"https://quotes.example.invalid/{sku}";
+            using var resp = await _http.GetAsync(url, ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                return null;
+            }
+            var stream = await resp.Content.ReadAsStreamAsync(ct);
+            return await JsonSerializer.DeserializeAsync<PriceQuote>(stream, cancellationToken: ct) is { } q ? q : null;
+        }
+    }
+
+- id: C22-18
+  card: C22
+  expected: clean
+  path: app/orders/rules.py
+  why: The rule calls the project mail adapter, not a driver — no HTTP happens in the fragment, the deadline lives in the adapter module.
+  source: An order rule using the project mail adapter.
+  code: |
+    from app.mail import send_message
+    from app.templates import render_receipt
+
+
+    RECEIPT_SUBJECT = "order receipt"
+
+
+    def receipt_sent(order) -> bool:
+        return order.receipt_sent_at is not None
+
+
+    def mail_receipt(order, mailer=None) -> None:
+        body = render_receipt(order)
+        send_message(
+            to=order.customer_email,
+            subject=RECEIPT_SUBJECT,
+            body=body,
+            mailer=mailer,
+        )
+
+
+    def close_order(order) -> None:
+        if not receipt_sent(order):
+            mail_receipt(order)
+
+- id: C22-19
+  card: C22
+  expected: clean
+  path: internal/thumbs/render.go
+  why: Near miss of the encoder — the command is bound to a context with a timeout, so expiry cancels the process.
+  source: The same thumbnailer, the guarded variant.
+  code: |
+    package thumbs
+
+    import (
+        "context"
+        "os/exec"
+        "path/filepath"
+        "time"
+    )
+
+    func MakeThumb(ctx context.Context, src string, dstDir string) (string, error) {
+        dst := filepath.Join(dstDir, filepath.Base(src)+".thumb.jpg")
+        cmd := exec.CommandContext(ctx, ENCODER_BIN, "-i", src, "-frames:v", "1", dst)
+        if err := cmd.Run(); err != nil {
+            return "", err
+        }
+        return dst, nil
+    }
+
+    func PrepareUpload(src string, dstDir string) (string, error) {
+        ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+        defer cancel()
+        return MakeThumb(ctx, src, dstDir)
+    }
+
+- id: C22-20
+  card: C22
+  expected: clean
+  path: app/warehouse/scale.py
+  why: Near miss of the scale socket — settimeout is called before the read, so the rule cannot freeze on a wedged device.
+  source: The same intake, the guarded variant.
+  code: |
+    import socket
+
+    SCALE_HOST = "scale.intake.example.invalid"
+
+
+    class ScaleError(RuntimeError):
+        pass
+
+
+    def read_weight(ticket_id: str) -> str:
+        with socket.create_connection((SCALE_HOST, 4001), timeout=3) as sock:
+            sock.settimeout(3)
+            sock.sendall(f"WEIGHT? ticket={ticket_id}\n".encode())
+            data = sock.recv(64).decode().strip()
+        if not data.startswith("WT "):
+            raise ScaleError(f"unexpected scale reply: {data!r}")
+        return data.split()[1]
+
+
+    def intake(ticket_id: str, expected_kg: float) -> bool:
+        weight = float(read_weight(ticket_id))
+        return abs(weight - expected_kg) <= 0.5

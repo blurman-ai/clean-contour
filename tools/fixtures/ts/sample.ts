@@ -143,3 +143,8 @@ const host = config["host"];
 function resolveRenderStatus(job) { return job.status; }
 const implied = job.outputUrl ?? "ready";
 const artifact = job.audioPath;
+
+// C22
+const r = await fetch("https://api.example.invalid/feed");
+const res = axios.get("/drafts");
+http.request({ host: "example.invalid" });

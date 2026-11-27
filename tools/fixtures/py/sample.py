@@ -195,3 +195,13 @@ SETTINGS.get("documents")
 def resolve_payload_status(payload): pass
 if episode.audio_path: pass
 row.get("audio_path")
+
+# C22
+def fetch_rate(pair):
+    r = requests.get("https://rates.example.invalid/x")
+    httpx.post("https://api.example.invalid")
+    urllib.request.urlopen("http://example.invalid/feed")
+    socket.create_connection(("db.example.invalid", 5432))
+    subprocess.run(["git", "status"])
+    subprocess.check_output(["ls"])
+    return Decimal(r.json()["rate"])

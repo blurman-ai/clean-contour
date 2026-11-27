@@ -129,3 +129,10 @@ val attempts = settings["login_attempts"]
 // C21
 fun resolvePayloadState(payload: EnginePayload): String = payload.state
 val artifactPath = payload.audioPath
+
+// C22
+val client = OkHttpClient()
+client.newCall(request).execute()
+val raw = URL(feed).openConnection().getInputStream()
+ProcessBuilder("git", "status").start()
+Runtime.getRuntime().exec("ls")

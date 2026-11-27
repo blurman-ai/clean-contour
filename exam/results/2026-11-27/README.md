@@ -53,3 +53,16 @@ Reports: `exam/runs/2026-11-27-deepseek-c21-dev.json` and
 `engine_payload_state` fragment from issue #39 was also checked separately and
 answered `dirty` (`yes, yes, yes`). C21 joins the cheap list in `routing.json`.
 
+
+## C22 on a weak model
+
+C22 (an external call without a deadline) was measured on deepseek-v4-flash
+through `pi`, 3 answers per fragment, worst answer counts, whole corpus
+(20 fragments x 3 = 60 calls):
+
+| Card | dirty found | recall | clean flagged | false | 90/10 |
+|---|---:|---:|---:|---:|---|
+| C22 | 10/10 | 100% | 0/10 | 0% | PASS |
+
+Report: `exam/runs/2026-11-27-deepseek-c22.json`. C22 joins the cheap list in
+`routing.json`.

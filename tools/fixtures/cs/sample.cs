@@ -100,3 +100,8 @@ var section = config.GetSection("cookie");
 // C21
 public static string ResolvePayloadState(EnginePayload payload) => payload.State;
 var artifactPath = payload.AudioPath;
+
+// C22
+var client = new HttpClient();
+var r = await client.GetAsync("https://rates.example.invalid/x");
+Process.Start("git", "status");

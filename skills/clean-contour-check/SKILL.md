@@ -1168,3 +1168,45 @@ def payload_view(row):
         "playable_audio_url": row.audio_url,
     }
 ```
+
+## C22. An external call without a deadline
+
+**Search:** `requests.get(`/`post(`/`put(`/`patch(`/`delete(`/`request(`,
+`httpx.get(`/`post(`/`stream(`, `urllib.request.urlopen(`, `socket.create_connection(`,
+`subprocess.run(`, `subprocess.call(`, `subprocess.check_output(`, `Popen(`.
+**TS:** `fetch(`, `axios.get(`/`post(`/`put(`/`delete(`, `http.request(`.
+**Go:** `http.Get(`, `http.Post(`, `http.DefaultClient`, `client.Do(`, `exec.Command(`.
+**Kotlin:** `OkHttpClient()`, `.newCall(`, `URL(`.`openConnection(`, `ProcessBuilder(`.
+**C#:** `new HttpClient(`, `.GetAsync(`, `.PostAsync(`, `.SendAsync(`, `Process.Start(`.
+
+**Questions:**
+1. Does the fragment itself call out: an HTTP request to another system, an
+   open socket, or a child process? A call of the project's own adapter method
+   (`api.fetch(…)`, `mail.send(…)`) is "no": the deadline lives with the adapter,
+   in a fragment of its own.
+2. Is there no deadline declared in the fragment: no `timeout=` on the call and
+   none on the client or session the call is built from, no `AbortSignal`/
+   `AbortSignal.timeout(`, no `CancellationToken`/`ct:` passed, no
+   `context.WithTimeout(`, no `client.Timeout`, no `.callTimeout(`/`.requestTimeout(`?
+   A client constructed in the fragment without a deadline counts as no
+   deadline, even when the library would apply an implicit one: the declaration
+   must be in the code, not in the library's default.
+
+**Dirty if:** 1 = yes and 2 = yes.
+
+**Does not count:** a call that passes its deadline explicitly; a client or
+session built in the fragment with a declared timeout that the call inherits;
+a subprocess call with `timeout=`; tests.
+
+**Dirty:**
+```python
+def fetch_rate(pair: str) -> Decimal:
+    r = requests.get(f"https://rates.example.invalid/{pair}")   # a stalled provider hangs the worker
+    return Decimal(r.json()["rate"])
+```
+**Clean:**
+```python
+def fetch_rate(session: Session, pair: str) -> Decimal:
+    r = session.get(f"https://rates.example.invalid/{pair}", timeout=(3, 10))
+    return Decimal(r.json()["rate"])
+```
