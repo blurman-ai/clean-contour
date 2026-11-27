@@ -142,3 +142,6 @@ var rng = new Random();
 
 // C26
 var fast = Environment.GetEnvironmentVariable("PaymentsFastRefund") == "1";
+
+// C28
+private static readonly Dictionary<string, string> Texts = new();

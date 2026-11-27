@@ -380,11 +380,12 @@ from which derived class an object deserialized into, when the class has a
 method is the declaration. Path, URL, host and header parsing is noise.
 
 **Questions:**
-1. What does the branch do: does it decide **what the thing is** and how the
-   object is processed next (the kind of an object, the role of a column,
-   whether a variant is a service one, whether the text has a space, an order or
-   a refund), or does it only choose display text? If both sides of the branch
-   only return display text, the answer is "no".
+1. Does the branch decide how the object is processed next (the kind of an
+   object, the role of a column, whether a variant is a service one, an order or
+   a refund)? The test the fragment itself answers: does a value computed in
+   this branch reach anything that is not a string shown to the user — a stored
+   field, a next call, a refusal, a filter, a price, a route? If both arms only
+   produce strings for the interface, the answer is "no".
 2. Is the answer obtained from a label, text, prefix, unit, or the shape of a
    string, rather than from a kind field (`kind`, `type`, `role`, a flag)?
 3. Is a stored kind field present nearby, in the fragment or in the response
@@ -768,59 +769,31 @@ def list_drafts(db):
     return [DraftOut.from_orm(d) for d in drafts]   # the structure is written by a background sync
 ```
 
-## C15. The reason for a refusal is lost on the way
+## C15. The refusal reaches the user without its code
 
 **Search:** in the frontend, error handlers (`catch`, `onError`, `isError`,
-`error &&`, `failed`) that show text to the user; in the frontend, "code →
-text" tables declared as `Record<string, …>` or a list of strings; on the
-server, `except Exception` / `except …:` with a refusal to the user
-(`HTTPException`, a failure field), a string instead of an object in `detail`.
-
-**Kotlin:** a helper that maps any throwable to one code (`catch (_:
-Exception)` setting a code, `runCatching … getOrElse { <literal> }`, an
-`@ExceptionHandler` with one code for many causes, names like `*Fault`,
-`legacy*OrNull`). **Go:** `http.Error(w, err.Error()`, `c.JSON(500,
-gin.H{"error": err.Error()})`, a function that returns one error text from every
-failure path. **Client:** besides `Record<string, …>`: `` t(`error.${code}`) `` over
-a message catalogue, `switch (code)`, `.code ===`; a server action that does
-`throw new Error(`…${await res.text()}`)`; `.catch(() => {})`,
-`.catch(() => null)`, a fetch helper whose `catch` returns a fallback value.
-Most projects wrap the response in their own helper (`respondError`,
-`renderError`, `writeJSONError`, `EitherRespond`): find it first and read its
-mapping, then search its callers. On the client, `err?.response?.data?.error?.message
-|| "<literal>"` shows the server text without the code.
-
-**C#:** server: `catch (Exception) { return BadRequest("…"); }`,
-`return Problem(ex.Message)`, `StatusCode(500, ex.Message)`,
-`Results.BadRequest("<text>")` (a string instead of a `ProblemDetails` with a
-code), an `IExceptionHandler` or `UseExceptionHandler` that maps every
-exception to one code, middleware `context.Response.WriteAsync(ex.Message)`,
-`ModelState.AddModelError("", "<text>")`, FluentValidation `.WithMessage(`
-without `.WithErrorCode(`, FluentResults/ErrorOr `Error.Failure("<text>")`
-without a code from a list. Client (Blazor, WPF, MAUI):
-`catch (HttpRequestException) { error = "<literal>"; }`,
-`ReadFromJsonAsync<ProblemDetails>()` that does not read the code extension,
-a `Dictionary<string, string>` of codes to texts, `switch (code)` over string
-literals instead of a generated enum. Make `switch` over the code enum
-exhaustive and turn CS8509 into an error: the compiler then checks that every
-code has a text.
+`error &&`, `failed`) that show text to the user without opening the response;
+`.catch(() => {})` style handlers that put one text for whatever arrived. On
+the server, `HTTPException`/`Problem(` with a string in `detail`, a handler
+that writes one text for any failure.
+**Kotlin:** a screen that draws one refusal text from an `error != null`
+flag. **Go:** `http.Error(w, err.Error()`, `c.JSON(409, gin.H{"error":
+err.Error()})`. **C#:** `Problem(ex.Message)`, a page that sets one fixed
+error text in the catch.
 
 **Questions:**
 1. Does the branch show the user the text of a refusal or hand the refusal to
    the user (a request response, a stored failure field)?
-2. Does the refusal go out or get shown without a code from the list: a string
-   instead of an object in `detail`, a code literal outside the list, or the
-   code from the server response is not read?
-3. Do several different causes get one code or one text: a catch of all
-   exceptions sets a common code, several codes lead to one text?
-4. Are the codes by which the text is chosen declared in the client code, as a
-   list of strings or as keys of `Record<string, …>`, rather than taken as a
-   type from the generated contract (`components["schemas"][…]`)?
+2. Is the refusal code from the server response not read at this place: the
+   text is chosen by an error flag or by whatever arrived; or does the refusal
+   leave the server as a string with no code from the list, so the client
+   cannot tell this reason from any other?
 
-**Dirty if:** 1 = yes and at least one of 2, 3, 4 = yes.
+**Dirty if:** 1 = yes and 2 = yes.
 
 **Does not count:** writing to a log; a branch that shows its own text for the
-single code chosen by a member of the list; a test.
+single code chosen by a member of the list and passes the other refusals on by
+code; a test.
 
 **Dirty:**
 ```tsx
@@ -833,6 +806,85 @@ const text = {
   attachment_text_char_limit_exceeded: "sources.textTooLong",
 } satisfies Record<SourceRefusalCode, string>;
 onError: (e) => notify(t(text[e.code]))
+```
+
+## C27. One code or one text for several causes
+
+**Search:** a catch of all exceptions that issues a refusal (`except Exception
+… raise HTTPException`, `catch (Exception) { return BadRequest("…"); }`), a
+`runCatching … getOrElse { <literal> }`, an `@ExceptionHandler` or
+`IExceptionHandler` with one code for many causes, a helper that reduces
+several codes to one text (`get(code, generic)`, `t("…failure.generic")` as
+the only exit), a handler answering `gin.H{"error": "… failed"}` from every
+path.
+**Go:** one function returning one error text from every failure path.
+
+**Questions:**
+1. Does the fragment hand a refusal to the user (a request response, a stored
+   failure field, a shown text)?
+2. Do several different causes get one code or one text: a catch of all
+   exceptions sets a common code, several codes lead to one text, an unknown
+   code falls to the same generic text as the known ones?
+
+**Dirty if:** 1 = yes and 2 = yes.
+
+**Does not count:** a catch that only logs and rethrows; each cause mapped to
+its own member of the code list with unknown failures rethrown or passed
+through as themselves; a test.
+
+**Dirty:**
+```python
+except Exception as exc:
+    raise HTTPException(status_code=422, detail={"code": "manifest_import_failed"}) from exc
+```
+**Clean:**
+```python
+except ManifestEncodingInvalid as exc:
+    raise HTTPException(422, detail={"code": ManifestFailure.ENCODING_INVALID.value}) from exc
+except ManifestTooLarge as exc:
+    raise HTTPException(422, detail={"code": ManifestFailure.ROWS_LIMIT_EXCEEDED.value}) from exc
+```
+
+## C28. The client declares the refusal codes itself
+
+**Search:** in the frontend, "code → text" tables declared as
+`Record<string, …>` or a list of code strings; `` t(`error.${code}`) `` over a
+hand-written message catalogue; `switch (code)` over string literals;
+`.code === "…"` comparisons deciding the UI, where the code's type is `string`.
+**Go:** a `map[string]string` of code texts copied from the contract. **C#:**
+a `Dictionary<string, string>` of codes to texts. **Python/Kotlin:** a CLI or
+client module keeping the server's codes as its own string constants.
+
+**Questions:**
+1. Does the branch show the user text chosen by a refusal code, or map refusal
+   codes to texts?
+2. Are the codes declared in the client code, as keys of a `Record`, members
+   of a string list, cases of a `switch`, or keys of a map — rather than taken
+   as a type from the generated contract (`components["schemas"][…]`, a
+   generated enum, a shared contracts package)? The server's list is the
+   declaration; a client copy diverges silently.
+
+**Dirty if:** 1 = yes and 2 = yes.
+
+**Does not count:** a type imported or generated from the contract; a table
+checked against the contract type (`satisfies Record<ContractCode, string>`, a
+`when` exhaustive over the generated enum); a test; translating one code the
+fragment received as a typed member.
+
+**Dirty:**
+```ts
+const REFUSAL_TEXT: Record<string, string> = {   // a copy of the contract list
+  depot_not_found: "refusal.depotNotFound",
+  route_closed: "refusal.routeClosed",
+}
+```
+**Clean:**
+```ts
+type RefusalCode = components["schemas"]["RefusalCode"];
+const REFUSAL_TEXT = {
+  depot_not_found: "refusal.depotNotFound",
+  route_closed: "refusal.routeClosed",
+} as const satisfies Record<RefusalCode, string>;   // a missing code is a build error
 ```
 
 ## C16. The writer lets a forbidden transition pass silently

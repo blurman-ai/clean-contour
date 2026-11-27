@@ -147,3 +147,12 @@ host, ok := os.LookupEnv("PAYMENTS_HOST")
 
 // C12
 var page = template.Must(template.New("x").Funcs(template.FuncMap{"expiredSince": expiredSince}).Parse("{{if eq .Status \"failed\"}}down{{end}}"))
+
+// C15
+c.JSON(409, gin.H{"error": err.Error()})
+
+// C27
+c.JSON(409, gin.H{"error": "pick failed"})
+
+// C28
+var refusalTexts = map[string]string{"import_locked": "locked"}

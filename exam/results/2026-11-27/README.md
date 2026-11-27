@@ -124,3 +124,38 @@ same way: deepseek-v4-flash, 3 answers per fragment, worst counts, whole
 corpus — 10/10 dirty found, 0/10 clean flagged. Joins the cheap list.
 
 Report: `exam/runs/2026-11-27-deepseek-c26.json`.
+
+## #17 — C15 split into C15/C27/C28, C7 question 1 rewritten
+
+C15 covered three violations joined by "or"; it is now three cards, one
+question set each: C15 (the refusal reaches the user without its code), C27
+(one code or one text for several causes), C28 (the client declares the
+refusal codes itself). C15's corpus was split by which violation a fragment
+tests; C27 and C28 were refilled to 10+10. C7 question 1 got the test the
+fragment itself answers (does a value computed in the branch reach anything
+that is not a string shown to the user).
+
+DeepSeek flash, 3 answers per fragment, worst counts, whole corpus:
+
+| Card | dirty found | recall | clean flagged | false | verdict |
+|---|---:|---:|---:|---:|---|
+| C7 | 10/10 | 100% | 0/12 | 0% | PASS |
+| C15 | 10/10 | 100% | 0/10 | 0% | PASS |
+| C27 | 10/10 | 100% | 1/10 | 10% | PASS (at the gate) |
+| C28 | 9/10 | 90% | 1/10 | 10% | PASS (both at the gate) |
+
+Two corpus corrections were made while measuring, card texts untouched in
+both cases. First, C7-04 and C7-10 (the fragments behind the old C7 fails)
+decide only display text — the does-not-count of the card excludes them, so
+they were mislabeled all along; the guessed kind now reaches processing (a
+review flag, an invoice) and the label holds. Second, the first C27 clean
+set folded unknown codes into one generic text, which the new card's own
+question 2 calls dirty; the unknowns now surface with their own identity.
+
+The issue's "done when" asked for Sonnet; Sonnet is outside this run's model
+budget (DeepSeek only), so the pass is measured on deepseek-v4-flash and the
+Sonnet column stays unmeasured.
+
+Reports: `exam/runs/2026-11-27-deepseek-c15-split.json` (first pass),
+`exam/runs/2026-11-27-deepseek-c7-c27-fix.json` (final). C7, C15, C27 and
+C28 join the cheap list; C1, C4, C8, C10, C14 remain strong.

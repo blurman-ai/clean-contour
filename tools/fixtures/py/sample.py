@@ -246,3 +246,6 @@ def refund_deadline(order):
     return os.environ.get("PAYMENTS_SLOW_REFUND")
 host = os.environ["PAYMENTS_HOST"]
 level = getenv("LOG_LEVEL")
+
+# C15
+raise HTTPException(status_code=413, detail="Route file is too large")

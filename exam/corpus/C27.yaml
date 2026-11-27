@@ -1,0 +1,645 @@
+# C27 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C27-01
+  card: C27
+  expected: dirty
+  path: app/api/manifests.py
+  why: Parsing refuses for different reasons (encoding, columns, size), and the catch of all exceptions gives the user one code.
+  source: Shipment manifest upload handler.
+  code: |
+    @router.post("/{depot_id}/manifests", status_code=201)
+    async def upload_manifest(
+        depot_id: UUID,
+        file: UploadFile,
+        db: AsyncSession = Depends(get_db),
+        user: User = Depends(current_dispatcher),
+    ):
+        depot = await load_depot(db, depot_id, user)
+        raw = await file.read()
+        try:
+            rows = parse_manifest_csv(raw, max_rows=MANIFEST_MAX_ROWS)
+            shipments = [shipment_from_row(row, depot) for row in rows]
+        except Exception as exc:
+            log.warning("manifest_parse_failed depot_id=%s error=%s", depot_id, exc)
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "manifest_import_failed"},
+            ) from exc
+        manifest = Manifest(depot_id=depot.id, uploaded_by=user.id)
+        db.add(manifest)
+        for shipment in shipments:
+            shipment.manifest = manifest
+            db.add(shipment)
+        await db.commit()
+        return ManifestOut.model_validate(manifest)
+
+- id: C27-02
+  card: C27
+  expected: dirty
+  path: app/background/label_rendering.py
+  why: The background handler writes into the stored failure field that the user sees one code for any reason (font, size, unavailable template).
+  source: Background rendering of shipment labels.
+  code: |
+    async def render_labels(job_id: UUID) -> None:
+        async with session_scope() as db:
+            job = await db.get(LabelJob, job_id)
+            if job is None:
+                log.warning("label_job_missing job_id=%s", job_id)
+                return
+            try:
+                template = await load_label_template(job.template_id)
+                pages = [
+                    render_label(template, shipment)
+                    for shipment in await job.awaitable_attrs.shipments
+                ]
+                pdf = merge_pages(pages, max_bytes=LABEL_PDF_MAX_BYTES)
+                job.file_key = await storage.put(pdf, content_type="application/pdf")
+                transition_label_job(job, LabelJobState.READY)
+            except Exception as exc:
+                log.exception("label_render_failed job_id=%s", job_id)
+                job.failure_code = "label_render_failed"
+                transition_label_job(job, LabelJobState.FAILED)
+            await db.commit()
+
+- id: C27-03
+  card: C27
+  expected: dirty
+  path: src/features/carrier-connect/lib/connectErrorText.ts
+  why: The function reads the refusal code but reduces three different codes to one common text.
+  source: Choosing the refusal text when connecting a carrier.
+  code: |
+    import i18n from "@/shared/i18n";
+    import { readApiErrorCode } from "@/shared/api";
+
+    export function connectErrorText(error: unknown): string {
+      const code = readApiErrorCode(error);
+
+      if (code === "carrier_credentials_invalid") {
+        return i18n.t("carriers.connect.credentialsInvalid");
+      }
+      if (
+        code === "carrier_account_suspended" ||
+        code === "carrier_region_unsupported" ||
+        code === "carrier_contract_expired"
+      ) {
+        return i18n.t("carriers.connect.failed");
+      }
+      if (code === "carrier_already_connected") {
+        return i18n.t("carriers.connect.alreadyConnected");
+      }
+      return i18n.t("carriers.connect.failed");
+    }
+
+    export function isRetryable(error: unknown): boolean {
+      return readApiErrorCode(error) === "carrier_timeout";
+    }
+
+- id: C27-04
+  card: C27
+  expected: dirty
+  path: app/ingest/adapters.py
+  why: A catch of all exceptions maps every ingest failure — unreadable archive, bad schema, dead mirror — to one refusal code for the user.
+  source: A feed ingest adapter.
+  code: |
+    @router.post("/feeds/{feed_id}/pull", status_code=202)
+    async def pull_feed(feed_id: UUID, db: AsyncSession = Depends(get_db)):
+        feed = await load_feed(db, feed_id)
+        try:
+            archive = await fetch_archive(feed.url)
+            rows = unpack_rows(archive, schema=feed.row_schema)
+            staged = stage_rows(db, feed, rows)
+        except Exception as exc:
+            log.error("feed_pull_failed feed_id=%s error=%s", feed_id, exc)
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "feed_pull_failed"},
+            ) from exc
+        feed.last_pull_at = func.now()
+        await db.commit()
+        return FeedPullOut.model_validate(staged)
+
+
+    def feed_view(feed) -> dict:
+        return {"id": str(feed.id), "url": feed.url}
+
+- id: C27-05
+  card: C27
+  expected: dirty
+  path: app/exports/render.py
+  why: An unknown failure falls to the same generic refusal code as the known ones — the caller cannot distinguish quota from corruption from a crash.
+  source: An export endpoint refusing with a fallback code.
+  code: |
+    KNOWN_EXPORT_REFUSALS = ("export_limit_reached", "export_format_closed")
+
+
+    def export_refusal(exc: Exception) -> dict:
+        reason = getattr(exc, "reason", None)
+        if reason in KNOWN_EXPORT_REFUSALS:
+            return {"code": reason}
+        return {"code": "export_failed"}
+
+
+    @router.post("/exports", status_code=202)
+    async def start_export(payload: ExportIn, db: AsyncSession = Depends(get_db)):
+        try:
+            job = schedule_export(payload)
+        except ExportRefused as exc:
+            raise HTTPException(status_code=409, detail=export_refusal(exc)) from exc
+        except Exception as exc:
+            log.exception("export_crash")
+            raise HTTPException(status_code=409, detail=export_refusal(exc)) from exc
+        await db.commit()
+        return ExportJobOut.model_validate(job)
+
+- id: C27-06
+  card: C27
+  expected: dirty
+  path: src/features/import-wizard/lib/importFailure.ts
+  why: The helper maps every import refusal — unknown code included — to one and the same message key.
+  source: A frontend mapper for import refusals.
+  code: |
+    import i18n from "@/shared/i18n";
+    import { readApiErrorCode } from "@/shared/api";
+
+    const HANDLED = new Set(["import_locked", "import_too_large", "import_bad_columns"]);
+
+    export function importFailureKey(error: unknown): string {
+      const code = readApiErrorCode(error) ?? "";
+      return "import.failure.generic";
+    }
+
+    export function isHandled(code: string | null): boolean {
+      return code != null && HANDLED.has(code);
+    }
+
+    export function failureBadge(code: string | null): "info" | "warn" {
+      return isHandled(code) ? "info" : "warn";
+    }
+
+- id: C27-07
+  card: C27
+  expected: dirty
+  path: app/src/main/kotlin/scanning/BatchScan.kt
+  why: runCatching with getOrElse hands one refusal object to the UI for any failure of the batch scan — device offline, bad license, empty tray alike.
+  source: A Kotlin batch scan wrapper.
+  code: |
+    package scanning
+
+    data class ScanResult(val pages: List<Page>) {
+        companion object {
+            val REFUSED = ScanResult(emptyList())
+        }
+    }
+
+    sealed class ScanOutcome {
+        data class Done(val result: ScanResult) : ScanOutcome()
+        data class Refused(val code: String) : ScanOutcome()
+    }
+
+    fun runBatch(device: ScanDevice, tray: Tray): ScanOutcome =
+        runCatching {
+            ScanResult(device.scan(tray))
+        }.getOrElse {
+            log.warn("batch_scan_failed tray=%s", tray.id)
+            ScanOutcome.Refused("scan_failed")
+        }
+
+- id: C27-08
+  card: C27
+  expected: dirty
+  path: internal/fulfillment/pick.go
+  why: Every pick refusal — unknown sku, empty shelf, locked wave — leaves the endpoint as the same "pick failed" message.
+  source: A gin pick handler collapsing all refusals.
+  code: |
+    func (s *Server) pick(c *gin.Context) {
+        var req PickRequest
+        if err := c.ShouldBindJSON(&req); err != nil {
+            c.JSON(400, gin.H{"error": "pick failed"})
+            return
+        }
+        err := s.store.Pick(c, req)
+        if err != nil {
+            c.JSON(409, gin.H{"error": "pick failed"})
+            return
+        }
+        c.JSON(201, gin.H{"picked": true})
+    }
+
+    func (s *Server) health(c *gin.Context) {
+        c.JSON(200, gin.H{"ok": true})
+    }
+
+- id: C27-09
+  card: C27
+  expected: dirty
+  path: Services/Ingest/UploadEndpoint.cs
+  why: One IExceptionHandler maps every exception of the upload — validation, storage, virus scan — to a single refusal code.
+  source: A C# exception handler for uploads.
+  code: |
+    using Microsoft.AspNetCore.Diagnostics;
+
+    namespace Services.Ingest;
+
+    public sealed class UploadExceptionHandler : IExceptionHandler
+    {
+        public async ValueTask<bool> TryHandleAsync(HttpContext ctx, Exception ex)
+        {
+            ctx.Response.StatusCode = StatusCodes.Status422UnprocessableEntity;
+            await ctx.Response.WriteAsJsonAsync(new ProblemDetails
+            {
+                Status = ctx.Response.StatusCode,
+                Title = "upload refused",
+                Extensions = { ["code"] = "upload_failed" },
+            });
+            return true;
+        }
+    }
+
+    public static class UploadSetup
+    {
+        public static void AddUpload(this IServiceCollection services)
+        {
+            services.AddExceptionHandler<UploadExceptionHandler>();
+        }
+    }
+
+- id: C27-10
+  card: C27
+  expected: dirty
+  path: Services/Print/LabelPrinter.cs
+  why: The catch sets one failure code on the job for every printing cause — missing tray, bad template, driver crash — and marks the job refused.
+  source: A label printing worker.
+  code: |
+    using System;
+
+    namespace Services.Print;
+
+    public sealed class LabelPrinter
+    {
+        private readonly Driver _driver = new Driver();
+        private readonly JobStore _store;
+
+        public LabelPrinter(JobStore store) => _store = store;
+
+        public void Print(PrintJob job)
+        {
+            try
+            {
+                var raw = _driver.Render(job.Template, job.Payload);
+                _driver.Send(raw);
+                _store.MarkDone(job.Id);
+            }
+            catch (Exception ex)
+            {
+                _store.MarkRefused(job.Id, "print_failed");
+            }
+        }
+    }
+
+- id: C27-11
+  card: C27
+  expected: clean
+  path: app/api/bookings.py
+  why: Each failure class of the external carrier is mapped to its own member of the code list, there is no common code, and an unknown failure is rethrown.
+  source: Carrier booking handler.
+  code: |
+    @router.post("/{shipment_id}/booking")
+    async def book_shipment(
+        shipment_id: UUID,
+        db: AsyncSession = Depends(get_db),
+        carrier: CarrierClient = Depends(get_carrier),
+    ):
+        shipment = await load_shipment(db, shipment_id)
+        try:
+            booking = await carrier.book(shipment.to_carrier_payload())
+        except CarrierTimeout as exc:
+            raise HTTPException(
+                status_code=504,
+                detail={"code": BookingRefusalCode.CARRIER_TIMEOUT.value},
+            ) from exc
+        except CarrierRejected as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": BookingRefusalCode(exc.reason).value},
+            ) from exc
+        except CarrierQuotaExceeded as exc:
+            raise HTTPException(
+                status_code=429,
+                detail={"code": BookingRefusalCode.CARRIER_QUOTA_EXCEEDED.value},
+            ) from exc
+        shipment.booking_ref = booking.reference
+        await db.commit()
+        return BookingOut.model_validate(booking)
+
+- id: C27-12
+  card: C27
+  expected: clean
+  path: app/background/label_rendering.py
+  why: Near miss — the rendering refusal carries its own member taken from the exception, and an unexpected failure is rethrown, not recorded with a common code.
+  source: Background rendering of shipment labels.
+  code: |
+    async def render_labels(job_id: UUID) -> None:
+        async with session_scope() as db:
+            job = await db.get(LabelJob, job_id)
+            if job is None:
+                log.warning("label_job_missing job_id=%s", job_id)
+                return
+            try:
+                template = await load_label_template(job.template_id)
+                pages = [
+                    render_label(template, shipment)
+                    for shipment in await job.awaitable_attrs.shipments
+                ]
+                pdf = merge_pages(pages, max_bytes=LABEL_PDF_MAX_BYTES)
+            except LabelRefused as exc:
+                job.failure_code = exc.code
+                transition_label_job(job, LabelJobState.FAILED)
+                await db.commit()
+                return
+            except Exception:
+                log.exception("label_render_crashed job_id=%s", job_id)
+                raise
+            job.file_key = await storage.put(pdf, content_type="application/pdf")
+            transition_label_job(job, LabelJobState.READY)
+            await db.commit()
+
+- id: C27-13
+  card: C27
+  expected: clean
+  path: app/services/depot_sync.py
+  why: The catch of all exceptions only writes the failure to the log and rethrows it — no refusal code is invented here.
+  source: Synchronization of the warehouse reference with an external registry.
+  code: |
+    async def sync_depots(db: AsyncSession, registry: RegistryClient) -> int:
+        updated = 0
+        cursor: str | None = None
+        while True:
+            try:
+                page = await registry.list_depots(cursor=cursor, limit=200)
+            except Exception:
+                log.exception("depot_sync_page_failed cursor=%s", cursor)
+                raise
+            for item in page.items:
+                depot = await db.scalar(
+                    select(Depot).where(Depot.registry_id == item.id)
+                )
+                if depot is None:
+                    db.add(Depot.from_registry(item))
+                else:
+                    depot.apply_registry(item)
+                updated += 1
+            await db.commit()
+            if page.next_cursor is None:
+                return updated
+            cursor = page.next_cursor
+
+- id: C27-14
+  card: C27
+  expected: clean
+  path: src/features/import-wizard/lib/parseImport.ts
+  why: Near miss — every known refusal keeps its own message key and an unknown code is passed through as its own code, no generic folding.
+  source: A frontend mapper keeping codes apart.
+  code: |
+    import i18n from "@/shared/i18n";
+    import { readApiErrorCode } from "@/shared/api";
+    import type { components } from "@/shared/api/generated/schema";
+
+    type ImportRefusal = components["schemas"]["ImportRefusalCode"];
+
+    const keys = {
+      import_locked: "import.failure.locked",
+      import_too_large: "import.failure.tooLarge",
+      import_bad_columns: "import.failure.badColumns",
+    } as const satisfies Record<ImportRefusal, string>;
+
+    export function importFailure(error: unknown): { key: string; code: ImportRefusal } {
+      const code = readApiErrorCode<ImportRefusal>(error);
+      if (code == null) {
+        throw error;                       // no refusal is invented for a codeless failure
+      }
+      if (code in keys) {
+        return { key: keys[code], code };
+      }
+      return { key: `import.failure.${code}`, code };   // every code keeps its own text
+    }
+
+    export function describe(code: ImportRefusal): string {
+      return code;
+    }
+
+- id: C27-15
+  card: C27
+  expected: clean
+  path: app/src/main/kotlin/scanning/BatchScan.kt
+  why: Near miss — each failure class maps to its own refusal member and an unexpected throwable is rethrown, not folded into one code.
+  source: The same scan wrapper keeping causes apart.
+  code: |
+    package scanning
+
+    sealed class ScanRefusal {
+        object DeviceOffline : ScanRefusal()
+        object LicenseInvalid : ScanRefusal()
+        data class TrayJam(val tray: String) : ScanRefusal()
+    }
+
+    sealed class ScanOutcome {
+        data class Done(val result: ScanResult) : ScanOutcome()
+        data class Refused(val refusal: ScanRefusal) : ScanOutcome()
+    }
+
+    fun runBatch(device: ScanDevice, tray: Tray): ScanOutcome {
+        try {
+            return ScanOutcome.Done(ScanResult(device.scan(tray)))
+        } catch (e: DeviceUnreachable) {
+            return ScanOutcome.Refused(ScanRefusal.DeviceOffline)
+        } catch (e: LicenseException) {
+            return ScanOutcome.Refused(ScanRefusal.LicenseInvalid)
+        } catch (e: TrayJammed) {
+            return ScanOutcome.Refused(ScanRefusal.TrayJam(tray.id))
+        }
+    }
+
+- id: C27-16
+  card: C27
+  expected: clean
+  path: internal/fulfillment/pick.go
+  why: Near miss — every refusal is matched to its own code by errors.Is and an unmatched error is returned as itself, no invented common text.
+  source: The same pick handler matching sentinels.
+  code: |
+    var (
+        ErrUnknownSku  = errors.New("unknown sku")
+        ErrShelfEmpty  = errors.New("shelf empty")
+        ErrWaveLocked  = errors.New("wave locked")
+    )
+
+    func refusalCode(err error) string {
+        switch {
+        case errors.Is(err, ErrUnknownSku):
+            return "pick_unknown_sku"
+        case errors.Is(err, ErrShelfEmpty):
+            return "pick_shelf_empty"
+        case errors.Is(err, ErrWaveLocked):
+            return "pick_wave_locked"
+        default:
+            return ""
+        }
+    }
+
+    func (s *Server) pick(c *gin.Context) {
+        var req PickRequest
+        if err := c.ShouldBindJSON(&req); err != nil {
+            c.JSON(400, gin.H{"error": "bad request"})
+            return
+        }
+        err := s.store.Pick(c, req)
+        if err != nil {
+            if code := refusalCode(err); code != "" {
+                c.JSON(409, gin.H{"code": code})
+                return
+            }
+            _ = c.Error(err)               // unexpected errors surface with their own identity
+            c.JSON(500, gin.H{"code": "internal_panic"})
+            return
+        }
+        c.JSON(201, gin.H{"picked": true})
+    }
+
+- id: C27-17
+  card: C27
+  expected: clean
+  path: internal/notify/send.go
+  why: Near miss — the helper maps each typed refusal to its own code and passes anything else through unwrapped.
+  source: A notifier refusing per cause.
+  code: |
+    package notify
+
+    type Refusal struct {
+        Code string
+        Err  error
+    }
+
+    func Classify(err error) (Refusal, bool) {
+        var rate RateLimited
+        if errorsAs(err, &rate) {
+            return Refusal{Code: "notify_rate_limited", Err: err}, true
+        }
+        var auth AuthRejected
+        if errorsAs(err, &auth) {
+            return Refusal{Code: "notify_auth_rejected", Err: err}, true
+        }
+        var quota QuotaExceeded
+        if errorsAs(err, &quota) {
+            return Refusal{Code: "notify_quota_exceeded", Err: err}, true
+        }
+        return Refusal{}, false
+    }
+
+    func errorsAs(err error, target any) bool {
+        return errors.As(err, target)
+    }
+
+- id: C27-18
+  card: C27
+  expected: clean
+  path: Services/Ingest/UploadEndpoint.cs
+  why: Near miss — each expected refusal class returns its own code and unexpected exceptions bubble to the framework, no single handler folding.
+  source: The same upload endpoint refusing per cause.
+  code: |
+    using Microsoft.AspNetCore.Mvc;
+
+    namespace Services.Ingest;
+
+    public sealed class UploadEndpoint : ControllerBase
+    {
+        private readonly Stager _stager;
+
+        public UploadEndpoint(Stager stager) => _stager = stager;
+
+        [HttpPost("/uploads")]
+        public async Task<IActionResult> Upload(UploadCommand command)
+        {
+            try
+            {
+                var staged = await _stager.StageAsync(command);
+                return Accepted(staged);
+            }
+            catch (SchemaMismatch ex)
+            {
+                return UnprocessableEntity(Refusal.Of("upload_bad_schema", ex));
+            }
+            catch (ArchiveTooLarge ex)
+            {
+                return UnprocessableEntity(Refusal.Of("upload_too_large", ex));
+            }
+            catch (MirrorUnavailable ex)
+            {
+                return UnprocessableEntity(Refusal.Of("upload_mirror_down", ex));
+            }
+        }
+    }
+
+- id: C27-19
+  card: C27
+  expected: clean
+  path: Services/Print/LabelPrinter.cs
+  why: Near miss — the printer maps every driver failure to its own code member and an unexpected failure is rethrown for the framework, not recorded with a common code.
+  source: The same printer keeping causes apart.
+  code: |
+    using System;
+
+    namespace Services.Print;
+
+    public sealed class LabelPrinter
+    {
+        private readonly Driver _driver = new Driver();
+        private readonly JobStore _store;
+
+        public LabelPrinter(JobStore store) => _store = store;
+
+        public void Print(PrintJob job)
+        {
+            try
+            {
+                var raw = _driver.Render(job.Template, job.Payload);
+                _driver.Send(raw);
+                _store.MarkDone(job.Id);
+            }
+            catch (TrayEmpty ex)
+            {
+                _store.MarkRefused(job.Id, "print_tray_empty");
+            }
+            catch (TemplateMissing ex)
+            {
+                _store.MarkRefused(job.Id, "print_template_missing");
+            }
+            catch (DriverCrashed)
+            {
+                throw;   // the framework records the crash, no invented code
+            }
+        }
+    }
+
+- id: C27-20
+  card: C27
+  expected: clean
+  path: src/features/import-wizard/lib/guard.ts
+  why: Near miss — the catch only logs and rethrows; the refusal the user sees keeps whatever code the lower layer attached.
+  source: An import guard that never invents a refusal.
+  code: |
+    import { logger } from "@/shared/lib/logger";
+
+    export async function guardedImport<T>(run: () => Promise<T>): Promise<T> {
+      try {
+        return await run();
+      } catch (error) {
+        logger.warn("import_step_failed", { error: String(error) });
+        throw error;
+      }
+    }
+
+    export function stepName(index: number): string {
+      return `import.step.${index}`;
+    }
+
+    export function totalSteps(plan: { steps: string[] }): number {
+      return plan.steps.length;
+    }

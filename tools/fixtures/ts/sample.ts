@@ -174,3 +174,8 @@ const stamped = new Date();
 // C26
 if (process.env.PAYMENTS_FAST_REFUND === "1") { return 60; }
 const host = process.env["PAYMENTS_HOST"];
+
+// C28
+const table: Record<string, string> = { not_found: "refusal.notFound" };
+const key = t(`error.${code}`);
+const generic = "import.failure.generic";

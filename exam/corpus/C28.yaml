@@ -1,0 +1,572 @@
+# C28 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C28-01
+  card: C28
+  expected: dirty
+  path: src/shared/api/lib/refusalText.ts
+  why: The refusal text table is declared as Record<string, string>, so a contract code without text is not caught by the compiler and falls to the generic text.
+  source: Shared function that chooses the refusal text by the response code.
+  code: |
+    import i18n from "@/shared/i18n";
+    import { readApiErrorCode } from "./apiError";
+
+    const REFUSAL_TEXT: Record<string, string> = {
+      depot_not_found: "refusal.depotNotFound",
+      depot_name_taken: "refusal.depotNameTaken",
+      route_closed: "refusal.routeClosed",
+      carrier_unavailable: "refusal.carrierUnavailable",
+      manifest_locked: "refusal.manifestLocked",
+    };
+
+    export function refusalMessage(error: unknown): string {
+      const code = readApiErrorCode(error);
+      if (code && code in REFUSAL_TEXT) {
+        return i18n.t(REFUSAL_TEXT[code]);
+      }
+      return i18n.t("refusal.generic");
+    }
+
+    export function isKnownRefusal(error: unknown): boolean {
+      const code = readApiErrorCode(error);
+      return code != null && code in REFUSAL_TEXT;
+    }
+
+- id: C28-02
+  card: C28
+  expected: dirty
+  path: src/shared/api/lib/knownCodes.ts
+  why: The client keeps its own copy of the code list as strings, and a code that is not in the copy gets the generic text.
+  source: List of known refusal codes and the choice of text.
+  code: |
+    import i18n from "@/shared/i18n";
+    import { readApiErrorCode } from "./apiError";
+
+    export const BOOKING_ERROR_CODES = [
+      "carrier_timeout",
+      "carrier_quota_exceeded",
+      "shipment_already_booked",
+      "shipment_weight_exceeded",
+    ] as const;
+
+    type BookingErrorCode = (typeof BOOKING_ERROR_CODES)[number];
+
+    function isBookingErrorCode(code: string | null): code is BookingErrorCode {
+      return code != null && (BOOKING_ERROR_CODES as readonly string[]).includes(code);
+    }
+
+    export function bookingErrorText(error: unknown): string {
+      const code = readApiErrorCode(error);
+      if (isBookingErrorCode(code)) {
+        return i18n.t(`bookings.refusal.${code}`);
+      }
+      return i18n.t("bookings.refusal.generic");
+    }
+
+- id: C28-03
+  card: C28
+  expected: dirty
+  path: src/widgets/billing/lib/declineText.ts
+  why: The switch chooses the decline text over hand-written string cases instead of the generated union, so a renamed contract code compiles fine and falls to default.
+  source: A billing widget choosing decline texts.
+  code: |
+    import i18n from "@/shared/i18n";
+
+    export function declineText(code: string | null): string {
+      switch (code) {
+        case "card_declined":
+          return i18n.t("billing.decline.card");
+        case "insufficient_funds":
+          return i18n.t("billing.decline.funds");
+        case "three_ds_failed":
+          return i18n.t("billing.decline.threeds");
+        default:
+          return i18n.t("billing.decline.generic");
+      }
+    }
+
+    export function declineTone(code: string | null): "warn" | "error" {
+      return code === "card_declined" ? "warn" : "error";
+    }
+
+- id: C28-04
+  card: C28
+  expected: dirty
+  path: src/features/payments/lib/failureKeys.ts
+  why: The message catalogue keys are written by hand next to the code, and an unknown code silently renders the raw catalogue key to the user.
+  source: A template-literal catalogue over refusal codes.
+  code: |
+    import i18n from "@/shared/i18n";
+    import { readApiErrorCode } from "@/shared/api";
+
+    const CATALOGUE = "payments.refusal";
+
+    export function refusalKey(error: unknown): string {
+      const code = readApiErrorCode(error);
+      if (!code) {
+        return `${CATALOGUE}.unexpected`;
+      }
+      return i18n.exists(`${CATALOGUE}.${code}`)
+        ? `${CATALOGUE}.${code}`
+        : `${CATALOGUE}.unexpected`;
+    }
+
+    export function render(error: unknown): string {
+      return i18n.t(refusalKey(error));
+    }
+
+- id: C28-05
+  card: C28
+  expected: dirty
+  path: app/cli/returns.py
+  why: The CLI client keeps its own list of the server's refusal codes as plain strings and picks texts from it — the server's list can drift and nothing catches it.
+  source: A command line client of the returns API.
+  code: |
+    import sys
+
+    KNOWN_REFUSALS = {
+        "window_closed": "The return window for this order is closed.",
+        "no_payment": "No payment found for this order.",
+        "duplicate": "A refund for this order already exists.",
+    }
+    GENERIC = "The return was refused."
+
+
+    def explain(payload: dict) -> str:
+        code = payload.get("code")
+        if code in KNOWN_REFUSALS:
+            return KNOWN_REFUSALS[code]
+        return GENERIC
+
+
+    def run(order_id: str, client) -> int:
+        payload = client.post(f"/returns", json={"order_id": order_id})
+        if payload.get("refused"):
+            print(explain(payload), file=sys.stderr)
+            return 1
+        return 0
+
+- id: C28-06
+  card: C28
+  expected: dirty
+  path: app/src/main/kotlin/claims/ClaimErrors.kt
+  why: The client maps codes by string branches of its own instead of the generated enum — a code renamed in the contract keeps hitting the else arm.
+  source: A Kotlin claims client choosing texts by string code.
+  code: |
+    package claims
+
+    fun claimErrorText(code: String?): String = when (code) {
+        "claim_window_closed" -> "The claim window is closed."
+        "claim_already_open" -> "A claim is already open for this order."
+        "evidence_missing" -> "Attach at least one photo."
+        else -> "The claim was refused."
+    }
+
+    fun claimErrorTone(code: String?): Int =
+        if (code == "claim_window_closed") TONE_WARN else TONE_ERROR
+
+    const val TONE_WARN = 1
+    const val TONE_ERROR = 2
+
+    fun toneFor(code: String?): Int = claimErrorTone(code)
+
+- id: C28-07
+  card: C28
+  expected: dirty
+  path: internal/apiclient/refusals.go
+  why: The Go client declares the refusal texts over its own map keyed by string literals copied from the contract — nothing checks the copy against the contract.
+  source: A Go API client with a local code catalogue.
+  code: |
+    package apiclient
+
+    var refusalTexts = map[string]string{
+        "import_locked":     "The import is locked by another run.",
+        "import_too_large":  "The import archive is too large.",
+        "import_bad_schema": "The archive does not match the schema.",
+    }
+
+    func RefusalText(code string) string {
+        if text, ok := refusalTexts[code]; ok {
+            return text
+        }
+        return "The import was refused."
+    }
+
+    func Known(code string) bool {
+        _, ok := refusalTexts[code]
+        return ok
+    }
+
+- id: C28-08
+  card: C28
+  expected: dirty
+  path: Services/Billing/DeclineMessages.cs
+  why: The WPF client keeps the code texts in its own Dictionary of string literals, so a new server code silently shows the generic text.
+  source: A WPF billing client with a local catalogue.
+  code: |
+    using System.Collections.Generic;
+
+    namespace Services.Billing;
+
+    public static class DeclineMessages
+    {
+        private static readonly Dictionary<string, string> Texts = new()
+        {
+            ["card_declined"] = "The card was declined by the bank.",
+            ["insufficient_funds"] = "There are not enough funds on the card.",
+            ["three_ds_failed"] = "The 3-D Secure check did not pass.",
+        };
+
+        public static string TextFor(string? code)
+            => code != null && Texts.TryGetValue(code, out var text) ? text : "The payment was declined.";
+
+        public static bool Known(string code) => Texts.ContainsKey(code);
+    }
+
+- id: C28-09
+  card: C28
+  expected: dirty
+  path: src/features/disputes/lib/disputeRefusal.ts
+  why: Comparisons against hand-written code strings decide the UI, and the type is string — the generated union is not used anywhere in the fragment.
+  source: A disputes client branching on raw codes.
+  code: |
+    import i18n from "@/shared/i18n";
+
+    export function refusalHint(code: string | undefined): string {
+      if (code === "dispute_window_closed") {
+        return i18n.t("disputes.hint.windowClosed");
+      }
+      if (code === "dispute_evidence_locked") {
+        return i18n.t("disputes.hint.evidenceLocked");
+      }
+      if (code === "dispute_assigned") {
+        return i18n.t("disputes.hint.assigned");
+      }
+      return i18n.t("disputes.hint.generic");
+    }
+
+    export function canEdit(code: string | undefined): boolean {
+      return code !== "dispute_evidence_locked";
+    }
+
+- id: C28-10
+  card: C28
+  expected: dirty
+  path: app/src/main/kotlin/claims/CodeBook.kt
+  why: A hand-maintained const list mirrors the server's refusal codes inside the client; nothing ties the copy to the contract.
+  source: A Kotlin code book mirroring the contract.
+  code: |
+    package claims
+
+    object CodeBook {
+        val CLAIM_REFUSALS = listOf(
+            "claim_window_closed",
+            "claim_already_open",
+            "evidence_missing",
+            "assignee_missing",
+        )
+
+        fun isRefusal(code: String): Boolean = code in CLAIM_REFUSALS
+
+        fun label(code: String): String =
+            if (isRefusal(code)) "claim.refusal.$code" else "claim.refusal.generic"
+    }
+
+- id: C28-11
+  card: C28
+  expected: clean
+  path: app/schemas/manifests.py
+  why: The refusal codes live in the server's schema as one declared list — this is the contract the client must take its type from.
+  source: Manifest response schema and the list of failure codes.
+  code: |
+    class ManifestFailureCode(StrEnum):
+        ENCODING_INVALID = "manifest_encoding_invalid"
+        COLUMNS_MISSING = "manifest_columns_missing"
+        ROWS_LIMIT_EXCEEDED = "manifest_rows_limit_exceeded"
+        DEPOT_MISMATCH = "manifest_depot_mismatch"
+
+
+    class ManifestState(StrEnum):
+        PROCESSING = "processing"
+        PROCESSED = "processed"
+        FAILED = "failed"
+
+
+    class ManifestOut(BaseModel):
+        model_config = ConfigDict(from_attributes=True)
+
+        id: UUID
+        depot_id: UUID
+        file_name: str
+        state: ManifestState
+        failure_code: ManifestFailureCode | None
+        rows_total: int
+        rows_accepted: int
+        created_at: datetime
+
+- id: C28-12
+  card: C28
+  expected: clean
+  path: src/features/return-request/model/useRequestReturn.ts
+  why: Near miss — the type comes from the generated contract and the table is checked against it at compile time (satisfies Record), so a code without text is a build error.
+  source: A return-request hook and a typed refusal table.
+  code: |
+    import { useMutation } from "@tanstack/react-query";
+    import { useTranslation } from "react-i18next";
+    import { notifications } from "@mantine/notifications";
+    import { api, readApiErrorCode } from "@/shared/api";
+    import type { components } from "@/shared/api/generated/schema";
+
+    type ReturnRefusalCode = components["schemas"]["ReturnRefusalCode"];
+
+    const refusalText = {
+      return_window_closed: "returns.refusal.windowClosed",
+      return_no_payment: "returns.refusal.noPayment",
+      return_already_requested: "returns.refusal.alreadyRequested",
+    } as const satisfies Record<ReturnRefusalCode, string>;
+
+    export function useRequestReturn(orderId: string) {
+      const { t } = useTranslation();
+      return useMutation({
+        mutationFn: (payload: components["schemas"]["ReturnRequest"]) =>
+          api.POST("/orders/{order_id}/returns", {
+            params: { path: { order_id: orderId } },
+            body: payload,
+          }),
+        onError: (error) => {
+          const code = readApiErrorCode<ReturnRefusalCode>(error);
+          notifications.show({ color: "red", message: t(refusalText[code]) });
+        },
+      });
+    }
+
+- id: C28-13
+  card: C28
+  expected: clean
+  path: src/features/carrier-connect/lib/connectText.ts
+  why: Near miss — the exhaustive Record is keyed by the generated union and the helper returns the typed key, no string copies anywhere.
+  source: A carrier connect helper typed from the contract.
+  code: |
+    import i18n from "@/shared/i18n";
+    import type { components } from "@/shared/api/generated/schema";
+
+    type ConnectRefusal = components["schemas"]["ConnectRefusalCode"];
+
+    const text: Record<ConnectRefusal, string> = {
+      carrier_credentials_invalid: "carriers.connect.credentialsInvalid",
+      carrier_account_suspended: "carriers.connect.suspended",
+      carrier_region_unsupported: "carriers.connect.region",
+      carrier_already_connected: "carriers.connect.alreadyConnected",
+    };
+
+    export function connectTextKey(code: ConnectRefusal): string {
+      return i18n.t(text[code]);
+    }
+
+    export function allCodes(): ConnectRefusal[] {
+      return Object.keys(text) as ConnectRefusal[];
+    }
+
+- id: C28-14
+  card: C28
+  expected: clean
+  path: app/cli/returns.py
+  why: Near miss — the CLI imports the shared contract package and keys its texts by the enum members, so a renamed code breaks the import instead of drifting.
+  source: The same CLI client taking the codes from the contract module.
+  code: |
+    import sys
+
+    from shared.contracts import ReturnRefusal
+
+    TEXTS = {
+        ReturnRefusal.WINDOW_CLOSED: "The return window for this order is closed.",
+        ReturnRefusal.NO_PAYMENT: "No payment found for this order.",
+        ReturnRefusal.DUPLICATE: "A refund for this order already exists.",
+    }
+    GENERIC = "The return was refused."
+
+
+    def explain(payload: dict) -> str:
+        try:
+            code = ReturnRefusal(payload.get("code"))
+        except ValueError:
+            return GENERIC
+        return TEXTS.get(code, GENERIC)
+
+
+    def run(order_id: str, client) -> int:
+        payload = client.post("/returns", json={"order_id": order_id})
+        if payload.get("refused"):
+            print(explain(payload), file=sys.stderr)
+            return 1
+        return 0
+
+- id: C28-15
+  card: C28
+  expected: clean
+  path: app/src/main/kotlin/claims/ClaimErrors.kt
+  why: Near miss — the when is exhaustive over the enum generated from the contract, so a code without an arm is a compile error, not an else.
+  source: The same claims client over the generated enum.
+  code: |
+    package claims
+
+    import api.claims.ClaimRefusalCode
+
+    fun claimErrorText(code: ClaimRefusalCode?): String = when (code) {
+        ClaimRefusalCode.CLAIM_WINDOW_CLOSED -> "The claim window is closed."
+        ClaimRefusalCode.CLAIM_ALREADY_OPEN -> "A claim is already open for this order."
+        ClaimRefusalCode.EVIDENCE_MISSING -> "Attach at least one photo."
+        ClaimRefusalCode.ASSIGNEE_MISSING -> "No assignee accepted the claim."
+        null -> "The claim was refused."
+    }
+
+    fun claimErrorTone(code: ClaimRefusalCode?): Int = when (code) {
+        ClaimRefusalCode.CLAIM_WINDOW_CLOSED -> TONE_WARN
+        null -> TONE_ERROR
+        else -> TONE_ERROR
+    }
+
+    const val TONE_WARN = 1
+    const val TONE_ERROR = 2
+
+- id: C28-16
+  card: C28
+  expected: clean
+  path: internal/apiclient/refusals.go
+  why: Near miss — the catalogue is keyed by the constants of the generated contract package; the strings exist only in the contract module.
+  source: The same Go client keyed by contract constants.
+  code: |
+    package apiclient
+
+    import contract "gen/api/contracts"
+
+    var refusalTexts = map[contract.ImportRefusal]string{
+        contract.ImportLocked:     "The import is locked by another run.",
+        contract.ImportTooLarge:   "The import archive is too large.",
+        contract.ImportBadSchema:  "The archive does not match the schema.",
+    }
+
+    func RefusalText(code contract.ImportRefusal) string {
+        if text, ok := refusalTexts[code]; ok {
+            return text
+        }
+        return "The import was refused."
+    }
+
+    func AllCodes() []contract.ImportRefusal {
+        out := make([]contract.ImportRefusal, 0, len(refusalTexts))
+        for code := range refusalTexts {
+            out = append(out, code)
+        }
+        return out
+    }
+
+- id: C28-17
+  card: C28
+  expected: clean
+  path: Services/Billing/DeclineMessages.cs
+  why: Near miss — the switch is exhaustive over the NSwag-generated enum (CS8509 is an error in this project), the texts live next to the generated type.
+  source: The same WPF client over the generated enum.
+  code: |
+    using System;
+    using Billing.Contracts;
+
+    namespace Services.Billing;
+
+    public static class DeclineMessages
+    {
+        public static string TextFor(DeclineCode? code) => code switch
+        {
+            DeclineCode.CardDeclined => "The card was declined by the bank.",
+            DeclineCode.InsufficientFunds => "There are not enough funds on the card.",
+            DeclineCode.ThreeDsFailed => "The 3-D Secure check did not pass.",
+            null => "The payment was declined.",
+            _ => throw new ArgumentOutOfRangeException(nameof(code), code, null)
+        };
+
+        public static bool Known(DeclineCode code)
+            => code is DeclineCode.CardDeclined
+               or DeclineCode.InsufficientFunds
+               or DeclineCode.ThreeDsFailed;
+    }
+
+- id: C28-18
+  card: C28
+  expected: clean
+  path: src/features/disputes/lib/disputeRefusal.ts
+  why: Near miss — the hint function takes the generated union, and the comparisons are against its members, not raw strings.
+  source: The same disputes client over the generated union.
+  code: |
+    import i18n from "@/shared/i18n";
+    import type { components } from "@/shared/api/generated/schema";
+
+    type DisputeRefusal = components["schemas"]["DisputeRefusalCode"];
+
+    const hints: Record<DisputeRefusal, string> = {
+      dispute_window_closed: "disputes.hint.windowClosed",
+      dispute_evidence_locked: "disputes.hint.evidenceLocked",
+      dispute_assigned: "disputes.hint.assigned",
+    };
+
+    export function refusalHint(code: DisputeRefusal): string {
+      return i18n.t(hints[code]);
+    }
+
+    export function canEdit(code: DisputeRefusal): boolean {
+      return code !== "dispute_evidence_locked";
+    }
+
+- id: C28-19
+  card: C28
+  expected: clean
+  path: src/shared/api/lib/showRefusal.tsx
+  why: Near miss — the shared shower takes the code as a typed member of the contract union and looks the text up in a table the compiler checks.
+  source: The shared refusal shower used by features.
+  code: |
+    import { notifications } from "@mantine/notifications";
+    import i18n from "@/shared/i18n";
+    import type { components } from "@/shared/api/generated/schema";
+
+    type AnyRefusalCode =
+      | components["schemas"]["DepotRefusalCode"]
+      | components["schemas"]["RouteRefusalCode"];
+
+    const tables = {
+      depot: {
+        depot_not_found: "refusal.depotNotFound",
+        depot_name_taken: "refusal.depotNameTaken",
+      },
+      route: {
+        route_closed: "refusal.routeClosed",
+      },
+    } as const;
+
+    export function showDepotRefusal(code: components["schemas"]["DepotRefusalCode"]): void {
+      notifications.show({ color: "red", message: i18n.t(tables.depot[code]) });
+    }
+
+    export function isRouteCode(code: AnyRefusalCode): boolean {
+      return code in tables.route;
+    }
+
+- id: C28-20
+  card: C28
+  expected: clean
+  path: app/src/main/kotlin/claims/CodeBook.kt
+  why: Near miss — the code book is generated next to the contract and exposes typed members; the string list of the hand copy is gone.
+  source: The same code book generated from the contract.
+  code: |
+    package claims
+
+    import api.claims.ClaimRefusalCode
+
+    object CodeBook {
+        val CLAIM_REFUSALS: List<ClaimRefusalCode> = listOf(
+            ClaimRefusalCode.CLAIM_WINDOW_CLOSED,
+            ClaimRefusalCode.CLAIM_ALREADY_OPEN,
+            ClaimRefusalCode.EVIDENCE_MISSING,
+            ClaimRefusalCode.ASSIGNEE_MISSING,
+        )
+
+        fun isRefusal(code: ClaimRefusalCode): Boolean = code in CLAIM_REFUSALS
+
+        fun label(code: ClaimRefusalCode): String = "claim.refusal.${code.serialName}"
+    }

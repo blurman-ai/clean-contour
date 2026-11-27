@@ -142,14 +142,18 @@
         cards: list[dict] = []
         for index, stop in enumerate(route.stops, start=1):
             title = (stop.title or "").strip()
-            if not title or title.casefold() == "unnamed stop":
+            unnamed = not title or title.casefold() == "unnamed stop"
+            if unnamed:
                 title = f"Stop {index}"
+            if unnamed:
+                flag_stop_for_review(route.id, stop.id)
             cards.append(
                 {
                     "id": str(stop.id),
                     "title": title,
                     "eta": stop.eta.isoformat() if stop.eta else None,
                     "parcels": len(stop.parcels),
+                    "billable": not unnamed,
                 }
             )
         return cards
@@ -399,6 +403,14 @@
 
     export function readableStops(stops: StopLike[]): StopLike[] {
       return stops.filter(stop => !isGenericStopTitle(stop.title, stop.id));
+    }
+
+    export function billableStops(stops: StopLike[]): StopLike[] {
+      return stops.filter(stop => !isGenericStopTitle(stop.title, stop.id));
+    }
+
+    export function routeInvoice(stops: StopLike[], ratePerStop: number): number {
+      return billableStops(stops).length * ratePerStop;
     }
 
     export function routeSummary(stops: StopLike[]): string {

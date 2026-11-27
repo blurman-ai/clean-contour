@@ -102,7 +102,7 @@ def selftest() -> int:
                     failures.append(f"{card_name}/{lang}: bad regex {item!r}: {e}")
 
     # Every card C1..C21 appears.
-    for i in range(1, 27):
+    for i in range(1, 29):
         name = f"C{i}"
         if name not in signs["cards"]:
             failures.append(f"missing card {name}")

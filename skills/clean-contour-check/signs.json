@@ -520,41 +520,29 @@
   },
   "C15": {
    "py": [
-    "except Exception",
-    "HTTPException"
+    "HTTPException",
+    "detail=\\\""
    ],
    "ts": [
     "catch",
     "onError",
     "isError",
     "error &&",
-    "failed",
-    "Record<string",
-    "switch \\(code\\)",
-    "\\.code\\s*===",
-    "\\.catch\\(\\(\\)\\s*=>\\s*\\{\\}"
+    "failed"
    ],
    "kt": [
-    "catch \\(_: Exception\\)",
-    "runCatching",
-    "getOrElse \\{",
-    "@ExceptionHandler",
     "\\*Fault",
     "legacy\\w*OrNull"
    ],
    "go": [
     "http\\.Error\\(w, err\\.Error\\(\\)",
-    "c\\.JSON\\(500",
-    "gin\\.H\\{\"error\": err\\.Error\\(\\)\\}"
+    "c\\.JSON\\(409",
+    "c\\.JSON\\(500"
    ],
    "cs": [
-    "catch\\s*\\(\\s*Exception[^)]*\\)",
     "Problem\\(\\s*\\w+\\.Message",
     "StatusCode\\(\\s*500\\s*,",
-    "BadRequest\\(\\s*\"",
-    "WriteAsync\\(\\s*\\w+\\.Message",
-    "AddModelError\\(\\s*\"\"",
-    "WithMessage\\("
+    "BadRequest\\(\\s*\\\""
    ]
   },
   "C16": {
@@ -920,6 +908,47 @@
    ],
    "cs": [
     "Environment\\.GetEnvironmentVariable\\("
+   ]
+  },
+  "C27": {
+   "py": [
+    "except Exception"
+   ],
+   "ts": [
+    "\\.catch\\(\\(\\)\\s*=>\\s*\\{\\}",
+    "failure\\.generic"
+   ],
+   "kt": [
+    "catch \\(_: Exception\\)",
+    "runCatching",
+    "getOrElse \\{",
+    "@ExceptionHandler"
+   ],
+   "go": [
+    "gin\\.H\\{\"error\": err\\.Error\\(\\)\\}",
+    "gin\\.H\\{\"error\": \"[a-z_ ]+ failed\"\\}"
+   ],
+   "cs": [
+    "catch\\s*\\(\\s*Exception[^)]*\\)",
+    "WriteAsync\\(\\s*\\w+\\.Message",
+    "AddModelError\\(\\s*\\\"\\\"",
+    "WithMessage\\("
+   ]
+  },
+  "C28": {
+   "py": [],
+   "ts": [
+    "Record<string",
+    "switch \\(code\\)",
+    "\\.code\\s*===",
+    "t\\(`error\\."
+   ],
+   "kt": [],
+   "go": [
+    "map\\[string\\]string\\{"
+   ],
+   "cs": [
+    "Dictionary<string, string>"
    ]
   }
  }
