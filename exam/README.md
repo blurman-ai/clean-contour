@@ -44,6 +44,8 @@ A card is edited while looking at `dev` results only; the pass that goes into th
 
 `corpus/C<N>.yaml`, at least 10 dirty and 10 clean fragments per card, 15–60 lines each. Fields: `id`, `card`, `expected` (`dirty` or `clean`), `path`, `why`, `source`, `code`. Only `path` and `code` reach the model.
 
+The 15–60 window is deliberate and is narrower than the live check's 30–60 lines. A short fragment isolates the card's questions: a card that cannot answer from 15 lines would not answer from the one place a search hit gives it. The cost is the opposite failure mode — an answer that needs something outside the fragment — which is exactly what is scored as `unclear` (a miss on dirty), so a passing card pays for the shorter window where it is visible. Cards added after 27.11.2026 write fragments of 30–60 lines where the scenario allows it, so their exam window matches the live one.
+
 Fragments keep the shape of real code: conditions, comparisons, order of assignments. Names, paths and the domain (delivery, warehouse, reports) are invented. Every card's clean set contains near misses from its "Does not count" section.
 
 ## Adding a card
