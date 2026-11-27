@@ -1210,3 +1210,48 @@ def fetch_rate(session: Session, pair: str) -> Decimal:
     r = session.get(f"https://rates.example.invalid/{pair}", timeout=(3, 10))
     return Decimal(r.json()["rate"])
 ```
+
+## C23. A side effect hidden in a constructor, a getter, or an ORM hook
+
+**Search:** `@event.listens_for`, `after_insert(`, `before_insert(`,
+`after_update(`, `before_update(`, `before_commit(`, `after_commit(`,
+Django `@receiver(`, `post_save(`, `pre_save(`, `post_delete(`; `@property`
+whose body calls out; `def __init__` with calls. **TS:** a `get ` accessor
+with `await`/`.then(`/`fetch(`, a constructor that fetches. **Kotlin:** a
+custom getter (`val x get() =`) that calls out, `@PostPersist`, `@PrePersist`,
+`@PostLoad`, `@EventListener`. **Go:** no property or ORM hooks; the sign is a
+`New*` constructor that dials, inserts or writes. **C#:** an EF Core
+`SaveChanges(` override or `SaveChangesInterceptor` (`SavingChangesAsync`,
+`SavedChangesAsync`) doing its own statements, an entity constructor with I/O,
+a property setter that writes.
+
+**Questions:**
+1. Does this run by itself, without being called for the job: an object
+   constructor, a property or getter access, or an ORM/signal lifecycle hook
+   (before/after insert, update, commit, save)? An explicit method with a
+   telling name that the caller invokes is "no".
+2. Does it reach outside the object while it runs: its own database statement
+   (not the ORM's write of this very entity), an HTTP or mail call, a file, or
+   a write/creation of another entity or row?
+
+**Dirty if:** 1 = yes and 2 = yes.
+
+**Does not count:** a property that only computes from fields already in
+memory; a constructor that only assigns, normalizes or validates its own
+fields; a hook that only writes a log line; the ORM's own write of the entity
+the hook belongs to (that is the transition data); tests.
+
+**Dirty:**
+```python
+@event.listens_for(Order, "after_insert")
+def reserve_stock(mapper, conn, target):
+    conn.execute(text("UPDATE stock SET reserved = reserved + :n WHERE sku = :sku"),
+                 {"sku": target.sku, "n": target.qty})   # a second statement hides in the insert
+```
+**Clean:**
+```python
+def place_order(order: Order, stock: Stock) -> None:
+    stock.reserve(order.sku, order.qty)      # the writer calls it, in the same transaction
+    session.add(order)
+    session.commit()
+```

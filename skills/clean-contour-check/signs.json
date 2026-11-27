@@ -790,6 +790,34 @@
     "\\.(GetAsync|PostAsync|PutAsync|DeleteAsync|SendAsync)\\(",
     "Process\\.Start\\("
    ]
+  },
+  "C23": {
+   "py": [
+    "@event\\.listens_for",
+    "(after|before)_(insert|update|delete|commit)\\b",
+    "@receiver\\(",
+    "(post|pre)_(save|delete)\\b",
+    "@property",
+    "def __init__"
+   ],
+   "ts": [
+    "\\bget [a-zA-Z_]+\\(\\)",
+    "\\bconstructor\\("
+   ],
+   "kt": [
+    "\\bval [a-zA-Z_]+( *: *[A-Za-z_<>, ?.\\[\\]]+)? get\\(\\)",
+    "@(Post|Pre)(Persist|Update|Load|Remove)\\b",
+    "@EventListener\\b"
+   ],
+   "go": [
+    "func New[A-Z]"
+   ],
+   "cs": [
+    "override.*SaveChanges(Async)?\\(",
+    "SaveChangesInterceptor",
+    "OnConfiguring\\b",
+    "\\bset\\b[^;]*\\b(File\\.|Http|SaveChanges|Execute)"
+   ]
   }
  }
 }

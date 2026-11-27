@@ -136,3 +136,25 @@ client.newCall(request).execute()
 val raw = URL(feed).openConnection().getInputStream()
 ProcessBuilder("git", "status").start()
 Runtime.getRuntime().exec("ls")
+
+// C23
+class Shipment {
+    val manifest: Manifest get() = loadManifest(id)
+}
+
+class Bus {
+    @EventListener
+    fun onFlush(evt: FlushEvent) { pushSnapshot(evt) }
+}
+
+@Entity
+class Consignment {
+    @PostPersist
+    fun audit() { auditLog.write("persisted") }
+}
+
+// C24
+fun onPaid(payment: Payment) {
+    GlobalScope.launch { receiptMailer.send(payment) }
+}
+thread(start = true) { syncLedger(payment) }

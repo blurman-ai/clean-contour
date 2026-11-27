@@ -123,3 +123,15 @@ var artifactPath = p.AudioPath
 resp, err := http.Get("https://rates.example.invalid/x")
 out, err := exec.Command("git", "status").Output()
 r2, err := http.DefaultClient.Do(req)
+
+// C23
+func NewRateFeed(store *Store) *RateFeed {
+    conn := dialRates()
+    return &RateFeed{conn: conn, store: store}
+}
+
+// C24
+func onPaid(payment Payment) {
+    go func() { receiptMailer.Send(payment) }()
+    go syncLedger(payment)
+}

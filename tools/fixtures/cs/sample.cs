@@ -105,3 +105,32 @@ var artifactPath = payload.AudioPath;
 var client = new HttpClient();
 var r = await client.GetAsync("https://rates.example.invalid/x");
 Process.Start("git", "status");
+
+// C23
+public override async Task<int> SaveChangesAsync(CancellationToken ct = default)
+{
+    SendAuditRows();
+    return await base.SaveChangesAsync(ct);
+}
+
+public class CtxHook : SaveChangesInterceptor
+{
+    public override ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData data, InterceptionResult<int> result, CancellationToken ct = default)
+        => base.SavingChangesAsync(data, result, ct);
+    protected override void OnConfiguring(DbContextOptionsBuilder b) => b.UseQueryWarningHandler(w => Log.Warn(w));
+}
+
+public class Pass
+{
+    public string Note
+    {
+        set { File.WriteAllText(_path, value); }
+    }
+}
+
+// C24
+void OnPaid(Payment payment)
+{
+    _ = Task.Run(() => receiptMailer.SendAsync(payment));
+    Task.Factory.StartNew(() => SyncLedger(payment));
+}

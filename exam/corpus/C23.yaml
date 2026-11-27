@@ -1,0 +1,587 @@
+# C23 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C23-01
+  card: C23
+  expected: dirty
+  path: app/stock/hooks.py
+  why: The after_insert hook runs its own UPDATE against another table, so a second write hides inside the ORM insert.
+  source: A warehouse service keeping a reservation counter in sync.
+  code: |
+    from sqlalchemy import event, text
+    from app.stock.models import Placement
+
+
+    @event.listens_for(Placement, "after_insert")
+    def bump_counter(mapper, connection, target):
+        connection.execute(
+            text("UPDATE bins SET held = held + :n WHERE sku = :sku"),
+            {"sku": target.sku, "n": target.qty},
+        )
+
+
+    def place(sku: str, qty: int, bin_id: int) -> None:
+        session.add(Placement(sku=sku, qty=qty, bin_id=bin_id))
+        session.commit()
+
+
+    def release(placement_id: int) -> None:
+        target = session.get(Placement, placement_id)
+        session.delete(target)
+        session.commit()
+
+- id: C23-02
+  card: C23
+  expected: dirty
+  path: app/pricing/view.py
+  why: The property calls an external quote service on every attribute read and caches the result on the entity mid-request.
+  source: A pricing view model reading a live quote inside a property.
+  code: |
+    import requests
+
+    QUOTE_URL = "https://quotes.example.invalid/fx"
+
+
+    class Invoice:
+        def __init__(self, rows, currency):
+            self.rows = rows
+            self.currency = currency
+            self._total = None
+
+        @property
+        def total_eur(self):
+            if self._total is None:
+                r = requests.get(QUOTE_URL, params={"ccy": self.currency})
+                self._total = sum(r.amount for r in self.rows) * r.json()["rate"]
+            return self._total
+
+
+    def render(inv: Invoice) -> str:
+        return f"total {inv.total_eur:.2f} EUR ({len(inv.rows)} rows)"
+
+- id: C23-03
+  card: C23
+  expected: dirty
+  path: app/accounts/signals.py
+  why: The post_save receiver creates an audit row on every save of the account, hidden from the writers of the entity.
+  source: A Django app writing an audit trail from a signal.
+  code: |
+    from django.db.models.signals import post_save
+    from django.dispatch import receiver
+
+    from .models import Account, AccountEvent
+
+
+    @receiver(post_save, sender=Account)
+    def log_account_save(sender, instance, created, **kwargs):
+        AccountEvent.objects.create(
+            account=instance,
+            kind="created" if created else "changed",
+            seen_by="signal",
+        )
+
+
+    def open_account(owner: str, tier: str) -> Account:
+        acc = Account.objects.create(owner=owner, tier=tier)
+        return acc
+
+
+    def close_account(acc: Account) -> None:
+        acc.active = False
+        acc.save()
+
+- id: C23-04
+  card: C23
+  expected: dirty
+  path: src/documents/preview.ts
+  why: The getter awaits a fetch on each access, so reading a field turns into a network round trip the caller cannot see.
+  source: A document preview component reading a thumbnail through a getter.
+  code: |
+    type Thumb = { ready: boolean; url?: string };
+
+    export class DocumentView {
+      private cache?: Promise<Thumb>;
+
+      constructor(private readonly docId: string) {
+        prefetchStyles(docId);
+      }
+
+      get thumbnail(): Promise<Thumb> {
+        if (!this.cache) {
+          this.cache = fetch(`https://thumbs.example.invalid/${this.docId}`).then((r) => r.json());
+        }
+        return this.cache;
+      }
+    }
+
+    export async function renderCard(doc: DocumentView): Promise<string> {
+      const t = await doc.thumbnail;
+      return t.ready ? `<img src="${t.url}">` : "<placeholder>";
+    }
+
+- id: C23-05
+  card: C23
+  expected: dirty
+  path: src/billing/invoice.ts
+  why: The constructor calls the ledger API while the object is being built, so plain instantiation writes to another system.
+  source: An invoice object registering itself with a ledger on construction.
+  code: |
+    type LedgerEntry = { invoiceId: string; amount: number };
+
+    export class Invoice {
+      readonly id: string;
+      readonly amount: number;
+
+      constructor(id: string, amount: number) {
+        this.id = id;
+        this.amount = amount;
+        const entry: LedgerEntry = { invoiceId: id, amount };
+        fetch("https://ledger.example.invalid/entries", {
+          method: "POST",
+          body: JSON.stringify(entry),
+        });
+      }
+    }
+
+    export function issueInvoice(id: string, amount: number): Invoice {
+      const inv = new Invoice(id, amount);
+      return inv;
+    }
+
+- id: C23-06
+  card: C23
+  expected: dirty
+  path: app/src/main/kotlin/delivery/Consignment.kt
+  why: The lazy getter performs a database query on every access and the PostPersist hook writes a row to another table.
+  source: A delivery entity with a hidden manifest query and an audit hook.
+  code: |
+    package delivery
+
+    import jakarta.persistence.Entity
+    import jakarta.persistence.Id
+    import jakarta.persistence.PostPersist
+
+    @Entity
+    class Consignment(
+        @Id val id: String,
+        val routeId: String,
+        val boxes: Int,
+    ) {
+        @Transient
+        private var manifest: Manifest? = null
+
+        val resolvedManifest: Manifest
+            get() {
+                if (manifest == null) {
+                    manifest = manifestRepo.byRoute(routeId)
+                }
+                return manifest!!
+            }
+
+        @PostPersist
+        fun written() {
+            manifestRepo.touch(routeId)
+        }
+    }
+
+- id: C23-07
+  card: C23
+  expected: dirty
+  path: internal/billing/ledger.go
+  why: The NewLedger constructor dials the ledger service, so building the object opens a network connection as a side effect.
+  source: A billing package whose constructor opens the ledger connection.
+  code: |
+    package billing
+
+    type Ledger struct {
+        conn   *Conn
+        prefix string
+    }
+
+    func NewLedger(prefix string) (*Ledger, error) {
+        conn, err := dialLedger()
+        if err != nil {
+            return nil, err
+        }
+        if err = conn.Handshake(); err != nil {
+            return nil, err
+        }
+        return &Ledger{conn: conn, prefix: prefix}, nil
+    }
+
+    func (l *Ledger) Book(entry Entry) error {
+        return l.conn.Write(l.prefix, entry)
+    }
+
+- id: C23-08
+  card: C23
+  expected: dirty
+  path: Services/Shipments/ShipmentListener.cs
+  why: The SaveChanges override issues its own SQL against another table while the context saves, so a hidden write rides on every save.
+  source: An EF Core context override syncing a counter in SaveChanges.
+  code: |
+    using Microsoft.EntityFrameworkCore;
+
+    namespace Services.Shipments;
+
+    public partial class AppDbContext : DbContext
+    {
+        public override async Task<int> SaveChangesAsync(CancellationToken ct = default)
+        {
+            var touched = ChangeTracker.Entries<Shipment>()
+                .Where(e => e.State == EntityState.Modified)
+                .Select(e => e.Entity.WarehouseId)
+                .Distinct();
+            foreach (var wh in touched)
+            {
+                await Database.ExecuteSqlRawAsync(
+                    "UPDATE warehouses SET load = load + 1 WHERE id = {0}", wh);
+            }
+            return await base.SaveChangesAsync(ct);
+        }
+    }
+
+- id: C23-09
+  card: C23
+  expected: dirty
+  path: app/media/cache.py
+  why: The __init__ makes a live HTTP call to warm the cache, so constructing the object reaches the network.
+  source: A media cache object that prefetches on construction.
+  code: |
+    import httpx
+
+    WARM_URL = "https://media.example.invalid/warm"
+
+
+    class Asset:
+        def __init__(self, asset_id: str, size: str):
+            self.asset_id = asset_id
+            self.size = size
+            r = httpx.post(WARM_URL, json={"id": asset_id, "size": size})
+            self.warm_token = r.json()["token"]
+
+        def url(self) -> str:
+            return f"https://cdn.example.invalid/{self.asset_id}?token={self.warm_token}"
+
+
+    def build_asset(asset_id: str, size: str) -> Asset:
+        return Asset(asset_id, size)
+
+- id: C23-10
+  card: C23
+  expected: dirty
+  path: app/reports/rollup.py
+  why: The property recomputes by inserting rollup rows on access, so reading an attribute writes to the database.
+  source: A report object computing a rollup lazily inside a property.
+  code: |
+    from sqlalchemy import text
+
+
+    class Rollup:
+        def __init__(self, day):
+            self.day = day
+
+        @property
+        def totals(self):
+            found = session.query(RollupRow).filter_by(day=self.day).first()
+            if found is None:
+                session.execute(text(
+                    "INSERT INTO rollup_rows (day, total, counted_at) "
+                    "SELECT :day, sum(amount), now() FROM entries WHERE day = :day"
+                ), {"day": self.day})
+                session.commit()
+                found = session.query(RollupRow).filter_by(day=self.day).first()
+            return found.total
+
+
+    def print_rollup(day) -> str:
+        r = Rollup(day)
+        return f"{day}: {r.totals}"
+
+- id: C23-11
+  card: C23
+  expected: clean
+  path: app/stock/models.py
+  why: Near miss of the hook — the listener only logs the event and writes nothing, so the save carries no hidden statement.
+  source: The same service, the logging-only variant.
+  code: |
+    import logging
+
+    from sqlalchemy import event
+
+    from app.stock.models import Placement
+
+    log = logging.getLogger("stock")
+
+
+    @event.listens_for(Placement, "after_insert")
+    def note_placement(mapper, connection, target):
+        log.info("placement %s sku=%s qty=%s", target.id, target.sku, target.qty)
+
+
+    def place(sku: str, qty: int, bin_id: int) -> None:
+        session.add(Placement(sku=sku, qty=qty, bin_id=bin_id))
+        session.commit()
+
+- id: C23-12
+  card: C23
+  expected: clean
+  path: app/pricing/view.py
+  why: Near miss of the property — it only sums fields already in memory, no call leaves the object.
+  source: The same view, the in-memory variant.
+  code: |
+    class Invoice:
+        def __init__(self, rows, currency, rate):
+            self.rows = rows
+            self.currency = currency
+            self.rate = rate
+
+        @property
+        def total_eur(self):
+            return sum(r.amount for r in self.rows) * self.rate
+
+        @property
+        def row_count(self):
+            return len(self.rows)
+
+
+    def render(inv: Invoice) -> str:
+        return f"total {inv.total_eur:.2f} EUR ({inv.row_count} rows)"
+
+- id: C23-13
+  card: C23
+  expected: clean
+  path: src/documents/preview.ts
+  why: Near miss of the getter — it reads a field the server returned; the fetch lives in an explicit load method the caller invokes.
+  source: The same view, the explicit-load variant.
+  code: |
+    type Thumb = { ready: boolean; url?: string };
+
+    export class DocumentView {
+      private thumb?: Thumb;
+
+      constructor(private readonly docId: string, private readonly thumb?: Thumb) {}
+
+      get thumbnail(): Thumb | undefined {
+        return this.thumb;
+      }
+
+      async loadThumb(): Promise<void> {
+        const r = await fetch(`https://thumbs.example.invalid/${this.docId}`);
+        this.thumb = (await r.json()) as Thumb;
+      }
+    }
+
+    export async function renderCard(doc: DocumentView): Promise<string> {
+      await doc.loadThumb();
+      const t = doc.thumbnail;
+      return t?.ready ? `<img src="${t.url}">` : "<placeholder>";
+    }
+
+- id: C23-14
+  card: C23
+  expected: clean
+  path: src/billing/invoice.ts
+  why: Near miss of the constructor — it only normalizes its own fields; the ledger entry is written by the explicit book() method.
+  source: The same invoice, the explicit-write variant.
+  code: |
+    type LedgerEntry = { invoiceId: string; amount: number };
+
+    export class Invoice {
+      readonly id: string;
+      readonly amount: number;
+
+      constructor(id: string, amount: number) {
+        this.id = id;
+        this.amount = amount;
+      }
+
+      book(ledger: { write(e: LedgerEntry): Promise<void> }): Promise<void> {
+        return ledger.write({ invoiceId: this.id, amount: this.amount });
+      }
+    }
+
+    export async function issueInvoice(id: string, amount: number, ledger: Ledger): Promise<Invoice> {
+      const inv = new Invoice(id, amount);
+      await inv.book(ledger);
+      return inv;
+    }
+
+- id: C23-15
+  card: C23
+  expected: clean
+  path: app/src/main/kotlin/delivery/Consignment.kt
+  why: Near miss of the hooks — the getter reads an in-memory field and the PostPersist only logs; no second statement anywhere.
+  source: The same entity, the guarded variant.
+  code: |
+    package delivery
+
+    import jakarta.persistence.Entity
+    import jakarta.persistence.Id
+    import jakarta.persistence.PostPersist
+
+    @Entity
+    class Consignment(
+        @Id val id: String,
+        val routeId: String,
+        val boxes: Int,
+    ) {
+        @Transient
+        private var manifest: Manifest? = null
+
+        fun attachManifest(m: Manifest) {
+            this.manifest = m
+        }
+
+        val resolvedManifest: Manifest?
+            get() = manifest
+
+        @PostPersist
+        fun written() {
+            log.info("consignment {} persisted", id)
+        }
+    }
+
+- id: C23-16
+  card: C23
+  expected: clean
+  path: internal/billing/ledger.go
+  why: Near miss of the constructor — it only stores arguments, the dial happens in an explicit Connect the caller must invoke.
+  source: The same ledger, the lazy-connect variant.
+  code: |
+    package billing
+
+    type Ledger struct {
+        conn   *Conn
+        prefix string
+    }
+
+    func NewLedger(prefix string) *Ledger {
+        return &Ledger{prefix: prefix}
+    }
+
+    func (l *Ledger) Connect() error {
+        conn, err := dialLedger()
+        if err != nil {
+            return err
+        }
+        if err = conn.Handshake(); err != nil {
+            return err
+        }
+        l.conn = conn
+        return nil
+    }
+
+    func (l *Ledger) Book(entry Entry) error {
+        return l.conn.Write(l.prefix, entry)
+    }
+
+- id: C23-17
+  card: C23
+  expected: clean
+  path: Services/Shipments/ShipmentListener.cs
+  why: Near miss of the override — SaveChangesAsync only counts touched rows for the result message, all writes stay the ORM's own.
+  source: The same context, the read-only variant.
+  code: |
+    using Microsoft.EntityFrameworkCore;
+
+    namespace Services.Shipments;
+
+    public partial class AppDbContext : DbContext
+    {
+        public int LastTouched { get; private set; }
+
+        public override async Task<int> SaveChangesAsync(CancellationToken ct = default)
+        {
+            var touched = ChangeTracker.Entries<Shipment>()
+                .Count(e => e.State == EntityState.Modified);
+            LastTouched = touched;
+            return await base.SaveChangesAsync(ct);
+        }
+    }
+
+- id: C23-18
+  card: C23
+  expected: clean
+  path: app/media/cache.py
+  why: Near miss of the constructor — it stores the token handed in; the warm-up call is made by the factory before construction.
+  source: The same cache, the explicit-warm variant.
+  code: |
+    import httpx
+
+    WARM_URL = "https://media.example.invalid/warm"
+
+
+    class Asset:
+        def __init__(self, asset_id: str, size: str, warm_token: str):
+            self.asset_id = asset_id
+            self.size = size
+            self.warm_token = warm_token
+
+        def url(self) -> str:
+            return f"https://cdn.example.invalid/{self.asset_id}?token={self.warm_token}"
+
+
+    def build_asset(asset_id: str, size: str) -> Asset:
+        r = httpx.post(WARM_URL, json={"id": asset_id, "size": size})
+        return Asset(asset_id, size, r.json()["token"])
+
+- id: C23-19
+  card: C23
+  expected: clean
+  path: app/reports/rollup.py
+  why: Near miss of the property — it reads a row handed to the object at construction, so the attribute access touches memory only; the rollup job writes.
+  source: The same report, the reader variant.
+  code: |
+    class Rollup:
+        def __init__(self, day, row=None):
+            self.day = day
+            self.row = row
+
+        @property
+        def totals(self):
+            if self.row is None:
+                return 0
+            return self.row.total
+
+        @property
+        def label(self):
+            return f"{self.day}: {self.totals}"
+
+
+    def run_rollup(day) -> Rollup:
+        total = session.execute(text(
+            "SELECT coalesce(sum(amount), 0) FROM entries WHERE day = :day"
+        ), {"day": day}).scalar()
+        row = session.merge(RollupRow(day=day, total=total))
+        session.commit()
+        return Rollup(day, row)
+
+
+    def print_rollup(day) -> str:
+        r = run_rollup(day)
+        return r.label
+- id: C23-20
+  card: C23
+  expected: clean
+  path: src/billing/cart.ts
+  why: Near miss of the getter — it computes a discount from fields in memory; the saved cart is written by the explicit save method.
+  source: A cart object with pure getters.
+  code: |
+    export class Cart {
+      constructor(
+        private readonly lines: { price: number; qty: number }[],
+        private readonly discountPct: number,
+      ) {}
+
+      get subtotal(): number {
+        return this.lines.reduce((s, l) => s + l.price * l.qty, 0);
+      }
+
+      get total(): number {
+        return Math.round(this.subtotal * (100 - this.discountPct)) / 100;
+      }
+    }
+
+    export async function checkout(cart: Cart, repo: CartRepo): Promise<string> {
+      const id = await repo.save(cart);
+      return id;
+    }

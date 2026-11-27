@@ -66,3 +66,18 @@ through `pi`, 3 answers per fragment, worst answer counts, whole corpus
 
 Report: `exam/runs/2026-11-27-deepseek-c22.json`. C22 joins the cheap list in
 `routing.json`.
+
+## C23 on a weak model
+
+C23 (a side effect hidden in a constructor, a getter, or an ORM hook) was
+measured the same way (deepseek-v4-flash, 3 answers per fragment, worst
+counts, whole corpus). The first pass flagged the clean C23-19 3/3 — a
+@property that ran its own SELECT per access — and a careful read sides with
+the model: the card's question 2 counts any own database statement in a
+getter, reads included. The fragment was rewritten to the card's clean case
+(a property over fields handed in at construction) and the card text was not
+weakened. Re-run on the fixed corpus: 10/10 dirty found, 0/10 clean flagged.
+
+Reports: `exam/runs/2026-11-27-deepseek-c23.json` (first pass, 1 clean
+flagged), `exam/runs/2026-11-27-deepseek-c23-fix.json` (final). C23 joins the
+cheap list in `routing.json`.

@@ -205,3 +205,28 @@ def fetch_rate(pair):
     subprocess.run(["git", "status"])
     subprocess.check_output(["ls"])
     return Decimal(r.json()["rate"])
+
+# C23
+@event.listens_for(Order, "after_insert")
+def reserve_stock(mapper, conn, target):
+    conn.execute(text("UPDATE stock SET reserved = reserved + :n"))
+
+@receiver(post_save, sender=Shipment)
+def bump_manifest(sender, instance, **kwargs):
+    recalc_manifest(instance.manifest_id)
+
+class Card:
+    @property
+    def invoice(self):
+        return create_invoice(self)
+
+    def __init__(self, sku):
+        self.sku = sku
+        self.bucket = fetch_bucket(sku)
+
+# C24
+def on_paid(payment):
+    asyncio.create_task(receipt_mailer.send(payment))
+    threading.Thread(target=sync_ledger, args=(payment,)).start()
+    t = loop.create_task(drain_queue())
+    _thread.start_new_thread(beat, ())

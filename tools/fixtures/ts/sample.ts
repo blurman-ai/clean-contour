@@ -148,3 +148,20 @@ const artifact = job.audioPath;
 const r = await fetch("https://api.example.invalid/feed");
 const res = axios.get("/drafts");
 http.request({ host: "example.invalid" });
+
+// C23
+class Invoice {
+  get total(): number {
+    return fetchTotal(this.id).then((t) => t);
+  }
+  constructor(private readonly id: string) {
+    warmCache(id);
+  }
+}
+
+// C24
+function onPaid(payment: Payment) {
+  void receiptMailer.send(payment);
+}
+  void sendReceipt(payment);
+pullFeed(supplier).then(() => {
