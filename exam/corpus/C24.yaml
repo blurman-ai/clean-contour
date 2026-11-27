@@ -1,0 +1,601 @@
+# C24 - corpus of the card exam. Records: id, card, expected, path, why, source, code.
+- id: C24-01
+  card: C24
+  expected: dirty
+  path: app/billing/hooks.py
+  why: The receipt task is created and dropped — no reference is kept and no done-callback records a failure, so a dead send leaves no trace.
+  source: A billing service sending receipts after payment.
+  code: |
+    import asyncio
+
+    from app.mail import receipt_mailer
+
+
+    async def send_receipt(payment) -> None:
+        await receipt_mailer.send(
+            to=payment.customer_email,
+            template="receipt",
+            amount=payment.amount,
+        )
+
+
+    def on_payment_paid(payment) -> None:
+        asyncio.create_task(send_receipt(payment))
+
+
+    def close_day(payments) -> int:
+        sent = 0
+        for p in payments:
+            if p.paid_at is not None:
+                on_payment_paid(p)
+                sent += 1
+        return sent
+
+- id: C24-02
+  card: C24
+  expected: dirty
+  path: app/ingest/normalizer.py
+  why: The thread is started and forgotten — nobody joins it, and an exception inside dies with the thread's own stack, unheard.
+  source: A feed ingest spawning a normalization thread per batch.
+  code: |
+    import threading
+
+
+    def normalize_batch(batch_id: int) -> None:
+        rows = load_batch(batch_id)
+        for row in rows:
+            fixed = repair(row.raw)
+            save_fixed(batch_id, row.id, fixed)
+
+
+    def on_batch_loaded(batch_id: int) -> None:
+        threading.Thread(target=normalize_batch, args=(batch_id,)).start()
+
+
+    def load_next() -> int:
+        batch_id = next_batch()
+        on_batch_loaded(batch_id)
+        return batch_id
+
+- id: C24-03
+  card: C24
+  expected: dirty
+  path: src/notify/webhooks.ts
+  why: The delivery promise is detached with void — no catch, no registry, so a failed webhook vanishes and the order still shows notified.
+  source: A storefront firing webhook deliveries.
+  code: |
+    type Delivery = { orderId: string; url: string };
+
+    const pending = new Map<string, number>();
+
+    export function deliver(d: Delivery): void {
+      void postDelivery(d);
+    }
+
+    async function postDelivery(d: Delivery): Promise<void> {
+      const resp = await fetch(d.url, {
+        method: "POST",
+        body: JSON.stringify({ orderId: d.orderId }),
+      });
+      pending.set(d.orderId, resp.status);
+      if (resp.status >= 400) {
+        await recordFailure(d.orderId, resp.status);
+      }
+    }
+
+    export function markNotified(orderId: string): void {
+      pending.delete(orderId);
+    }
+
+- id: C24-04
+  card: C24
+  expected: dirty
+  path: internal/scout/refresh.go
+  why: The goroutine writes nowhere and recovers nothing — a panic or error inside is lost, and the caller already reported success.
+  source: A price scout refreshing quotes in the background.
+  code: |
+    package scout
+
+    type Scout struct {
+        done chan struct{}
+    }
+
+    func NewScout() *Scout {
+        return &Scout{done: make(chan struct{})}
+    }
+
+    func (s *Scout) RefreshAll(pair string) error {
+        go func() {
+            quotes, err := fetchQuotes(pair)
+            if err != nil {
+                return
+            }
+            for _, q := range quotes {
+                saveQuote(q)
+            }
+        }()
+        return nil
+    }
+
+- id: C24-05
+  card: C24
+  expected: dirty
+  path: Services/Exports/ExportRunner.cs
+  why: The export task is discarded with _ = — its exception goes nowhere and the caller reports the export as queued without any failure record.
+  source: A C# worker starting export jobs.
+  code: |
+    using System.Threading.Tasks;
+
+    namespace Services.Exports;
+
+    public sealed class ExportRunner
+    {
+        private readonly Exporter _exporter = new Exporter();
+
+        public void Run(ExportJob job)
+        {
+            _ = RunAsync(job);
+        }
+
+        private async Task RunAsync(ExportJob job)
+        {
+            var path = await _exporter.RenderAsync(job);
+            await _exporter.UploadAsync(job, path);
+            await _exporter.MarkReadyAsync(job.Id);
+        }
+    }
+
+- id: C24-06
+  card: C24
+  expected: dirty
+  path: app/src/main/kotlin/media/Preview.kt
+  why: GlobalScope.launch with no handler — a preview failure dies silently and the item stays in its waiting state.
+  source: A gallery app generating previews after upload.
+  code: |
+    package media
+
+    import kotlinx.coroutines.GlobalScope
+    import kotlinx.coroutines.launch
+
+    class PreviewMaker(private val store: PreviewStore) {
+
+        fun makePreview(itemId: String) {
+            GlobalScope.launch {
+                val bitmap = decodeThumb(store.sourcePath(itemId))
+                store.save(itemId, bitmap)
+                store.markReady(itemId)
+            }
+        }
+    }
+
+- id: C24-07
+  card: C24
+  expected: dirty
+  path: app/cdn/purge.py
+  why: The purge task is created inside a loop and dropped; when the CDN call fails, the asset keeps serving stale content and nobody learns.
+  source: A publishing flow purging CDN paths per asset.
+  code: |
+    import asyncio
+
+    import httpx
+
+    PURGE_URL = "https://purger.example.invalid/v2"
+
+
+    async def purge(client: httpx.AsyncClient, path: str) -> None:
+        r = await client.post(PURGE_URL, json={"path": path})
+        r.raise_for_status()
+
+
+    async def publish_assets(paths: list[str]) -> int:
+        async with httpx.AsyncClient() as client:
+            for path in paths:
+                asyncio.create_task(purge(client, path))
+        mark_published(paths)
+        return len(paths)
+
+- id: C24-08
+  card: C24
+  expected: dirty
+  path: src/search/indexer.ts
+  why: The reindex promise is fired without await and without a catch inside the launched function — the shard can end half-indexed with no error anywhere.
+  source: A search indexer reindexing shards on deploy.
+  code: |
+    type Shard = { name: string; docs: number };
+
+    export function reindexShard(shard: Shard): Promise<number> {
+      return postIndex(shard.name);
+    }
+
+    export function onDeploy(shards: Shard[]): void {
+      for (const shard of shards) {
+        reindexShard(shard).then((docs) => {
+          console.log(`${shard.name}: ${docs} docs`);
+        });
+      }
+    }
+
+    export function deployDone(shards: Shard[]): boolean {
+      return shards.every((s) => s.docs > 0);
+    }
+
+- id: C24-09
+  card: C24
+  expected: dirty
+  path: internal/notify/fanout.go
+  why: The goroutine has no error path and no channel — a failed provider call is dropped on the floor while the fanout reports delivered.
+  source: A notifier fanning out push messages.
+  code: |
+    package notify
+
+    func Fanout(msg Message, tokens []string) int {
+        sent := 0
+        for _, tk := range tokens {
+            go func(token string) {
+                err := pushProvider.Send(token, msg)
+                if err == nil {
+                    sent++
+                }
+            }(tk)
+        }
+        return len(tokens)
+    }
+
+
+    func Delivered(count int) bool {
+        return count == len(knownTokens())
+    }
+
+- id: C24-10
+  card: C24
+  expected: dirty
+  path: Services/Media/Transcoder.cs
+  why: The transcoding continuation ignores the returned task entirely — a render failure never reaches the job row.
+  source: A media service firing a transcode after upload.
+  code: |
+    using System.Threading.Tasks;
+
+    namespace Services.Media;
+
+    public sealed class Transcoder
+    {
+        private readonly Encoder _encoder = new Encoder();
+        private readonly JobStore _store;
+
+        public Transcoder(JobStore store) => _store = store;
+
+        public void Kick(Job job)
+        {
+            Task.Factory.StartNew(() => _encoder.Encode(job.SourcePath, job.TargetPath));
+            _store.MarkStarted(job.Id);
+        }
+    }
+
+- id: C24-11
+  card: C24
+  expected: clean
+  path: app/billing/hooks.py
+  why: Near miss of the dropped task — here the registry keeps the reference and the done-callback records the failure, so a dead send is visible.
+  source: The same billing service, the tracked variant.
+  code: |
+    import asyncio
+
+    from app.mail import receipt_mailer
+
+
+    class TaskSet:
+        def __init__(self):
+            self._tasks = set()
+
+        def add(self, task: asyncio.Task) -> None:
+            self._tasks.add(task)
+            task.add_done_callback(self._reap)
+
+        def _reap(self, task: asyncio.Task) -> None:
+            self._tasks.discard(task)
+            if not task.cancelled() and task.exception() is not None:
+                log_failure(task.exception())
+
+
+    tasks = TaskSet()
+
+
+    async def send_receipt(payment) -> None:
+        await receipt_mailer.send(to=payment.customer_email, template="receipt", amount=payment.amount)
+
+
+    def on_payment_paid(payment) -> None:
+        tasks.add(asyncio.create_task(send_receipt(payment)))
+
+- id: C24-12
+  card: C24
+  expected: clean
+  path: app/ingest/normalizer.py
+  why: Near miss of the forgotten thread — the job body catches everything and records the failure on the batch row, so nothing is lost.
+  source: The same ingest, the guarded variant.
+  code: |
+    import threading
+
+    from app.ingest.store import record_batch_error
+
+
+    def normalize_batch(batch_id: int) -> None:
+        try:
+            rows = load_batch(batch_id)
+            for row in rows:
+                fixed = repair(row.raw)
+                save_fixed(batch_id, row.id, fixed)
+        except Exception as e:                       # the failure lands on the batch row
+            record_batch_error(batch_id, kind="normalize", detail=str(e))
+            raise
+
+
+    def on_batch_loaded(batch_id: int) -> None:
+        threading.Thread(target=normalize_batch, args=(batch_id,)).start()
+
+- id: C24-13
+  card: C24
+  expected: clean
+  path: src/notify/webhooks.ts
+  why: Near miss of the detached promise — the .catch records the failure on the delivery, so a dead webhook is stored, not lost.
+  source: The same dispatcher, the guarded variant.
+  code: |
+    type Delivery = { orderId: string; url: string };
+
+    export function deliver(d: Delivery): void {
+      postDelivery(d)
+        .then((status) => markDelivered(d.orderId, status))
+        .catch((e) => recordFailure(d.orderId, String(e)));
+    }
+
+    async function postDelivery(d: Delivery): Promise<number> {
+      const resp = await fetch(d.url, {
+        method: "POST",
+        body: JSON.stringify({ orderId: d.orderId }),
+      });
+      if (resp.status >= 400) {
+        throw new Error(`webhook answered ${resp.status}`);
+      }
+      return resp.status;
+    }
+
+- id: C24-14
+  card: C24
+  expected: clean
+  path: internal/scout/refresh.go
+  why: Near miss of the naked goroutine — the job body recovers panics and sends errors on a channel the caller reads, so the failure reaches the fragment.
+  source: The same scout, the guarded variant.
+  code: |
+    package scout
+
+    import "log"
+
+    type Scout struct {
+        errs chan error
+    }
+
+    func NewScout() *Scout {
+        return &Scout{errs: make(chan error, 16)}
+    }
+
+    func (s *Scout) RefreshAll(pair string) error {
+        go func() {
+            defer func() {
+                if r := recover(); r != nil {
+                    s.errs <- fmt.Errorf("scout panic: %v", r)
+                }
+            }()
+            quotes, err := fetchQuotes(pair)
+            if err != nil {
+                s.errs <- err
+                return
+            }
+            for _, q := range quotes {
+                if err = saveQuote(q); err != nil {
+                    s.errs <- err
+                    return
+                }
+            }
+        }()
+        select {
+        case err := <-s.errs:
+            log.Printf("scout: %v", err)
+            return err
+        default:
+            return nil
+        }
+    }
+
+- id: C24-15
+  card: C24
+  expected: clean
+  path: Services/Exports/ExportRunner.cs
+  why: Near miss of the discarded task — the runner awaits it inside a tracked list with a continuation that writes the failure to the job.
+  source: The same export runner, the tracked variant.
+  code: |
+    using System.Collections.Concurrent;
+    using System.Threading.Tasks;
+
+    namespace Services.Exports;
+
+    public sealed class ExportRunner
+    {
+        private readonly Exporter _exporter = new Exporter();
+        private readonly ConcurrentDictionary<Guid, Task> _running = new();
+
+        public void Run(ExportJob job)
+        {
+            var t = RunAsync(job);
+            _running[job.Id] = t;
+            t.ContinueWith(done => {
+                _running.TryRemove(job.Id, out _);
+                if (done.IsFaulted)
+                {
+                    _exporter.MarkFailedAsync(job.Id, done.Exception?.GetBaseException().Message);
+                }
+            });
+        }
+
+        private async Task RunAsync(ExportJob job)
+        {
+            var path = await _exporter.RenderAsync(job);
+            await _exporter.UploadAsync(job, path);
+            await _exporter.MarkReadyAsync(job.Id);
+        }
+    }
+
+- id: C24-16
+  card: C24
+  expected: clean
+  path: app/src/main/kotlin/media/Preview.kt
+  why: Near miss of GlobalScope — the launch carries a CoroutineExceptionHandler that stores the failure, so the item leaves its waiting state.
+  source: The same preview maker, the guarded variant.
+  code: |
+    package media
+
+    import kotlinx.coroutines.CoroutineExceptionHandler
+    import kotlinx.coroutines.GlobalScope
+    import kotlinx.coroutines.launch
+
+    class PreviewMaker(private val store: PreviewStore) {
+
+        private val handler = CoroutineExceptionHandler { _, e ->
+            store.markFailed(store.currentItemId(), e.message ?: "preview failed")
+        }
+
+        fun makePreview(itemId: String) {
+            GlobalScope.launch(handler) {
+                store.setCurrentItem(itemId)
+                val bitmap = decodeThumb(store.sourcePath(itemId))
+                store.save(itemId, bitmap)
+                store.markReady(itemId)
+            }
+        }
+    }
+
+- id: C24-17
+  card: C24
+  expected: clean
+  path: app/cdn/purge.py
+  why: Near miss of the dropped purge tasks — gather awaits every task with return_exceptions and the failures are recorded per path.
+  source: The same publisher, the awaited variant.
+  code: |
+    import asyncio
+
+    import httpx
+
+    PURGE_URL = "https://purger.example.invalid/v2"
+
+
+    async def purge(client: httpx.AsyncClient, path: str) -> str:
+        r = await client.post(PURGE_URL, json={"path": path})
+        r.raise_for_status()
+        return path
+
+
+    async def publish_assets(paths: list[str]) -> int:
+        failures = []
+        async with httpx.AsyncClient() as client:
+            results = await asyncio.gather(
+                *(purge(client, path) for path in paths),
+                return_exceptions=True,
+            )
+        for path, res in zip(paths, results):
+            if isinstance(res, Exception):
+                failures.append((path, res))
+        record_purge_failures(failures)
+        mark_published([p for p, res in zip(paths, results) if not isinstance(res, Exception)])
+        return len(paths) - len(failures)
+
+- id: C24-18
+  card: C24
+  expected: clean
+  path: src/search/indexer.ts
+  why: Near miss of the fired reindex — the promise chain ends in a catch that records the shard failure and marks the deploy degraded.
+  source: The same indexer, the guarded variant.
+  code: |
+    type Shard = { name: string; docs: number };
+
+    export function reindexShard(shard: Shard): Promise<number> {
+      return postIndex(shard.name);
+    }
+
+    export function onDeploy(shards: Shard[]): void {
+      for (const shard of shards) {
+        reindexShard(shard)
+          .then((docs) => {
+            markIndexed(shard.name, docs);
+          })
+          .catch((e) => {
+            recordShardFailure(shard.name, String(e));
+          });
+      }
+    }
+
+- id: C24-19
+  card: C24
+  expected: clean
+  path: internal/notify/fanout.go
+  why: Near miss of the naked fanout goroutines — each collects its own outcome on a buffered channel and the caller counts real sends and failures.
+  source: The same notifier, the counted variant.
+  code: |
+    package notify
+
+    type outcome struct {
+        token string
+        err   error
+    }
+
+    func Fanout(msg Message, tokens []string) (int, int) {
+        results := make(chan outcome, len(tokens))
+        for _, tk := range tokens {
+            go func(token string) {
+                results <- outcome{token: token, err: pushProvider.Send(token, msg)}
+            }(tk)
+        }
+        sent, failed := 0, 0
+        for range tokens {
+            r := <-results
+            if r.err != nil {
+                failed++
+                recordFailure(r.token, r.err)
+            } else {
+                sent++
+            }
+        }
+        return sent, failed
+    }
+
+- id: C24-20
+  card: C24
+  expected: clean
+  path: Services/Media/Transcoder.cs
+  why: Near miss of the ignored task — the kick stores the task and a continuation writes the failure to the job row before removing it.
+  source: The same transcoder, the tracked variant.
+  code: |
+    using System.Threading.Tasks;
+
+    namespace Services.Media;
+
+    public sealed class Transcoder
+    {
+        private readonly Encoder _encoder = new Encoder();
+        private readonly JobStore _store;
+        private readonly System.Collections.Generic.List<Task> _running = new();
+
+        public Transcoder(JobStore store) => _store = store;
+
+        public void Kick(Job job)
+        {
+            var t = Task.Run(() => _encoder.Encode(job.SourcePath, job.TargetPath));
+            _running.Add(t);
+            t.ContinueWith(done => {
+                _running.Remove(done);
+                if (done.IsFaulted)
+                {
+                    _store.MarkFailed(job.Id, done.Exception?.GetBaseException().Message ?? "encode failed");
+                }
+            });
+            _store.MarkStarted(job.Id);
+        }
+    }

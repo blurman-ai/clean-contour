@@ -818,6 +818,32 @@
     "OnConfiguring\\b",
     "\\bset\\b[^;]*\\b(File\\.|Http|SaveChanges|Execute)"
    ]
+  },
+  "C24": {
+   "py": [
+    "asyncio\\.create_task\\(",
+    "loop\\.create_task\\(",
+    "threading\\.Thread\\(",
+    "_thread\\.start_new_thread\\("
+   ],
+   "ts": [
+    "\\bvoid [a-zA-Z_$][\\w$]*\\(",
+    "\\.then\\("
+   ],
+   "kt": [
+    "GlobalScope\\.launch",
+    "\\.launch\\s*[({]",
+    "thread\\(start\\s*=\\s*true\\)"
+   ],
+   "go": [
+    "^\\s*go func\\(",
+    "^\\s*go [a-zA-Z_]+\\("
+   ],
+   "cs": [
+    "Task\\.Run\\(",
+    "Task\\.Factory\\.StartNew\\(",
+    "^\\s*_\\s*=\\s*(async )?"
+   ]
   }
  }
 }

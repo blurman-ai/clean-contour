@@ -1255,3 +1255,41 @@ def place_order(order: Order, stock: Stock) -> None:
     session.add(order)
     session.commit()
 ```
+
+## C24. A background task whose failure is lost
+
+**Search:** `asyncio.create_task(`, `loop.create_task(`, `threading.Thread(`,
+`.start()` on a thread; a call of an async function with `void ` or no `await`
+and no `.then(` in the fragment. **TS:** `void someAsync()`, a promise dropped
+without `.catch(`. **Go:** `go func(`, `go ` statement. **C#:** `Task.Run(`,
+`Task.Factory.StartNew(`, `_ = ` before an async call. **Kotlin:**
+`GlobalScope.launch(`, `scope.launch(` with no handler, `thread(start = true)`.
+
+**Questions:**
+1. Is a background job started and its completion neither awaited, joined nor
+   checked anywhere in the fragment (fire and forget)?
+2. Would its failure be lost: no done-callback that records the error, no error
+   handler inside the job body, no registry that holds the task and inspects it
+   later — and in Python no strong reference to the task either, so it can be
+   garbage-collected mid-flight?
+
+**Dirty if:** 1 = yes and 2 = yes.
+
+**Does not count:** the job body itself catches and records failures (a
+`try`/`recover` that logs or counts, an error written to a channel or a
+declared failure field); the fragment stores the task in a set/registry with a
+done-callback; the fragment joins or awaits it later; a daemon thread whose
+work is declared best-effort and whose body handles errors; tests.
+
+**Dirty:**
+```python
+def on_payment(payment):
+    asyncio.create_task(receipt_mailer.send(payment))   # no reference, no callback: dies quietly
+```
+**Clean:**
+```python
+def on_payment(payment, tasks: TaskSet):
+    t = asyncio.create_task(receipt_mailer.send(payment))
+    tasks.add(t)                        # the registry holds it
+    t.add_done_callback(tasks.record)   # and records the failure
+```

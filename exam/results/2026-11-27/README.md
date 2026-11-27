@@ -81,3 +81,17 @@ weakened. Re-run on the fixed corpus: 10/10 dirty found, 0/10 clean flagged.
 Reports: `exam/runs/2026-11-27-deepseek-c23.json` (first pass, 1 clean
 flagged), `exam/runs/2026-11-27-deepseek-c23-fix.json` (final). C23 joins the
 cheap list in `routing.json`.
+
+## C24 on a weak model
+
+C24 (a background task whose failure is lost) measured the same way
+(deepseek-v4-flash, 3 answers per fragment, worst counts, whole corpus):
+10/10 dirty found, 1/10 clean flagged — exactly the 10% the gate allows.
+The flagged clean fragment is the guarded thread whose body catches and
+records the failure (the card's own Does-not-count case); two of three
+answers read it clean, one read the fire-and-forget start and stopped
+reading. Borderline but inside the gate; the card joins the cheap list.
+One answer on a dirty fragment wavered between dirty and unclear (unstable
+column), all three still landed dirty.
+
+Report: `exam/runs/2026-11-27-deepseek-c24.json`.
