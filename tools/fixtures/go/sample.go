@@ -70,6 +70,7 @@ http.MethodGet
 db.update(x)
 var ins = "INSERT INTO t VALUES (1)"
 db.Exec("...")
+db.Query("...")
 db.Save(x)
 MarkUsed(x)
 
@@ -98,13 +99,16 @@ var t *time.Ticker
 // C18
 sql.Open("sqlite3", path)
 db.Exec("...")
+db.Query("...")
 db.QueryRow("...")
 http.Post(url, "application/json", body)
+http.Get(url)
 smtp.SendMail(addr, nil, from, []string{to}, msg)
 
 // C19
 var cmd cobra.Command
 import "net/http"
+http.Error(w, "no", 409)
 
 // C20
 var cfg = viper.Get("key")

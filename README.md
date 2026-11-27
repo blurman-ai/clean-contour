@@ -12,7 +12,7 @@ Measured results on agent-written open-source projects: [FIELD-RESULTS.md](FIELD
 |---|---|---|
 | `RULES.md` | 17 principles, signs of a dirty contour, how to move an entity into the clean contour | an agent that writes or changes an entity with a lifecycle |
 | `skills/clean-contour-check/SKILL.md` | 20 cards (C1–C20): search pattern, closed questions, verdict rule, exclusions, dirty and clean example | an agent that checks code |
-| `exam/` | runner and corpus of 437 labelled fragments | whoever edits a card or picks a model for checking |
+| `exam/` | runner and corpus of 467 labelled fragments | whoever edits a card or picks a model for checking |
 
 ## Install as a Claude Code plugin
 
@@ -87,7 +87,7 @@ Measured on 11.11.2026, 3 answers per fragment, worst answer counts:
 
 C2, C5, C10 and C11 were rewritten on 11.11 so that the answer follows from the fragment: C2 judges the branch, not whether the entity also has a stored field; C5 compares outcomes, not phrasing; C10 asks whether the composition is declared, not whether parts "could" be accepted alone; C11 requires a way out for the death of the process too, not only for a refusal and a timeout. C1 passed on DeepSeek on 03.11 and fails on the same fragments now, which is model drift. Sonnet flags test parametrization on C9 that the card excludes.
 
-C18, C19 and C20 were added on 24.11.2026 and measured the same way (3 answers per fragment, worst counts): each passes the holdout on a weak model (3/3 dirty, 0/3 clean) and on Jev (see `exam/results/2026-11-24/`), so they join the cheap list.
+C18, C19 and C20 were added on 24.11.2026 and measured the same way (3 answers per fragment, worst counts): each passes the holdout on a weak model (3/3 dirty, 0/3 clean) and on Jev (see `exam/results/2026-11-24/`), so they join the cheap list. On 27.11 their corpus grew from Python-only to five languages (10 TypeScript, Kotlin, Go and C# fragments per card) and the cards pass again on DeepSeek flash over the whole corpus (see `exam/results/2026-11-27/`).
 
 | Cards | Who runs them |
 |---|---|
@@ -98,7 +98,7 @@ C10 passes the exam but goes to a strong model: on a real backend 2 of 15 places
 
 For another model, run the exam first: [exam/README.md](exam/README.md).
 
-The corpus is mostly Python and TypeScript (C17 also has C# view models and Django templates). The cards' search signs for Kotlin, Go and C# are written, but the exam does not measure them yet; a corpus for another language goes into its own directory and runs with `bin/exam --corpus exam/corpus-<lang>`.
+The corpus is mostly Python and TypeScript; C18–C20 also carry Kotlin, Go and C# fragments (10 per card), and C17 has C# view models and Django templates. A fuller corpus for another language goes into its own directory and runs with `bin/exam --corpus exam/corpus-<lang>`.
 
 ## C#
 

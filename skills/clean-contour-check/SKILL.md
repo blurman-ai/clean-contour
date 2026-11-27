@@ -934,9 +934,18 @@ calls `connect(`, `execute(`, `executemany(`, `executescript(`, `urlopen(`,
 `SMTP(`, `sendmail(`, `IMAP4(`; SQL inside strings — `SELECT`, `INSERT INTO`,
 `UPDATE`, `DELETE FROM`, `CREATE TABLE`, `PRAGMA`, `WITH` — including multiline
 strings, aliases and SQL handed to a driver.
-**Kotlin and Go:** `DriverManager.getConnection(`, `connection.prepareStatement(`,
-`jdbcTemplate.query(`, `Transport.send(`, `sql.Open(`, `db.Exec(`, `db.QueryRow(`,
-`http.Post(`, `smtp.SendMail(`.
+**Kotlin:** `DriverManager.getConnection(`, `connection.prepareStatement(`,
+`jdbcTemplate.query(`, `jakarta.mail`/`javax.mail` `Transport.send(`, a bare
+`HttpClient`/`OkHttpClient` call inside a service or a controller method.
+**Go:** `sql.Open(`, `db.Exec(`, `db.Query(`, `db.QueryRow(`, `http.Get(`,
+`http.Post(`, `smtp.SendMail(` inside a function that also picks a state or
+serves a request.
+**C#:** `new SqlCommand(`, Dapper `connection.Execute(` / `connection.Query(`,
+EF Core `ExecuteSqlRaw(` / `ExecuteSqlInterpolated(`, `new HttpClient(`,
+`httpClient.GetAsync(` / `.PostAsync(`, `new SmtpClient(`, MailKit `ImapClient`,
+SQL in strings handed to a driver — inside a controller action, a minimal API
+endpoint or a service method that also decides a state, enforces a rule in a
+`WHERE` or computes a value shown to the user.
 
 **Questions:**
 1. Does this function itself call a database, mail or HTTP driver? A call of the
@@ -981,9 +990,17 @@ the project's own page, router and command-line modules (`*_page`, `*_routes`,
 `*_api`, `*_cli`, and web/UI entry modules such as `site` or `stand`), absolute
 and relative, at the top, inside a function, under `TYPE_CHECKING`;
 `importlib.import_module("…")` and `__import__("…")` with a literal name.
-**Kotlin and Go:** `org.springframework.web`, `io.ktor.server`, a
-`*Controller` / `*Handler` package, `net/http` handler types, `cobra.Command` in
-a service package, a DTO from the controller package.
+**Kotlin:** `import org.springframework.web` or `io.ktor.server` in a service or
+repository package, a `*Controller` / `*Handler` type or a DTO of the web
+package imported into the domain, `ResponseStatusException` thrown from a rule.
+**Go:** `net/http` handler types (`http.ResponseWriter`, `http.Error`,
+`http.Status…`) in a service package, `cobra.Command` outside the cmd tree, a
+type of the handlers or server package imported into the domain.
+**C#:** `using Microsoft.AspNetCore.` in a service, repository or domain file —
+`IActionResult`, `ActionResult<T>`, `ProblemDetails`, `HttpContext`,
+`BadHttpRequestException` outside controllers and minimal APIs; a domain type
+that references a DTO declared under a `Controllers` / `Pages` namespace;
+Blazor: `NavigationManager` or a component type used from a service class.
 
 **Questions:**
 1. Does the importing module do the work of the application — a rule, a state, a
@@ -1028,9 +1045,18 @@ def refusal_text(outcome: SendOutcome | None) -> str:
 `json.loads(`, a request body or form (`request.json()`, `request.form`,
 `parse_qs`), a mail message, a database column that holds JSON, a reply of
 another system.
-**Kotlin and Go:** `JsonObject["…"]`, `map["…"]`, `viper.Get("…")`, a whole
-config section decoded into `map[string]any` and read by keys, `json.Unmarshal`
-into `map[string]interface{}`.
+**Kotlin:** `JsonObject["…"]` reads outside the one decoder, a config
+`Map`/`Properties` walked by literal keys, Jackson `ObjectNode.get("…")` in
+logic.
+**Go:** `viper.Get("…")` outside the one config load, `json.Unmarshal` into
+`map[string]interface{}` whose keys are then read by literals, an external
+payload in a `map[string]any` walked by `m["…"]` in logic.
+**C#:** `IConfiguration` indexed by a literal (`configuration["…"]`,
+`GetSection("…")` chained reads) outside the single options binding;
+`JsonDocument`/`JsonNode`/`JObject` of an external payload read by
+`GetProperty("…")` or `["…"]` in logic rather than in the one decoder;
+`JsonSerializer.Deserialize` into a `Dictionary<string, …>` whose keys logic
+then reads.
 
 **Questions:**
 1. Did the value come from outside the code — a config file, a network or

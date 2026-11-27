@@ -645,20 +645,25 @@
         "DriverManager\\.getConnection\\(",
         "prepareStatement\\(",
         "jdbcTemplate\\.query\\(",
-        "Transport\\.send\\("
+        "Transport\\.send\\(",
+        "jdbcTemplate\\.update\\("
       ],
       "go": [
         "sql\\.Open\\(",
         "db\\.Exec\\(",
         "db\\.QueryRow\\(",
         "http\\.Post\\(",
-        "smtp\\.SendMail\\("
+        "smtp\\.SendMail\\(",
+        "db\\.Query\\(",
+        "http\\.Get\\("
       ],
       "cs": [
         "\\bnew\\s+SqlCommand\\(",
         "\\bnew\\s+HttpClient\\(",
         "\\bnew\\s+SmtpClient\\(",
-        "ExecuteSqlRaw\\("
+        "ExecuteSqlRaw\\(",
+        "ExecuteSqlInterpolated\\(",
+        "\\bnew\\s+MailMessage\\("
       ]
     },
     "C19": {
@@ -681,7 +686,8 @@
       ],
       "go": [
         "cobra\\.Command",
-        "net/http"
+        "net/http",
+        "http\\.Error\\("
       ],
       "cs": [
         "using\\s+Microsoft\\.AspNetCore\\.",
@@ -705,7 +711,8 @@
         "config\\[\""
       ],
       "kt": [
-        "JsonObject\\[\""
+        "JsonObject\\[\"",
+        "(?i)\\b(?:settings|config|cfg|payload)\\[\""
       ],
       "go": [
         "viper\\.Get\\(\"",
@@ -716,7 +723,8 @@
         "JsonDocument\\.Parse\\(",
         "JsonNode\\.Parse\\(",
         "IConfiguration\\[",
-        "GetProperty\\(\""
+        "GetProperty\\(\"",
+        "GetSection\\(\""
       ]
     }
   }

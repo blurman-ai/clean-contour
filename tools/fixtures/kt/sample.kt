@@ -113,6 +113,7 @@ if (role == "admin") pass
 DriverManager.getConnection(url)
 connection.prepareStatement(sql)
 jdbcTemplate.query(sql)
+jdbcTemplate.update(sql)
 Transport.send(message)
 
 // C19
@@ -123,3 +124,4 @@ class OrderHandler
 
 // C20
 val key = JsonObject["key"]
+val attempts = settings["login_attempts"]

@@ -801,3 +801,406 @@
         def shipped(self, actor: Actor) -> "Trip":
             LIFECYCLE.check(self.state, TripState.SHIPPED, actor, None)
             return replace(self, state=TripState.SHIPPED)
+- id: C19-21
+  card: C19
+  expected: dirty
+  path: src/storage/drafts.ts
+  why: The storage module imports a transport type and writes the 404 answer itself, so data access depends on the web layer and its error shape.
+  source: Storage answers through the web framework, in TypeScript.
+  code: |
+    import { Response } from "express";
+    import { db } from "./db";
+    import { Draft } from "./model";
+
+    export class NotFound extends Error {
+      readonly status = 404;
+    }
+
+    export async function draftsOf(trip: string): Promise<Draft[]> {
+      const rows = await db.query("SELECT kind, state FROM drafts WHERE trip = $1", [trip]);
+      return rows.map((row) => ({ trip, kind: row.kind, state: row.state }));
+    }
+
+    // Answer 404 right from the storage when the trip has no drafts.
+    export async function required(trip: string, res: Response): Promise<Draft[]> {
+      const found = await draftsOf(trip);
+      if (found.length === 0) {
+        res.status(404).json({ error: "draft not found" });
+        throw new NotFound("draft not found");
+      }
+      return found;
+    }
+
+    export async function answer(trip: string, res: Response): Promise<void> {
+      const found = await required(trip, res);
+      res.json({ drafts: found.map((draft) => draft.kind) });
+    }
+- id: C19-22
+  card: C19
+  expected: dirty
+  path: src/trips/model.ts
+  why: The domain model imports a DTO declared in the page module, so the entity type depends on the transport layer.
+  source: The entity type imports a DTO from the page module, in TypeScript.
+  code: |
+    import { BindingCase } from "../pages/stand";
+
+    export enum TripState {
+      New = "new",
+      Bound = "bound",
+    }
+
+    export interface Contract {
+      number: string;
+      loadingPlace: string;
+      unloadingPlace: string;
+    }
+
+    export class Trip {
+      constructor(
+        readonly contract: Contract,
+        readonly state: TripState = TripState.New,
+        readonly bindingCase: BindingCase = BindingCase.Unknown,
+      ) {}
+
+      get number(): string {
+        return this.contract.number;
+      }
+
+      withCase(bindingCase: BindingCase): Trip {
+        return new Trip(this.contract, this.state, bindingCase);
+      }
+    }
+
+    export function several(contract: Contract): Trip {
+      return new Trip(contract, TripState.New, BindingCase.Several);
+    }
+- id: C19-23
+  card: C19
+  expected: clean
+  path: src/web/trips.ts
+  why: The page imports the application modules and only draws what they return; the dependency points from transport to application.
+  source: A page that imports application modules, in TypeScript.
+  code: |
+    import { Router, Request, Response } from "express";
+    import { settle } from "../progress/settle";
+    import { change } from "../responsible/change";
+    import { Orders } from "../storage/orders";
+    import { render } from "../site/render";
+
+    export const routes = Router();
+
+    routes.get("/orders", async (req: Request, res: Response) => {
+      const store: Orders = req.app.locals.store;
+      const orders = await store.inState("going");
+      const progress = settle(orders);
+      res.send(render("orders.html", { orders, progress }));
+    });
+
+    routes.post("/orders/:number/responsible", async (req: Request, res: Response) => {
+      const store: Orders = req.app.locals.store;
+      const found = await store.of(req.params.number);
+      const changed = change(found, String(req.query.to ?? ""));
+      await store.save(changed);
+      res.redirect(303, "/orders");
+    });
+
+    export function numbers(orders: { number: string }[]): string[] {
+      return orders.map((order) => order.number);
+    }
+- id: C19-24
+  card: C19
+  expected: clean
+  path: src/service.ts
+  why: The composition root wires the web routes, the storage and the mail adapter and computes no rule; both directions are allowed here.
+  source: The composition root wires routes and adapters, in TypeScript.
+  code: |
+    import express, { Express } from "express";
+    import { connect } from "./storage/schema";
+    import { accessFromEnv, session } from "./mail/adapter";
+    import { routes as trips } from "./web/trips";
+    import { routes as stand } from "./web/stand";
+
+    export function build(store: unknown): Express {
+      const app = express();
+      app.locals.store = store;
+      app.use(trips);
+      app.use(stand);
+      return app;
+    }
+
+    export function main(): Express {
+      const store = connect(process.env.STATE ?? "./state.db");
+      const access = accessFromEnv();
+      const app = build(store);
+      if (access) {
+        app.locals.mail = session(access);
+      }
+      return app;
+    }
+
+    export function health(): { state: string } {
+      return { state: "ok" };
+    }
+
+    export function describe(app: Express): string {
+      return String(app._router?.stack?.length ?? 0);
+    }
+- id: C19-25
+  card: C19
+  expected: dirty
+  path: src/main/kotlin/app/storage/Drafts.kt
+  why: The storage class imports the web framework to throw and return a transport response, so data access depends on the web layer and its error shape.
+  source: Storage answers through the web framework, in Kotlin.
+  code: |
+    package app.storage
+
+    import org.springframework.http.HttpStatus
+    import org.springframework.http.ResponseEntity
+    import org.springframework.jdbc.core.JdbcTemplate
+    import org.springframework.web.server.ResponseStatusException
+
+    data class Draft(val trip: String, val kind: String, val state: String)
+
+    class Drafts(private val jdbcTemplate: JdbcTemplate) {
+
+        fun of(trip: String): List<Draft> = jdbcTemplate.query(
+            "SELECT kind, state FROM drafts WHERE trip = ?",
+            { rs, _ -> Draft(trip = trip, kind = rs.getString("kind"), state = rs.getString("state")) },
+            trip,
+        )
+
+        fun required(trip: String): List<Draft> {
+            val found = of(trip)
+            if (found.isEmpty()) {
+                throw ResponseStatusException(HttpStatus.NOT_FOUND, "draft not found")
+            }
+            return found
+        }
+
+        fun answer(trip: String): ResponseEntity<Map<String, List<String>>> =
+            ResponseEntity.ok(mapOf("drafts" to required(trip).map { it.kind }))
+    }
+- id: C19-26
+  card: C19
+  expected: clean
+  path: src/main/kotlin/app/trips/Model.kt
+  why: The entity imports the lifecycle helper of the same application layer and declares its own enum; nothing of the transport layer is imported.
+  source: The entity imports the lifecycle helper of its layer, in Kotlin.
+  code: |
+    package app.trips
+
+    import app.lifecycle.Actor
+    import app.lifecycle.Lifecycle
+    import app.lifecycle.Transition
+
+    enum class TripState(val wire: String) {
+        NEW("new"),
+        BOUND("bound"),
+        SHIPPED("shipped"),
+    }
+
+    val LIFECYCLE = Lifecycle(
+        initial = TripState.NEW,
+        final = setOf(TripState.SHIPPED),
+        transitions = setOf(
+            Transition(TripState.NEW, TripState.BOUND, Actor.SYSTEM),
+            Transition(TripState.BOUND, TripState.SHIPPED, Actor.MANAGER),
+        ),
+    )
+
+    data class Trip(
+        val number: String,
+        val state: TripState = TripState.NEW,
+    ) {
+        fun bind(actor: Actor): Trip {
+            LIFECYCLE.check(state, TripState.BOUND, actor, null)
+            return copy(state = TripState.BOUND)
+        }
+
+        fun shipped(actor: Actor): Trip {
+            LIFECYCLE.check(state, TripState.SHIPPED, actor, null)
+            return copy(state = TripState.SHIPPED)
+        }
+    }
+- id: C19-27
+  card: C19
+  expected: dirty
+  path: internal/trips/bind.go
+  why: The lifecycle of the trip reports a refusal through the http package's status type, so the rule package imports the transport layer.
+  source: A rule package signals refusals with net/http status, in Go.
+  code: |
+    package trips
+
+    import (
+    	"fmt"
+    	"net/http"
+
+    	"example.com/app/lifecycle"
+    )
+
+    type TripState string
+
+    const (
+    	TripNew     TripState = "new"
+    	TripBound   TripState = "bound"
+    	TripShipped TripState = "shipped"
+    )
+
+    var tripLifecycle = lifecycle.New(
+    	TripNew,
+    	[]lifecycle.Transition{
+    		{From: TripNew, To: TripBound, Actor: lifecycle.System},
+    		{From: TripBound, To: TripShipped, Actor: lifecycle.Manager},
+    	},
+    )
+
+    type Trip struct {
+    	Number string
+    	State  TripState
+    }
+
+    // Bind the trip to a buyer by the table of transitions.
+    func Bind(trip Trip, actor lifecycle.Actor) (Trip, error) {
+    	if !tripLifecycle.Allows(trip.State, TripBound, actor) {
+    		return trip, lifecycle.Refusal{
+    			Status:  http.StatusConflict,
+    			Message: fmt.Sprintf("trip %s cannot be bound from %s", trip.Number, trip.State),
+    		}
+    	}
+    	trip.State = TripBound
+    	return trip, nil
+    }
+- id: C19-28
+  card: C19
+  expected: clean
+  path: cmd/accounts/main.go
+  why: The command-line entry point parses arguments and calls application packages; it is the entry point itself, not application logic.
+  source: The command-line entry point calls application packages, in Go.
+  code: |
+    package main
+
+    import (
+    	"fmt"
+    	"os"
+
+    	"github.com/spf13/cobra"
+
+    	"example.com/app/accounts"
+    	"example.com/app/storage"
+    )
+
+    func rootCmd() *cobra.Command {
+    	root := &cobra.Command{Use: "accounts"}
+    	add := &cobra.Command{
+    		Use:  "add <name> <role>",
+    		Args: cobra.ExactArgs(2),
+    		RunE: func(cmd *cobra.Command, args []string) error {
+    			store, err := storage.Connect(os.Getenv("STATE"))
+    			if err != nil {
+    				return err
+    			}
+    			return store.SaveUser(accounts.User{Name: args[0], Role: accounts.Role(args[1])})
+    		},
+    	}
+    	list := &cobra.Command{
+    		Use:  "list",
+    		Args: cobra.NoArgs,
+    		RunE: func(cmd *cobra.Command, args []string) error {
+    			store, err := storage.Connect(os.Getenv("STATE"))
+    			if err != nil {
+    				return err
+    			}
+    			for _, user := range store.Users() {
+    				fmt.Println(user.Name, user.Role)
+    			}
+    			return nil
+    		},
+    	}
+    	root.AddCommand(add, list)
+    	return root
+    }
+
+    func main() {
+    	if err := rootCmd().Execute(); err != nil {
+    		os.Exit(2)
+    	}
+    }
+- id: C19-29
+  card: C19
+  expected: dirty
+  path: src/App.Trips/TripLifecycle.cs
+  why: The lifecycle of the trip throws a web-framework exception to signal a refusal, so the rule class imports the transport layer.
+  source: A rule class raises a web-framework exception, in C#.
+  code: |
+    using Microsoft.AspNetCore.Http;
+
+    namespace App.Trips;
+
+    public enum TripState { New, Bound, Shipped }
+
+    public sealed record Trip(string Number, TripState State);
+
+    public static class TripLifecycle
+    {
+        private static readonly IReadOnlyDictionary<(TripState, TripState), string> Allowed =
+            new Dictionary<(TripState, TripState), string>
+            {
+                [(TripState.New, TripState.Bound)] = "system",
+                [(TripState.Bound, TripState.Shipped)] = "manager",
+            };
+
+        public static bool Allows(TripState from, TripState to) => Allowed.ContainsKey((from, to));
+
+        /// <summary>Bind the trip to a buyer by the table of transitions.</summary>
+        public static Trip Bind(Trip trip)
+        {
+            if (!Allows(trip.State, TripState.Bound))
+            {
+                throw new BadHttpRequestException(
+                    $"trip {trip.Number} cannot be bound from {trip.State}", StatusCodes.Status409Conflict);
+            }
+            return trip with { State = TripState.Bound };
+        }
+    }
+- id: C19-30
+  card: C19
+  expected: clean
+  path: src/App.Storage/Drafts.cs
+  why: The storage imports the defaults namespace that declares the first round constant; that namespace is application data, not a page, controller or CLI, so the card does not apply.
+  source: Storage imports an application constant namespace, in C#.
+  code: |
+    using Microsoft.Data.SqlClient;
+    using App.Defaults;
+
+    namespace App.Storage;
+
+    public enum DraftKind { Proxy, Sale }
+
+    public sealed record Draft(string Trip, DraftKind Kind, string State, int Round);
+
+    public class Drafts
+    {
+        private readonly SqlConnection _db;
+
+        public Drafts(SqlConnection db) => _db = db;
+
+        public async Task<IReadOnlyList<Draft>> Of(string trip)
+        {
+            var found = new List<Draft>();
+            await using var cmd = new SqlCommand(
+                "SELECT kind, state, round FROM drafts WHERE trip = @trip ORDER BY kind", _db);
+            cmd.Parameters.AddWithValue("@trip", trip);
+            await using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+                found.Add(new Draft(trip, Enum.Parse<DraftKind>(reader.GetString(0)),
+                    reader.GetString(1), reader.GetInt32(2)));
+            return found;
+        }
+
+        public async Task<int> Round()
+        {
+            await using var cmd = new SqlCommand("SELECT number FROM rounds", _db);
+            var row = await cmd.ExecuteScalarAsync();
+            return row is int number ? number : Defaults.FirstRound;
+        }
+    }

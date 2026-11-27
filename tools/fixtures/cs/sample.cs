@@ -83,6 +83,8 @@ var cmd = new SqlCommand("SELECT 1", conn);
 var client = new HttpClient();
 var smtp = new SmtpClient();
 db.Database.ExecuteSqlRaw("UPDATE orders SET status = 'done'");
+db.Database.ExecuteSqlInterpolated($"UPDATE orders SET status = 'done'");
+var letter = new MailMessage();
 
 // C19
 using Microsoft.AspNetCore.Mvc;
@@ -93,3 +95,4 @@ var doc = JsonDocument.Parse(raw);
 var node = JsonNode.Parse(raw);
 var v = IConfiguration["Key"];
 var name = doc.RootElement.GetProperty("name");
+var section = config.GetSection("cookie");

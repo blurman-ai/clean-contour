@@ -857,3 +857,414 @@
 
     def summary(fields: dict[str, str]) -> str:
         return ", ".join(f"{name}={value}" for name, value in fields.items())
+- id: C20-21
+  card: C20
+  expected: dirty
+  path: src/connector/answers.ts
+  why: The answer of another system comes back as a raw object and its keys choose the refusal text and the branch, with no typed answer in the fragment.
+  source: An ERP answer read as a raw object, in TypeScript.
+  code: |
+    import { Code, Task } from "./model";
+
+    const TEXTS: Record<string, string> = {
+      expired: "expired",
+      no_reference: "no reference",
+      erp_error: "ERP error",
+    };
+
+    function erpWords(detail: string): string {
+      return detail.split(/\s+/).slice(0, 20).join(" ");
+    }
+
+    export function repliesOf(body: string): any[] {
+      return JSON.parse(body)["replies"];
+    }
+
+    // Why the task stopped: the kind of work and the refusal in words.
+    export function failure(task: Task, reply: any): string {
+      if (task.expired) {
+        return `${task.kind} — ${TEXTS["expired"]}`;
+      }
+      const code = reply["code"] as Code;
+      const words = `${task.kind} — ${TEXTS[code]}`;
+      const detail = code === "erp_error" ? erpWords(reply["detail"] ?? "") : "";
+      return detail ? `${words}: ${detail}` : words;
+    }
+
+    export function refused(reply: any): boolean {
+      return reply["posted"] === false || reply["code"] === "erp_error";
+    }
+
+    export function numberOf(reply: any): string {
+      return String(reply["number"]);
+    }
+
+    export function codes(replies: any[]): string[] {
+      return replies.map((reply) => reply["code"]);
+    }
+- id: C20-22
+  card: C20
+  expected: dirty
+  path: src/stand/letters.ts
+  why: The index of the history is a raw JSON list and every reader takes fields by literal keys; the row shape is declared nowhere in the module.
+  source: A JSON history index read by literal keys, in TypeScript.
+  code: |
+    import { readFileSync } from "node:fs";
+    import { join } from "node:path";
+
+    // Rows of the stand history index, as the builder wrote them.
+    export function rows(folder: string): any[] {
+      return JSON.parse(readFileSync(join(folder, "index.json"), "utf-8"));
+    }
+
+    export function several(folder: string): any[] {
+      return rows(folder).filter((row) => row["binding"] === "several");
+    }
+
+    export function numbers(folder: string): string[] {
+      return rows(folder).map((row) => row["number"]);
+    }
+
+    export function buyerOf(folder: string, number: string): string | null {
+      for (const row of rows(folder)) {
+        if (row["number"] === number) {
+          return row["buyer"];
+        }
+      }
+      return null;
+    }
+
+    export function mailboxesOf(folder: string, number: string): string[] | null {
+      for (const row of rows(folder)) {
+        if (row["number"] === number) {
+          return "mailboxes" in row ? row["mailboxes"] : null;
+        }
+      }
+      return null;
+    }
+
+    export function plants(folder: string): Set<string> {
+      return new Set(rows(folder).filter((row) => row["plant"]).map((row) => row["plant"]));
+    }
+- id: C20-23
+  card: C20
+  expected: clean
+  path: src/settings/site.ts
+  why: This is the one decoder of the site config — it reads the raw object once and returns typed settings, so the literal keys are the schema.
+  source: The single decoder of the site config, in TypeScript.
+  code: |
+    export interface Cookie {
+      name: string;
+      secure: boolean;
+    }
+
+    export interface Scrypt {
+      n: number;
+      r: number;
+    }
+
+    export interface SiteSettings {
+      loginAttempts: number;
+      loginWindowMinutes: number;
+      sessionDays: number;
+      cookie: Cookie;
+      scrypt: Scrypt;
+    }
+
+    // The single place that knows the keys of config/site.json.
+    export function loadSite(raw: any): SiteSettings {
+      const cookie = raw["cookie"];
+      const scrypt = raw["scrypt"];
+      return {
+        loginAttempts: Number(raw["login_attempts"]),
+        loginWindowMinutes: Number(raw["login_window_minutes"]),
+        sessionDays: Number(raw["session_days"]),
+        cookie: { name: String(cookie["name"]), secure: cookie["secure"] === true },
+        scrypt: { n: Number(scrypt["n"]), r: Number(scrypt["r"]) },
+      };
+    }
+- id: C20-24
+  card: C20
+  expected: clean
+  path: src/notices/envelope.ts
+  why: The mapping is built and read in the same fragment — it is the outgoing message parts of this module, not a config or a payload of another system.
+  source: A mapping built and read in one fragment, in TypeScript.
+  code: |
+    export interface Envelope {
+      sender: string;
+      to: string;
+      subject: string;
+      at: Date;
+    }
+
+    export function parts(envelope: Envelope): Record<string, string> {
+      return {
+        From: envelope.sender,
+        To: envelope.to,
+        Subject: envelope.subject,
+        Date: envelope.at.toUTCString(),
+      };
+    }
+
+    export function build(envelope: Envelope, text: string): string {
+      const written = parts(envelope);
+      const head = Object.entries(written)
+        .map(([name, value]) => `${name}: ${value}`)
+        .join("\r\n");
+      return `${head}\r\n\r\n${text}`;
+    }
+
+    export function headers(envelope: Envelope): string[] {
+      return Object.keys(parts(envelope));
+    }
+
+    export function described(envelope: Envelope): string {
+      return `${parts(envelope)["To"]} — ${envelope.subject}`;
+    }
+- id: C20-25
+  card: C20
+  expected: dirty
+  path: src/main/kotlin/app/store/Login.kt
+  why: The login rule reads values of the site config by string literal and compares them; the config file's shape is not declared in the module.
+  source: Login values read from the site config by literals, in Kotlin.
+  code: |
+    package app.store
+
+    import app.config.Settings
+    import java.time.Duration
+    import java.time.Instant
+
+    val SETTINGS = Settings.load("site")
+
+    fun window(now: Instant): Instant =
+        now - Duration.ofMinutes((SETTINGS["login_window_minutes"] as Number).toLong())
+
+    fun refused(store: LoginFailures, name: String, now: Instant): Boolean =
+        store.loginFailures(name, window(now)) >= (SETTINGS["login_attempts"] as Number).toInt()
+
+    fun sessionUntil(now: Instant): Instant =
+        now + Duration.ofDays((SETTINGS["session_days"] as Number).toLong())
+
+    fun cost(): Pair<Int, Int> {
+        val scrypt = SETTINGS["scrypt"] as Map<*, *>
+        return (scrypt["n"] as Number).toInt() to (scrypt["r"] as Number).toInt()
+    }
+
+    fun cookieName(): String = (SETTINGS["cookie"] as Map<*, *>)["name"] as String
+
+    fun describe(): String =
+        "attempts=${SETTINGS["login_attempts"]}, " +
+            "window=${SETTINGS["login_window_minutes"]} min, " +
+            "session=${SETTINGS["session_days"]} days"
+- id: C20-26
+  card: C20
+  expected: clean
+  path: src/main/kotlin/app/storage/Tasks.kt
+  why: A stored JSON blob is decoded once into typed objects by the storage adapter; every later read goes through the object, not through the blob.
+  source: A stored blob decoded into typed objects, in Kotlin.
+  code: |
+    package app.storage
+
+    import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+    import com.fasterxml.jackson.module.kotlin.readValue
+    import org.springframework.jdbc.core.JdbcTemplate
+
+    data class Step(val kind: String, val command: Map<String, Any?>)
+
+    data class Task(
+        val number: Long,
+        val state: String,
+        val steps: List<Step>,
+    )
+
+    private val mapper = jacksonObjectMapper()
+
+    fun taskOf(id: Long, state: String, payload: String): Task =
+        Task(number = id, state = state, steps = mapper.readValue(payload))
+
+    class Tasks(private val jdbcTemplate: JdbcTemplate) {
+
+        fun one(number: Long): Task? = jdbcTemplate.query(
+            "SELECT id, state, command FROM tasks WHERE id = ?",
+            { rs, _ -> taskOf(rs.getLong("id"), rs.getString("state"), rs.getString("command")) },
+            number,
+        ).firstOrNull()
+
+        fun states(): Map<Long, String> = jdbcTemplate.query(
+            "SELECT id, state FROM tasks",
+            { rs, _ -> rs.getLong("id") to rs.getString("state") },
+        ).toMap()
+    }
+- id: C20-27
+  card: C20
+  expected: dirty
+  path: internal/runs/plan.go
+  why: A stored JSON blob is unmarshalled into raw maps in the run package and its keys drive the cleanup plan; the adapter that wrote the blob is the decoder, this package is not.
+  source: A stored JSON blob whose keys drive the plan, in Go.
+  code: |
+    package runs
+
+    import "encoding/json"
+
+    // Cleanup plan of the run, as the adapter stored it.
+    func plan(run Run) ([]map[string]interface{}, error) {
+    	var steps []map[string]interface{}
+    	if err := json.Unmarshal([]byte(run.PlanText), &steps); err != nil {
+    		return nil, err
+    	}
+    	return steps, nil
+    }
+
+    func kinds(run Run) ([]string, error) {
+    	steps, err := plan(run)
+    	if err != nil {
+    		return nil, err
+    	}
+    	found := make([]string, 0, len(steps))
+    	for _, step := range steps {
+    		found = append(found, step["kind"].(string))
+    	}
+    	return found, nil
+    }
+
+    func commandOf(run Run, kind string) (map[string]interface{}, error) {
+    	steps, err := plan(run)
+    	if err != nil {
+    		return nil, err
+    	}
+    	for _, step := range steps {
+    		if step["kind"] == kind {
+    			command, _ := step["command"].(map[string]interface{})
+    			return command, nil
+    		}
+    	}
+    	return nil, nil
+    }
+
+    func removals(run Run) (int, error) {
+    	steps, err := plan(run)
+    	if err != nil {
+    		return 0, err
+    	}
+    	count := 0
+    	for _, step := range steps {
+    		if kind, ok := step["kind"].(string); ok && len(kind) > 6 && kind[:6] == "delete" {
+    			count++
+    		}
+    	}
+    	return count, nil
+    }
+- id: C20-28
+  card: C20
+  expected: clean
+  path: internal/settings/site.go
+  why: This is the one decoder of the site config — it unmarshals the raw bytes once into a typed struct with json tags, so the keys are the schema.
+  source: The single decoder of the site config, in Go.
+  code: |
+    package settings
+
+    import "encoding/json"
+
+    type Cookie struct {
+    	Name   string `json:"name"`
+    	Secure bool   `json:"secure"`
+    }
+
+    type Scrypt struct {
+    	N int `json:"n"`
+    	R int `json:"r"`
+    }
+
+    // SiteSettings is the typed shape of config/site.json.
+    type SiteSettings struct {
+    	LoginAttempts      int    `json:"login_attempts"`
+    	LoginWindowMinutes int    `json:"login_window_minutes"`
+    	SessionDays        int    `json:"session_days"`
+    	Cookie             Cookie `json:"cookie"`
+    	Scrypt             Scrypt `json:"scrypt"`
+    }
+
+    // LoadSite is the single place that knows the keys of config/site.json.
+    func LoadSite(raw []byte) (SiteSettings, error) {
+    	var settings SiteSettings
+    	if err := json.Unmarshal(raw, &settings); err != nil {
+    		return SiteSettings{}, err
+    	}
+    	return settings, nil
+    }
+- id: C20-29
+  card: C20
+  expected: dirty
+  path: src/App.Drivers/Snapshot.cs
+  why: Rows of the ERP answer are read by literal property names and go straight into the text of the driver card; no typed row or object is built anywhere in the fragment.
+  source: ERP rows read by literal property names, in C#.
+  code: |
+    using System.Text.Json;
+
+    namespace App.Drivers;
+
+    public static class Snapshot
+    {
+        private static JsonElement? Latest(JsonElement rows, string array, string nameColumn, string dateColumn)
+        {
+            var found = rows.GetProperty(array).EnumerateArray()
+                .Where(row => row.TryGetProperty(nameColumn, out var value) && value.ValueKind == JsonValueKind.String)
+                .OrderByDescending(row => row.GetProperty(dateColumn).GetString())
+                .ToList();
+            return found.Count == 0 ? null : found[0];
+        }
+
+        /// <summary>Driver card text: name, plate and passport, as the ERP answer has them.</summary>
+        public static string LabelOf(string replyJson, string fullName)
+        {
+            using var document = JsonDocument.Parse(replyJson);
+            var rows = document.RootElement.GetProperty("rows");
+            var passport = Latest(rows, "passports", "FullName", "Period");
+            var sale = Latest(rows, "sales", "Driver", "Date");
+            if (passport is null && sale is null)
+                return fullName;
+            var plate = sale is JsonElement s ? s.GetProperty("Plate").GetString() : "";
+            var series = passport is JsonElement p
+                ? $"{p.GetProperty("Series").GetString()} {p.GetProperty("Number").GetString()}" : "";
+            return $"{fullName} | {plate} | {series}".Trim(' ', '|');
+        }
+    }
+- id: C20-30
+  card: C20
+  expected: clean
+  path: src/App.Settings/ConnectorSettings.cs
+  why: The module declares the connector settings as typed records and reads the config in one decoder; callers get properties, not literal keys.
+  source: The decoder of the connector config, in C#.
+  code: |
+    using System.Text.Json;
+
+    namespace App.Settings;
+
+    public sealed record DocumentSettings(string Document, IReadOnlyList<string> Keep,
+        IReadOnlyList<string> Tables, string Title);
+
+    public sealed record ConnectorSettings(IReadOnlyDictionary<string, DocumentSettings> Documents,
+        int TakeLimit, int ReplyMinutes)
+    {
+        public DocumentSettings Document(string kind) => Documents[kind];
+    }
+
+    public static class ConnectorSettingsDecoder
+    {
+        /// <summary>The single place that knows the keys of config/connector.json.</summary>
+        public static ConnectorSettings Load(JsonElement raw)
+        {
+            var documents = new Dictionary<string, DocumentSettings>();
+            foreach (var entry in raw.GetProperty("documents").EnumerateObject())
+            {
+                var body = entry.Value;
+                documents[entry.Name] = new DocumentSettings(
+                    Document: body.GetProperty("document").GetString()!,
+                    Keep: body.GetProperty("keep").EnumerateArray().Select(x => x.GetString()!).ToList(),
+                    Tables: body.GetProperty("tables").EnumerateArray().Select(x => x.GetString()!).ToList(),
+                    Title: body.GetProperty("print").GetProperty("title").GetString()!);
+            }
+            return new ConnectorSettings(documents,
+                raw.GetProperty("take_limit").GetInt32(), raw.GetProperty("reply_minutes").GetInt32());
+        }
+    }

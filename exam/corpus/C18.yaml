@@ -787,3 +787,394 @@
 
     def health() -> dict[str, str]:
         return {"state": "ok" if STORE else "down"}
+- id: C18-21
+  card: C18
+  expected: dirty
+  path: src/orders/routes.ts
+  why: A route handler issues an UPDATE of the order state itself; the request is served and the state is written in one handler.
+  source: A route handler that cancels an order by UPDATE, in TypeScript.
+  code: |
+    import { Router, Request, Response } from "express";
+    import { db } from "../storage/db";
+    import { OrderState } from "./model";
+
+    export const routes = Router();
+
+    routes.get("/orders", async (_req: Request, res: Response) => {
+      const rows = await db.query("SELECT number, state FROM orders ORDER BY number");
+      res.json({ orders: rows });
+    });
+
+    routes.post("/orders/:number/cancel", async (req: Request, res: Response) => {
+      await db.query(
+        "UPDATE orders SET state = $1 WHERE number = $2 AND state <> $3",
+        [OrderState.Cancelled, req.params.number, OrderState.Shipped],
+      );
+      res.redirect(303, "/orders");
+    });
+
+    const ACTIVE = new Set(["new", "confirmed"]);
+
+    export function active(number: string, state: string): boolean {
+      return ACTIVE.has(state) && number.length > 0;
+    }
+- id: C18-22
+  card: C18
+  expected: dirty
+  path: src/catalog/refresh.ts
+  why: The function opens an HTTP connection, decodes the price list and in the same body decides which prices are accepted and which state the catalog gets.
+  source: A fetch of the price list that also decides acceptance, in TypeScript.
+  code: |
+    import { Price, PriceList } from "./model";
+
+    const TIMEOUT_MS = 20_000;
+
+    export function accepted(prices: Price[], minimum: number): Price[] {
+      return prices.filter((price) => price.amount >= minimum);
+    }
+
+    export function pricesOf(payload: any): Price[] {
+      return payload.prices.map((row: any) => ({ name: row.name, amount: row.amount }));
+    }
+
+    // Take the supplier price list and keep the prices we accept.
+    export async function refresh(url: string, current: PriceList, minimum: number): Promise<PriceList> {
+      const answer = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+      const payload = await answer.json();
+      const kept = accepted(pricesOf(payload), minimum);
+      if (kept.length === 0) {
+        current.state = "refused";
+        return current;
+      }
+      current.state = "ready";
+      return { prices: kept, state: current.state };
+    }
+
+    export function describe(priceList: PriceList): string {
+      return `${priceList.prices.length} prices, state ${priceList.state}`;
+    }
+- id: C18-23
+  card: C18
+  expected: clean
+  path: src/mail/smtp.ts
+  why: The module is the mail adapter — every driver call is the whole job of its function and the only decision is mapping a driver error to the adapter's coded failure.
+  source: The mail adapter in TypeScript; every driver call is the whole job.
+  code: |
+    import nodemailer, { Transporter } from "nodemailer";
+
+    export class Unavailable extends Error {
+      readonly code = "unavailable";
+    }
+
+    export interface Access {
+      host: string;
+      port: number;
+      user: string;
+      password: string;
+    }
+
+    export function openSession(access: Access): Transporter {
+      try {
+        return nodemailer.createTransport({
+          host: access.host,
+          port: access.port,
+          secure: access.port === 465,
+          auth: { user: access.user, pass: access.password },
+        });
+      } catch (error) {
+        throw new Unavailable(String(error));
+      }
+    }
+
+    export async function sendMail(session: Transporter, from: string, to: string[], raw: string): Promise<void> {
+      try {
+        await session.sendMail({ from, to, raw });
+      } catch (error) {
+        throw new Unavailable(String(error));
+      }
+    }
+
+    export async function verify(session: Transporter): Promise<boolean> {
+      return session.verify();
+    }
+- id: C18-24
+  card: C18
+  expected: clean
+  path: src/runs/finish.ts
+  why: The rule function decides through the state writer and calls adapter methods; the driver stays behind save() and forgetTrip(), so the I/O is not in this body.
+  source: A state rule that calls adapter methods, in TypeScript.
+  code: |
+    import { Actor, Refused, Run, RunState, writeState } from "./model";
+    import { Runs } from "./repository";
+    import { Scenario } from "./scenario";
+    import { Store } from "../storage/store";
+
+    const FINISHABLE = new Set([RunState.Going, RunState.NotStarted]);
+
+    function writing(store: Store, scenario: Scenario): boolean {
+      return scenario.numbers.some((number) =>
+        store.tasksOf(number).some((task) => task.kind in store.writes && task.state === "taken"),
+      );
+    }
+
+    // Stop the run: forget its scenario data on the stand and hand the cleanup on.
+    export async function finish(store: Store, runs: Runs, scenario: Scenario, now: Date): Promise<Refused | null> {
+      const run = await runs.open(scenario.slug);
+      if (!run || !FINISHABLE.has(run.state)) {
+        return null;
+      }
+      if (run.state === RunState.Going) {
+        if (writing(store, scenario)) {
+          return Refused.Writing;
+        }
+        for (const number of scenario.numbers) {
+          await store.forgetTrip(number);
+        }
+      }
+      await runs.save(writeState(run, RunState.Cleaning, Actor.Engineer, now));
+      return null;
+    }
+- id: C18-25
+  card: C18
+  expected: dirty
+  path: src/main/kotlin/app/runs/Letters.kt
+  why: The function runs an UPDATE whose WHERE clause enforces a lifecycle rule (a run takes a letter only while it is going) and the function is also the place that decides whether the letter is accepted.
+  source: A run repository that gates a letter on the run's state, in Kotlin.
+  code: |
+    package app.runs
+
+    import org.springframework.jdbc.core.JdbcTemplate
+    import java.util.concurrent.locks.ReentrantLock
+    import kotlin.concurrent.withLock
+
+    class Letters(
+        private val jdbcTemplate: JdbcTemplate,
+        private val lock: ReentrantLock,
+    ) {
+        /** Attach a letter to the run unless the run has already stopped. */
+        fun add(runId: Long, letter: String): Boolean = lock.withLock {
+            val updated = jdbcTemplate.update(
+                "UPDATE runs SET letters = letters || ?::jsonb WHERE id = ? AND state = 'going'",
+                letter, runId,
+            )
+            updated == 1
+        }
+
+        fun of(runId: Long): List<String> = lock.withLock {
+            jdbcTemplate.queryForList("SELECT letters FROM runs WHERE id = ?", String::class.java, runId)
+        }
+
+        fun empty(runId: Long): Boolean = of(runId).isEmpty()
+
+        fun count(runId: Long): Int = of(runId).size
+    }
+- id: C18-26
+  card: C18
+  expected: clean
+  path: src/main/kotlin/app/storage/Orders.kt
+  why: A repository class — it executes SELECTs and decodes rows into typed objects; the driver call is the whole job and no rule is decided on the way.
+  source: A repository that decodes rows into objects, in Kotlin.
+  code: |
+    package app.storage
+
+    import org.springframework.jdbc.core.JdbcTemplate
+    import org.springframework.jdbc.core.RowMapper
+    import java.time.LocalDateTime
+
+    data class Order(
+        val number: String,
+        val state: String,
+        val createdAt: LocalDateTime,
+    )
+
+    val orderMapper = RowMapper { rs, _ ->
+        Order(
+            number = rs.getString("number"),
+            state = rs.getString("state"),
+            createdAt = rs.getTimestamp("created_at").toLocalDateTime(),
+        )
+    }
+
+    class Orders(private val jdbcTemplate: JdbcTemplate) {
+
+        fun all(): List<Order> = jdbcTemplate.query(
+            "SELECT number, state, created_at FROM orders ORDER BY number",
+            orderMapper,
+        )
+
+        fun one(number: String): Order? = jdbcTemplate.query(
+            "SELECT number, state, created_at FROM orders WHERE number = ?",
+            orderMapper, number,
+        ).firstOrNull()
+    }
+
+    fun numbers(orders: List<Order>): List<String> = orders.map { it.number }
+- id: C18-27
+  card: C18
+  expected: dirty
+  path: internal/shipments/assign.go
+  why: One function checks for an active assignment with SQL and then inserts a new one, so the one-active rule is enforced by the I/O body instead of the state writer.
+  source: An assignment guarded by an active-courier check, in Go.
+  code: |
+    package shipments
+
+    import (
+    	"database/sql"
+    	"fmt"
+    )
+
+    func current(db *sql.DB, order string) (string, error) {
+    	var courier string
+    	row := db.QueryRow("SELECT courier FROM assignments WHERE order_no = ? AND active = 1", order)
+    	if err := row.Scan(&courier); err == sql.ErrNoRows {
+    		return "", nil
+    	} else if err != nil {
+    		return "", err
+    	}
+    	return courier, nil
+    }
+
+    // Give the order to the courier unless somebody already holds it.
+    func assign(db *sql.DB, order string, courier string) error {
+    	held, err := current(db, order)
+    	if err != nil {
+    		return err
+    	}
+    	if held != "" {
+    		return fmt.Errorf("the order is already held by %s", held)
+    	}
+    	_, err = db.Exec("INSERT INTO assignments (order_no, courier, active) VALUES (?, ?, 1)", order, courier)
+    	return err
+    }
+
+    func release(db *sql.DB, order string) error {
+    	_, err := db.Exec("UPDATE assignments SET active = 0 WHERE order_no = ?", order)
+    	return err
+    }
+- id: C18-28
+  card: C18
+  expected: clean
+  path: internal/storage/errors.go
+  why: The function reads one key and wraps a driver error into the adapter's coded failure; it performs no domain decision of its own.
+  source: A driver error re-raised as an adapter code, in Go.
+  code: |
+    package storage
+
+    import (
+    	"database/sql"
+    	"errors"
+    )
+
+    // StorageDown is the adapter's coded failure: the pass stops and retries later.
+    type StorageDown struct {
+    	cause error
+    }
+
+    func (e *StorageDown) Error() string { return e.cause.Error() }
+
+    func (e *StorageDown) Code() string { return "storage_down" }
+
+    func translate(err error) error {
+    	if err == nil {
+    		return nil
+    	}
+    	return &StorageDown{cause: err}
+    }
+
+    func known(db *sql.DB, key string) (bool, error) {
+    	var one int
+    	row := db.QueryRow("SELECT 1 FROM seen WHERE key = ?", key)
+    	if err := row.Scan(&one); err != nil {
+    		if errors.Is(err, sql.ErrNoRows) {
+    			return false, nil
+    		}
+    		return false, translate(err)
+    	}
+    	return true, nil
+    }
+- id: C18-29
+  card: C18
+  expected: dirty
+  path: src/App.Orders/OrdersController.cs
+  why: A controller action issues an UPDATE of the order state itself; the request is served and the state is written in one action.
+  source: A controller action that cancels an order by UPDATE, in C#.
+  code: |
+    using Microsoft.Data.SqlClient;
+    using Microsoft.AspNetCore.Mvc;
+
+    namespace App.Orders;
+
+    [ApiController]
+    [Route("orders")]
+    public class OrdersController : ControllerBase
+    {
+        private readonly SqlConnection _db;
+
+        public OrdersController(SqlConnection db) => _db = db;
+
+        [HttpGet]
+        public async Task<IActionResult> List()
+        {
+            var rows = new List<object>();
+            await using var cmd = new SqlCommand("SELECT number, state FROM orders ORDER BY number", _db);
+            await using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+                rows.Add(new { number = reader.GetString(0), state = reader.GetString(1) });
+            return Ok(rows);
+        }
+
+        [HttpPost("{number}/cancel")]
+        public async Task<IActionResult> Cancel(string number)
+        {
+            await using var cmd = new SqlCommand(
+                "UPDATE orders SET state = @state WHERE number = @number AND state <> 'shipped'", _db);
+            cmd.Parameters.AddWithValue("@state", OrderState.Cancelled);
+            cmd.Parameters.AddWithValue("@number", number);
+            await cmd.ExecuteNonQueryAsync();
+            return Redirect("/orders");
+        }
+    }
+- id: C18-30
+  card: C18
+  expected: clean
+  path: src/App.Storage/Orders.cs
+  why: A repository class — it executes SELECTs and decodes rows into typed objects; the driver call is the whole job and no rule is decided on the way.
+  source: A repository that decodes rows into objects, in C#.
+  code: |
+    using Microsoft.Data.SqlClient;
+
+    namespace App.Storage;
+
+    public sealed record Order(string Number, string State, DateTime CreatedAt);
+
+    public class Orders
+    {
+        private readonly SqlConnection _db;
+
+        public Orders(SqlConnection db) => _db = db;
+
+        private static Order OrderOf(SqlDataReader row) => new(
+            Number: row.GetString(row.GetOrdinal("number")),
+            State: row.GetString(row.GetOrdinal("state")),
+            CreatedAt: row.GetDateTime(row.GetOrdinal("created_at")));
+
+        public async Task<IReadOnlyList<Order>> All()
+        {
+            var found = new List<Order>();
+            await using var cmd = new SqlCommand(
+                "SELECT number, state, created_at FROM orders ORDER BY number", _db);
+            await using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+                found.Add(OrderOf(reader));
+            return found;
+        }
+
+        public async Task<Order?> One(string number)
+        {
+            await using var cmd = new SqlCommand(
+                "SELECT number, state, created_at FROM orders WHERE number = @number", _db);
+            cmd.Parameters.AddWithValue("@number", number);
+            await using var reader = await cmd.ExecuteReaderAsync();
+            return await reader.ReadAsync() ? OrderOf(reader) : null;
+        }
+    }
