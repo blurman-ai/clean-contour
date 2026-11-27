@@ -12,7 +12,8 @@
    "/obj/",
    "/bin/",
    "(^|/)(testkit|acceptance|experiments?)/",
-   "(?:^|.*/)[^/]*(fixture|harness|proof)[^/]*$"
+   "(?:^|.*/)[^/]*(fixture|harness|proof)[^/]*$",
+   "(?:^|/)\\.?venv/"
   ],
   "ts": [
    "(^|/)(tests?|test|__tests__)/",
@@ -24,7 +25,8 @@
    "/bin/",
    "wwwroot/(lib|vendor)",
    "(^|/)(testkit|acceptance|experiments?)/",
-   "(?:^|.*/)[^/]*(fixture|harness|proof)[^/]*$"
+   "(?:^|.*/)[^/]*(fixture|harness|proof)[^/]*$",
+   "(?:^|/)\\.?venv/"
   ],
   "kt": [
    "(^|/)src/test/",
@@ -36,7 +38,8 @@
    "/obj/",
    "/bin/",
    "(^|/)(testkit|acceptance|experiments?)/",
-   "(?:^|.*/)[^/]*(fixture|harness|proof)[^/]*$"
+   "(?:^|.*/)[^/]*(fixture|harness|proof)[^/]*$",
+   "(?:^|/)\\.?venv/"
   ],
   "go": [
    "_test\\.go$",
@@ -46,12 +49,14 @@
    "/obj/",
    "/bin/",
    "(^|/)(testkit|acceptance|experiments?)/",
-   "(?:^|.*/)[^/]*(fixture|harness|proof)[^/]*$"
+   "(?:^|.*/)[^/]*(fixture|harness|proof)[^/]*$",
+   "(?:^|/)\\.?venv/"
   ],
   "cs": [
    "(/obj/|/bin/|Migrations/|\\.g\\.cs$|\\.Designer\\.cs$|[Tt]ests?/|\\.Tests?\\b|Tests?\\.cs$|/samples?/|/Benchmarks?/|node_modules|\\.spec\\.ts$|wwwroot/(lib|vendor)|\\.min\\.|/dist/)",
    "(^|/)(testkit|acceptance|experiments?)/",
-   "(?:^|.*/)[^/]*(fixture|harness|proof)[^/]*$"
+   "(?:^|.*/)[^/]*(fixture|harness|proof)[^/]*$",
+   "(?:^|/)\\.?venv/"
   ]
  },
  "extensions": {

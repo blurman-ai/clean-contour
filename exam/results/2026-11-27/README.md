@@ -191,3 +191,14 @@ rows measured before a card edit carry the old text and are marked so.
 Haiku and Sonnet were not re-measured after the C15 split and the new cards:
 this run's model budget is DeepSeek only, so those columns stand as of 11.11
 and are not comparable with the new rows.
+
+## Stage 5 — C26 and C27 corpora extended (issue #16, partial)
+
+C26 grew to 16+16, C27 to 15+15 (five languages). Re-measured whole corpus,
+same settings: C26 16/16 dirty found and 0/16 clean flagged; C27 14/15 (93%)
+and 1/15 (7%) — both inside the gate. One C27 dirty fragment is missed once
+in three and one clean fragment flagged once in three, both on the borderline
+side of the gate. The other cards stand at 10+10; 30+30 everywhere did not
+fit this run's budget.
+
+Report: `exam/runs/2026-11-27-deepseek-c26-c27-expansion.json`.

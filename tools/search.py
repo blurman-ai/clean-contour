@@ -165,8 +165,8 @@ def selftest() -> int:
         for lang in ALL_LANGS:
             skip_rx = skip_regex(signs, lang)
             got = walk_files(fixtures_root, signs["extensions"][lang], skip_rx)
-            if any("testkit" in str(f) for f in got):
-                failures.append("walk_files descended into testkit/")
+            if any("testkit" in str(f) or "/venv/" in str(f) for f in got):
+                failures.append("walk_files descended into testkit/ or venv/")
             found = hits_for(fixtures_root, signs, ALL_LANGS, list(signs["cards"]))
             if any("testkit" in rel for _, rel, _, _ in found):
                 failures.append("a hit inside testkit/")

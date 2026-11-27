@@ -643,3 +643,277 @@
     export function totalSteps(plan: { steps: string[] }): number {
       return plan.steps.length;
     }
+- id: C27-21
+  card: C27
+  expected: dirty
+  path: app/imports/batches.py
+  why: A catch of all exceptions puts one refusal code on the batch for encoding, schema and size failures alike.
+  source: A batch import endpoint.
+  code: |
+    @router.post("/import-batches", status_code=202)
+    async def start_import(file: UploadFile, db: AsyncSession = Depends(get_db)):
+        raw = await file.read()
+        try:
+            plan = plan_import(raw)
+            staged = stage_rows(db, plan)
+        except Exception as exc:
+            log.warning("import_batch_failed error=%s", exc)
+            raise HTTPException(status_code=422, detail={"code": "import_batch_failed"}) from exc
+        await db.commit()
+        return BatchOut.model_validate(staged)
+
+
+    def batch_view(batch) -> dict:
+        return {"id": str(batch.id), "rows": batch.row_count}
+
+- id: C27-22
+  card: C27
+  expected: dirty
+  path: src/connectors/refresh.ts
+  why: Every refresh failure — auth expired, connector gone, provider outage — lands in one stored failure reason.
+  source: A connector refresh worker.
+  code: |
+    export async function refreshConnector(connector: Connector): Promise<void> {
+      try {
+        const meta = await fetchMeta(connector);
+        await saveMeta(connector.id, meta);
+        await markSynced(connector.id);
+      } catch (e) {
+        await saveFailure(connector.id, "refresh_failed");
+      }
+    }
+
+    async function fetchMeta(connector: Connector) {
+      const resp = await fetch(`${connector.baseUrl}/meta`);
+      if (!resp.ok) throw new Error(`meta ${resp.status}`);
+      return resp.json();
+    }
+
+- id: C27-23
+  card: C27
+  expected: dirty
+  path: app/src/main/kotlin/push/Notifier.kt
+  why: runCatching folds token invalid, payload too large and provider outage into one refusal code for the user.
+  source: A push notifier wrapper.
+  code: |
+    package push
+
+    data class PushOutcome(val delivered: Boolean, val refusal: String?)
+
+    class Notifier(private val provider: Provider) {
+
+        fun send(token: String, payload: Payload): PushOutcome =
+            runCatching { provider.send(token, payload) }
+                .getOrElse {
+                    log.warn("push_send_failed token=%s", token)
+                    PushOutcome(delivered = false, refusal = "push_failed")
+                }
+
+    fun sendAll(tokens: List<String>, payload: Payload): List<PushOutcome> =
+        tokens.map { send(it, payload) }
+    }
+
+- id: C27-24
+  card: C27
+  expected: dirty
+  path: internal/ingest/ingest.go
+  why: The ingest handler answers every failure path with the same "ingest failed" message, the caller cannot tell a bad archive from a locked shard.
+  source: A Go ingest endpoint.
+  code: |
+    func (s *Server) ingest(c *gin.Context) {
+        body, err := io.ReadAll(c.Request.Body)
+        if err != nil {
+            c.JSON(400, gin.H{"error": "ingest failed"})
+            return
+        }
+        archive, err := unpack(body)
+        if err != nil {
+            c.JSON(422, gin.H{"error": "ingest failed"})
+            return
+        }
+        if err = s.shards.Write(archive); err != nil {
+            c.JSON(409, gin.H{"error": "ingest failed"})
+            return
+        }
+        c.JSON(201, gin.H{"ingested": true})
+    }
+
+- id: C27-25
+  card: C27
+  expected: dirty
+  path: Services/Lockers/Assign.cs
+  why: One catch turns locker full, locker out of service and lock expired into a single stored refusal code.
+  source: A locker assignment service.
+  code: |
+    using System;
+
+    namespace Services.Lockers;
+
+    public sealed class Assigner
+    {
+        private readonly LockerStore _store;
+
+        public Assigner(LockerStore store) => _store = store;
+
+        public AssignResult Assign(Order order)
+        {
+            try
+            {
+                var locker = _store.FindFree(order.Size, order.Zone);
+                var lease = _store.Lock(locker, order.Id, TimeSpan.FromHours(4));
+                return AssignResult.Ok(locker, lease);
+            }
+            catch (Exception ex)
+            {
+                return AssignResult.Refused("locker_assign_failed");
+            }
+        }
+    }
+
+- id: C27-26
+  card: C27
+  expected: clean
+  path: app/imports/batches.py
+  why: Near miss — each failure class raises its own refusal member and an unexpected error is rethrown, not folded.
+  source: The same import endpoint, per-cause refusals.
+  code: |
+    @router.post("/import-batches", status_code=202)
+    async def start_import(file: UploadFile, db: AsyncSession = Depends(get_db)):
+        raw = await file.read()
+        try:
+            plan = plan_import(raw)
+        except ImportEncodingInvalid as exc:
+            raise HTTPException(422, detail={"code": BatchRefusal.ENCODING_INVALID.value}) from exc
+        except ImportTooLarge as exc:
+            raise HTTPException(422, detail={"code": BatchRefusal.TOO_LARGE.value}) from exc
+        staged = stage_rows(db, plan)
+        await db.commit()
+        return BatchOut.model_validate(staged)
+
+
+    def batch_view(batch) -> dict:
+        return {"id": str(batch.id), "rows": batch.row_count}
+
+- id: C27-27
+  card: C27
+  expected: clean
+  path: src/connectors/refresh.ts
+  why: Near miss — the worker maps each failure to its own stored reason and lets unknown failures carry the error's own identity.
+  source: The same refresh worker, per-cause reasons.
+  code: |
+    export async function refreshConnector(connector: Connector): Promise<void> {
+      try {
+        const meta = await fetchMeta(connector);
+        await saveMeta(connector.id, meta);
+        await markSynced(connector.id);
+      } catch (e) {
+        if (e instanceof AuthExpired) await saveFailure(connector.id, "auth_expired");
+        else if (e instanceof ConnectorGone) await saveFailure(connector.id, "connector_gone");
+        else throw e;
+      }
+    }
+
+    async function fetchMeta(connector: Connector) {
+      const resp = await fetch(`${connector.baseUrl}/meta`);
+      if (!resp.ok) throw new Error(`meta ${resp.status}`);
+      return resp.json();
+    }
+
+- id: C27-28
+  card: C27
+  expected: clean
+  path: app/src/main/kotlin/push/Notifier.kt
+  why: Near miss — each provider failure keeps its own refusal member; unexpected throwables rethrow.
+  source: The same notifier, per-cause refusals.
+  code: |
+    package push
+
+    sealed class PushRefusal {
+        object TokenInvalid : PushRefusal()
+        object PayloadTooLarge : PushRefusal()
+        data class Outage(val detail: String) : PushRefusal()
+    }
+
+    class Notifier(private val provider: Provider) {
+
+        fun send(token: String, payload: Payload): PushOutcome {
+            try {
+                return PushOutcome(delivered = true, refusal = null)
+            } catch (e: TokenRejected) {
+                return PushOutcome(delivered = false, refusal = "token_invalid")
+            } catch (e: PayloadRejected) {
+                return PushOutcome(delivered = false, refusal = "payload_too_large")
+            }
+        }
+    }
+
+- id: C27-29
+  card: C27
+  expected: clean
+  path: internal/ingest/ingest.go
+  why: Near miss — each refusal path answers with its own code and the unexpected error is handed to the error channel as itself.
+  source: The same ingest endpoint, per-cause codes.
+  code: |
+    func (s *Server) ingest(c *gin.Context) {
+        body, err := io.ReadAll(c.Request.Body)
+        if err != nil {
+            c.JSON(400, gin.H{"code": "ingest_body_unreadable"})
+            return
+        }
+        archive, err := unpack(body)
+        if err != nil {
+            c.JSON(422, gin.H{"code": "ingest_bad_archive"})
+            return
+        }
+        if err = s.shards.Write(archive); err != nil {
+            if errors.Is(err, ErrShardLocked) {
+                c.JSON(409, gin.H{"code": "ingest_shard_locked"})
+                return
+            }
+            _ = c.Error(err)
+            c.JSON(500, gin.H{"code": "ingest_internal"})
+            return
+        }
+        c.JSON(201, gin.H{"ingested": true})
+    }
+
+- id: C27-30
+  card: C27
+  expected: clean
+  path: Services/Lockers/Assign.cs
+  why: Near miss — the three known causes return their own refusal members and unexpected exceptions bubble out of the method.
+  source: The same assigner, per-cause refusals.
+  code: |
+    using System;
+
+    namespace Services.Lockers;
+
+    public sealed class Assigner
+    {
+        private readonly LockerStore _store;
+
+        public Assigner(LockerStore store) => _store = store;
+
+        public AssignResult Assign(Order order)
+        {
+            var locker = _store.FindFree(order.Size, order.Zone);
+            var lease = _store.Lock(locker, order.Id, TimeSpan.FromHours(4));
+            return AssignResult.Ok(locker, lease);
+        }
+
+        public AssignResult AssignGuarded(Order order)
+        {
+            try
+            {
+                return Assign(order);
+            }
+            catch (NoFreeLocker)
+            {
+                return AssignResult.Refused("locker_full");
+            }
+            catch (LockerOutOfService)
+            {
+                return AssignResult.Refused("locker_out_of_service");
+            }
+        }
+    }

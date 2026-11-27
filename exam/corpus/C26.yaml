@@ -535,3 +535,323 @@
 
     def report_ref(report_id: str) -> str:
         return f"reports/{report_id}.json"
+- id: C26-21
+  card: C26
+  expected: dirty
+  path: app/search/features.py
+  why: The ranking switch reads an environment flag at the rule — two workers can rank the same query differently.
+  source: A search feature gate read at the ranking rule.
+  code: |
+    import os
+
+
+    def rank_mode() -> str:
+        if os.environ.get("SEARCH_SEMANTIC") == "1":
+            return "semantic"
+        return "lexical"
+
+
+    def rank(rows: list[dict], query: str) -> list[dict]:
+        if rank_mode() == "semantic":
+            return sorted(rows, key=lambda r: r["semantic_score"], reverse=True)
+        return sorted(rows, key=lambda r: r["keyword_score"], reverse=True)
+
+
+    def top(rows: list[dict], query: str, n: int) -> list[dict]:
+        return rank(rows, query)[:n]
+
+- id: C26-22
+  card: C26
+  expected: dirty
+  path: src/billing/plan.ts
+  why: The invoice limit is read from process.env inside the rule, so the limit depends on the environment of the process that happens to serve the request.
+  source: A billing limit read at the check.
+  code: |
+    const DEFAULT_INVOICE_LIMIT = 200;
+
+    export function invoiceLimit(): number {
+      const raw = process.env.INVOICE_LINE_LIMIT;
+      if (!raw) return DEFAULT_INVOICE_LIMIT;
+      const parsed = Number(raw);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_INVOICE_LIMIT;
+    }
+
+    export function exceedsLimit(lines: number): boolean {
+      return lines > invoiceLimit();
+    }
+
+    export function splitInvoice(lines: Line[]): [Line[], Line[]] {
+      const limit = invoiceLimit();
+      return [lines.slice(0, limit), lines.slice(limit)];
+    }
+
+- id: C26-23
+  card: C26
+  expected: dirty
+  path: internal/upload/size.go
+  why: The upload size threshold is read from the environment at the enforcement point — a misconfigured pod silently accepts or refuses different uploads.
+  source: A Go upload gate reading its threshold from the environment.
+  code: |
+    package upload
+
+    import (
+        "os"
+        "strconv"
+    )
+
+    const DefaultMaxBytes = 20 << 20
+
+    func MaxBytes() int64 {
+        raw := os.Getenv("UPLOAD_MAX_BYTES")
+        if raw == "" {
+            return DefaultMaxBytes
+        }
+        n, err := strconv.ParseInt(raw, 10, 64)
+        if err != nil || n <= 0 {
+            return DefaultMaxBytes
+        }
+        return n
+    }
+
+    func TooLarge(size int64) bool {
+        return size > MaxBytes()
+    }
+
+- id: C26-24
+  card: C26
+  expected: dirty
+  path: app/src/main/kotlin/notify/Channel.kt
+  why: The notification channel is picked by an env read at the send rule — the route depends on the worker environment instead of user or tenant settings.
+  source: A Kotlin notifier choosing a channel by env.
+  code: |
+    package notify
+
+    enum class Channel { EMAIL, SMS, PUSH }
+
+    class Notifier(private val sender: Sender) {
+
+        fun channelFor(kind: String): Channel {
+            if (System.getenv("NOTIFY_SMS_FOR_CRITICAL") == "1" && kind == "critical") {
+                return Channel.SMS
+            }
+            return Channel.EMAIL
+        }
+
+        fun send(kind: String, to: String, body: String) {
+            sender.dispatch(channelFor(kind), to, body)
+        }
+    }
+
+- id: C26-25
+  card: C26
+  expected: dirty
+  path: Services/Search/Catalog.cs
+  why: The catalog feature switch is read from the environment inside the controller action — the same request can be served with different behavior behind a load balancer.
+  source: A C# controller branching on an env flag.
+  code: |
+    using Microsoft.AspNetCore.Mvc;
+
+    namespace Services.Search;
+
+    [ApiController]
+    [Route("catalog")]
+    public sealed class CatalogController : ControllerBase
+    {
+        [HttpGet("")]
+        public IActionResult Search(string q)
+        {
+            var facets = Environment.GetEnvironmentVariable("CATALOG_FACETS") == "1";
+            var rows = _search.Find(q, withFacets: facets);
+            return Ok(rows);
+        }
+
+        private readonly Searcher _search = new Searcher();
+    }
+
+- id: C26-26
+  card: C26
+  expected: dirty
+  path: app/auth/secret.py
+  why: The webhook signing secret is read from the environment at the verification rule — the branch that accepts or refuses a webhook reaches into the process environment.
+  source: A webhook verifier reading its secret per request.
+  code: |
+    import hashlib
+    import hmac
+    import os
+
+
+    def verify_webhook(payload: bytes, signature: str) -> bool:
+        secret = os.getenv("WEBHOOK_SIGNING_SECRET", "")
+        expected = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, signature)
+
+
+    def handle_webhook(payload: bytes, signature: str) -> str:
+        if not verify_webhook(payload, signature):
+            return "refused"
+        return "accepted"
+
+- id: C26-27
+  card: C26
+  expected: clean
+  path: app/search/config.py
+  why: Near miss — the flag is read once in the settings module, the type lives there; the rule consumes the typed value.
+  source: The settings boundary of the same service.
+  code: |
+    import os
+
+    from dataclasses import dataclass
+
+
+    @dataclass(frozen=True)
+    class SearchSettings:
+        semantic: bool
+        page_size: int
+
+
+    def load_search_settings() -> SearchSettings:
+        return SearchSettings(
+            semantic=os.environ.get("SEARCH_SEMANTIC") == "1",
+            page_size=int(os.environ.get("SEARCH_PAGE_SIZE") or 20),
+        )
+
+
+    def rank(rows: list[dict], settings: SearchSettings) -> list[dict]:
+        if settings.semantic:
+            return sorted(rows, key=lambda r: r["semantic_score"], reverse=True)
+        return sorted(rows, key=lambda r: r["keyword_score"], reverse=True)
+
+- id: C26-28
+  card: C26
+  expected: clean
+  path: src/billing/config.ts
+  why: Near miss — the config loader reads the variable once and hands the typed number to the rule.
+  source: The billing config boundary.
+  code: |
+    export type BillingConfig = { invoiceLineLimit: number };
+
+    export function loadBillingConfig(env: NodeJS.ProcessEnv): BillingConfig {
+      const parsed = Number(env.INVOICE_LINE_LIMIT);
+      return {
+        invoiceLineLimit: Number.isFinite(parsed) && parsed > 0 ? parsed : 200,
+      };
+    }
+
+    export function exceedsLimit(lines: number, config: BillingConfig): boolean {
+      return lines > config.invoiceLineLimit;
+    }
+
+    export function splitForMailing(lines: Line[], config: BillingConfig): Line[][] {
+      const out: Line[][] = [];
+      for (let i = 0; i < lines.length; i += config.invoiceLineLimit) {
+        out.push(lines.slice(i, i + config.invoiceLineLimit));
+      }
+      return out;
+    }
+
+- id: C26-29
+  card: C26
+  expected: clean
+  path: internal/upload/config.go
+  why: Near miss — the threshold is parsed in one config function at startup and passed to the gate.
+  source: The upload config boundary.
+  code: |
+    package upload
+
+    import (
+        "os"
+        "strconv"
+    )
+
+    type Limits struct {
+        MaxBytes int64
+    }
+
+    func LoadLimits() Limits {
+        limits := Limits{MaxBytes: 20 << 20}
+        if raw := os.Getenv("UPLOAD_MAX_BYTES"); raw != "" {
+            if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n > 0 {
+                limits.MaxBytes = n
+            }
+        }
+        return limits
+    }
+
+    func TooLarge(size int64, limits Limits) bool {
+        return size > limits.MaxBytes
+    }
+
+- id: C26-30
+  card: C26
+  expected: clean
+  path: app/src/main/kotlin/notify/Startup.kt
+  why: Near miss — the channel map is built once at startup from the environment and injected; the notifier reads its own parameters.
+  source: The notifier composition root.
+  code: |
+    package notify
+
+    enum class Channel { EMAIL, SMS, PUSH }
+
+    object Channels {
+        fun load(): Map<String, Channel> {
+            val critical = if (System.getenv("NOTIFY_SMS_FOR_CRITICAL") == "1") Channel.SMS else Channel.EMAIL
+            return mapOf("critical" to critical, "default" to Channel.EMAIL)
+        }
+    }
+
+    class Notifier(
+        private val sender: Sender,
+        private val channels: Map<String, Channel>,
+    ) {
+        fun send(kind: String, to: String, body: String) {
+            sender.dispatch(channels[kind] ?: channels.getValue("default"), to, body)
+        }
+    }
+
+- id: C26-31
+  card: C26
+  expected: clean
+  path: Services/Startup/CatalogOptions.cs
+  why: Near miss — the flag is bound into an options object once at startup; the controller consumes the options.
+  source: The options binding of the catalog service.
+  code: |
+    using Microsoft.AspNetCore.Hosting;
+
+    namespace Services.Startup;
+
+    public sealed class CatalogOptions
+    {
+        public bool Facets { get; init; }
+    }
+
+    public static class CatalogOptionsLoader
+    {
+        public static CatalogOptions Load(IWebHostEnvironment env)
+        {
+            var raw = Environment.GetEnvironmentVariable("CATALOG_FACETS");
+            return new CatalogOptions { Facets = raw == "1" };
+        }
+    }
+
+- id: C26-32
+  card: C26
+  expected: clean
+  path: app/auth/signer.py
+  why: Near miss — the verifier receives the secret as a parameter built at boot; the webhook rule reads no environment.
+  source: The webhook verifier with the secret injected.
+  code: |
+    import hashlib
+    import hmac
+
+
+    class WebhookVerifier:
+        def __init__(self, secret: bytes):
+            self._secret = secret
+
+        def verify(self, payload: bytes, signature: str) -> bool:
+            expected = hmac.new(self._secret, payload, hashlib.sha256).hexdigest()
+            return hmac.compare_digest(expected, signature)
+
+
+    def build_verifier(secret: bytes) -> WebhookVerifier:
+        return WebhookVerifier(secret)
