@@ -137,3 +137,13 @@ clean. C22–C26: search.py candidates per repo, ≤8 distinct files per
 (dgtlu_backend/cogline/ldgn): stratified samples (all read-side + 25
 write-side per repo = 129) for recall checks; vocabulary fallback grep for
 prefilter blind spots; anonymized counters only in commits.
+
+## Final state (27.11, end of run)
+
+Chain b04cc19..HEAD: 20 commits, one per issue/stage as planned. Issues
+closed: #25 #26 #27 #29 #30 (stage 2), #33 #34 #35 #36 #32 (stage 3),
+#37 #28 #17 (stage 4), #15 (stage 6), #18 (stage 7, table). Partial: #16
+(C26 16+16, C27 15+15 measured; rest at 10+10). Open: #19 (out of budget),
+#12-adjacent Haiku/Sonnet re-measurement. Field docs: field/2026-11-27/
+(method, c21-oss, c22-c26-oss, recall-private). Final corpus 660 fragments /
+28 cards; cheap list 23 cards; strong list C1/C4/C8/C10/C14.
