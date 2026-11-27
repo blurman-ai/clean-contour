@@ -234,19 +234,24 @@ def split_items(items: list[Item], split: str | None) -> list[Item]:
 
 def check_corpus(items: list[Item], skill: Skill, *, cards: list[str] | None = None,
                  known_cards: bool = True, min_each: int = MIN_EACH,
-                 lines: tuple[int, int] | None = LINES, hints: bool = True) -> list[str]:
+                 lines: tuple[int, int] | None = LINES, hints: bool = True,
+                 expectations: bool = True, unique_ids: bool = True,
+                 file_cards: bool = True) -> list[str]:
     """Corpus problems; empty means the corpus is valid. The keyword arguments
     switch single checks off, for the control cases that show them red."""
     bad: list[str] = []
     seen: set[str] = set()
     count: dict[str, dict[str, int]] = {}
     for it in items:
-        if it.id in seen:
+        if unique_ids and it.id in seen:
             bad.append(f"{it.id}: id repeated")
         seen.add(it.id)
         if known_cards and it.card not in skill.cards:
             bad.append(f"{it.id}: card {it.card} is not in SKILL.md")
-        if it.expected not in (DIRTY, CLEAN):
+        fm = re.fullmatch(r"C(\d+)\.yaml", it.file)
+        if file_cards and fm and it.card != f"C{fm.group(1)}":
+            bad.append(f"{it.id}: card {it.card} in {it.file}")
+        if expectations and it.expected not in (DIRTY, CLEAN):
             bad.append(f"{it.id}: expected {it.expected!r}, allowed {DIRTY}|{CLEAN}")
         n = len(it.code.rstrip("\n").split("\n"))
         if lines and not lines[0] <= n <= lines[1]:
@@ -314,7 +319,9 @@ def parse_verdict(answer: str) -> tuple[str | None, str]:
                 i = hits[-1]
                 return _norm(tokens[i]), ", ".join(tokens[i + 1:]).strip()
     text = answer.lower()
-    found = {v for v in VERDICTS if re.search(r"(?<![a-z])" + v + r"(?![a-z])", text)}
+    found = {v for v in VERDICTS
+             if re.search(r"(?<![a-z])(?<!no )(?<!not )(?<!never )(?<!n't )(?<!isn't )"
+                          r"(?<!aren't )(?<!wasn't )" + v + r"(?![a-z])", text)}
     if len(found) == 1:
         return found.pop(), answer.strip().splitlines()[-1][:300] if lines else ""
     return None, answer.strip()[:300]
@@ -402,7 +409,8 @@ def call_model(cmd: str, prompt: str, timeout: int, retries: int) -> dict:
             last = f"timeout {timeout} s"
         except UnicodeError as e:
             last = f"encoding: {type(e).__name__}: {e}"
-        time.sleep(min(2 * attempt, 5))
+        if attempt < retries:                     # no sleep after the final attempt
+            time.sleep(min(2 * attempt, 5))
     return dict(raw="", error=last, seconds=0.0)
 
 
@@ -460,8 +468,12 @@ def render(per: dict, items: list[Item], res: dict, pol: Policy, split: str | No
         out.append(f"\n{code} — errors:")
         for iid in r["misses"]:
             it = by_id[iid]
-            worst = [a for a in res[iid] if a["verdict"] != it.expected] or res[iid]
-            a = worst[0]
+            # show the answer the scoring turned down: the opposite verdict, not
+            # an unparsed answer that merely sits first in the repeat list
+            want = CLEAN if it.expected == DIRTY else DIRTY
+            wrong = [a for a in res[iid] if a["verdict"] != it.expected]
+            decisive = [a for a in wrong if a["verdict"] == want] or wrong or res[iid]
+            a = decisive[0]
             out.append(f"  {iid} expected {it.expected}, got {a['verdict']}: {a['reason'][:160]}")
     return "\n".join(out)
 
@@ -534,14 +546,14 @@ def selftest() -> int:
         nonlocal n
         n += 1
         if good and sabotaged_still_ok:
-            print(f"  ✓ {name}")
+            print(f"  ok {name}")
         else:
             why = []
             if not good:
                 why.append("the tool did not refuse/pass as it must")
             if not sabotaged_still_ok:
                 why.append("the case stays green with the condition broken")
-            print(f"  ✗ {name}: {'; '.join(why)}")
+            print(f"  FAIL {name}: {'; '.join(why)}")
             fails.append(name)
 
     skill_path = find_skill(None)
@@ -562,7 +574,37 @@ def selftest() -> int:
         case(f"SKILL.md yields {len(codes)} cards, each with six sections",
              len(codes) >= 14 and all(all(s in skill.cards[c] for s in SECTIONS) for c in codes),
              True)
-        broken = skill_path.read_text(encoding="utf-8").replace("**Clean:**", "**More:**", 1)
+        # sabotage inside the first card section: a `**Clean:**` in the Procedure
+        # (or frontmatter) must not eat the replacement and defuse the case
+        def sabotage_card_clean(text: str) -> str:
+            at = text.index("\n## C1. ")
+            return text[:at] + text[at:].replace("**Clean:**", "**More:**", 1)
+
+        synth = ("---\nname: s\ndescription: d\n---\n\n"
+                 "## Procedure\n\n1. step\n\n**Clean:**\n\n~~~\nx\n~~~\n\n---\n\n"
+                 "## C1. State derived from an event log\n\n"
+                 "**Search:** s\n\n**Questions:** q\n\n**Dirty if:** d\n\n"
+                 "**Does not count:** n\n\n**Dirty:**\n```python\nx = 1\n```\n\n"
+                 "**Clean:**\n```python\ny = 1\n```\n")
+        try:
+            parse_skill(synth)
+            synth_ok = True
+        except ExamError:
+            synth_ok = False
+        try:
+            parse_skill(sabotage_card_clean(synth))
+            new_refuses = False
+        except ExamError:
+            new_refuses = True
+        old_sab = synth.replace("**Clean:**", "**More:**", 1)   # eats the Procedure one
+        try:
+            parse_skill(old_sab)
+            old_refuses = False
+        except ExamError:
+            old_refuses = True
+        case("the card-section sabotage hits the first card, not an earlier **Clean:**",
+             synth_ok and new_refuses, not old_refuses)
+        broken = sabotage_card_clean(skill_path.read_text(encoding="utf-8"))
         try:
             parse_skill(broken)
             refused = False
@@ -638,10 +680,18 @@ def selftest() -> int:
 
         bad_expected = mut(lambda c: setattr(c[0], "expected", UNCLEAR))
         case("expected `unclear` is refused",
-             any("expected" in p for p in check_corpus(bad_expected, skill)), True)
+             any("expected" in p for p in check_corpus(bad_expected, skill)),
+             not any("expected" in p for p in check_corpus(bad_expected, skill, expectations=False)))
 
         dup = mut(lambda c: setattr(c[1], "id", c[0].id))
-        case("a repeated id is refused", any("id repeated" in p for p in check_corpus(dup, skill)), True)
+        case("a repeated id is refused",
+             any("id repeated" in p for p in check_corpus(dup, skill)),
+             not any("id repeated" in p for p in check_corpus(dup, skill, unique_ids=False)))
+
+        wrong_file = mut(lambda c: setattr(c[0], "card", "C2"))
+        case("a card that disagrees with its corpus file name is refused",
+             any("in C1.yaml" in p for p in check_corpus(wrong_file, skill)),
+             not any("in C1.yaml" in p for p in check_corpus(wrong_file, skill, file_cards=False)))
 
         print("\nSplit")
         dev = split_items(items, "dev")
@@ -700,7 +750,11 @@ def selftest() -> int:
                  ("don't know", None),
                  ("x | C1 | yes | maybe | no", None),
                  ("x:1 | C15 | yes, yes, unclear, dirty, the code is lost", DIRTY),
-                 ("x:1 | C15 | yes, no, clean | the reason", CLEAN)]
+                 ("x:1 | C15 | yes, no, clean | the reason", CLEAN),
+                 ("not clean", None),
+                 ("not dirty", None),
+                 ("isn't clean, it is dirty", DIRTY),
+                 ("this is never clean", None)]
         case("the verdict is read from the fourth field, or the last verdict word after the "
              "answers when the separators are merged; a format echo and garbage are not a verdict",
              all(parse_verdict(a)[0] == w for a, w in table), True)
@@ -745,9 +799,10 @@ def selftest() -> int:
              all((not r["pass"]) and r["why_fail"] == ["false"] for r in d_all.values()),
              all(r["pass"] for r in d_off.values()))
         false_ = exam("oracle-false")
+        false_off = exam("oracle-false", Policy(max_false=1.0))
         case("an oracle that flags 2 clean fragments per card fails every card on false",
              all(not r["pass"] and "false" in r["why_fail"] for r in false_.values()),
-             True)
+             all(r["pass"] for r in false_off.values()))
         c_all = exam("clean")
         c_off = exam("clean", Policy(min_recall=0.0))
         case('the "always clean" fake fails every card on recall',
@@ -767,6 +822,59 @@ def selftest() -> int:
         failing = run_exam(sub, skill, f"{me} --fake fail", repeat=1, jobs=2, timeout=30, retries=0)
         errs = sum(1 for v in failing.values() for a in v if a["error"])
         case("a failing model command is a call error, not an answer", errs == len(sub), True)
+
+        print("\nFailure listing and retries")
+        one_d = Item("L-1", card0, DIRTY, "p", "w", "s", "code")
+        ans = {"L-1": [dict(raw="?", verdict=None, reason="", error=None, seconds=0.1),
+                       dict(raw="clean", verdict=CLEAN, reason="no", error=None, seconds=0.1)]}
+        lst = render(score([one_d], {"L-1": [a["verdict"] for a in v] for k, v in ans.items()}),
+                     [one_d], ans, Policy())
+        only_none = {"L-1": [ans["L-1"][0]]}
+        sens_lst = "got None" in render(score([one_d], {"L-1": [None]}), [one_d], only_none, Policy())
+        case("the listing shows the answer scoring turned down, not the first non-match",
+             sens_lst and "got clean" in lst and "got None" not in lst, sens_lst)
+        t0 = time.time()
+        dead = call_model("exit 1", "x", timeout=10, retries=2)
+        new_elapsed = time.time() - t0
+        # the pre-fix loop, sleeping after the final attempt too
+        t1 = time.time()
+        for attempt in range(3):
+            subprocess.run("exit 1", shell=True, capture_output=True, text=True)
+            time.sleep(min(2 * attempt, 5))
+        old_elapsed = time.time() - t1
+        case("no sleep after the final failed attempt (retries=2 finishes in ~2 s, not 6)",
+             dead["error"] is not None and new_elapsed < 4.0 and old_elapsed >= new_elapsed + 3.0,
+             old_elapsed >= 4.0)
+        bad_out = str(CORPUS_DIR / "C1.yaml" / "sub" / "report.json")   # under a regular file
+        env_full = dict(os.environ, EXAM_CORPUS=str(CORPUS_DIR))
+        void = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--model-cmd",
+                               f"{me} --fake oracle", "--cards", card0,
+                               "--split", "holdout", "--out", bad_out],
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=120, env=env_full)
+        # the pre-fix main, without the catch-all: the same failure crashes with exit 1
+        src = Path(__file__).read_text(encoding="utf-8")
+        old_main = src.replace('''        return 2
+    except Exception as e:      # an executor or report-write failure is void, not a crash
+        print(f"exam: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2''', '''        return 2''')
+        crash_rc = 0
+        tmp_exam = HERE / "_selftest_void_tmp"
+        if old_main != src:
+            tmp_exam.write_text(old_main, encoding="utf-8")
+            try:
+                crash = subprocess.run([sys.executable, str(tmp_exam), "--model-cmd",
+                                        f"{me} --fake oracle", "--cards", card0,
+                                        "--split", "holdout", "--out", bad_out],
+                                       capture_output=True, text=True, encoding="utf-8",
+                                       errors="replace", timeout=120, env=env_full)
+                crash_rc = crash.returncode
+                crash_tb = "Traceback" in crash.stderr
+            finally:
+                tmp_exam.unlink(missing_ok=True)
+        case("a report-write failure is the void exit 2, not a traceback",
+             void.returncode == 2 and "Traceback" not in void.stderr and crash_rc == 1,
+             crash_rc == 1 and crash_tb)
 
         print("\nLocale")
         # a pipe without an explicit encoding breaks on a non-UTF-8 locale; the
@@ -874,21 +982,23 @@ def main(argv: list[str]) -> int:
         pol = Policy()
         res = run_exam(items, skill, a.model_cmd, repeat=a.repeat, jobs=a.jobs,
                        timeout=a.timeout, retries=a.retries)
+        per = score(items, {k: [x["verdict"] for x in v] for k, v in res.items()}, pol)
+        print(render(per, items, res, pol, a.split))
+        errors = sum(1 for v in res.values() for x in v if x["error"])
+        unparsed = sum(1 for v in res.values() for x in v if not x["error"] and x["verdict"] is None)
+        if unparsed:
+            print(f"\nUnparsed answers: {unparsed} (a miss on dirty, `unclear` on clean).")
+        if a.out:
+            Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+            Path(a.out).write_text(json.dumps(build_report(a, skill, items, res, per, pol),
+                                              ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+            print(f"Report: {a.out}")
     except ExamError as e:
         print(f"exam: {e}", file=sys.stderr)
         return 2
-
-    per = score(items, {k: [x["verdict"] for x in v] for k, v in res.items()}, pol)
-    print(render(per, items, res, pol, a.split))
-    errors = sum(1 for v in res.values() for x in v if x["error"])
-    unparsed = sum(1 for v in res.values() for x in v if not x["error"] and x["verdict"] is None)
-    if unparsed:
-        print(f"\nUnparsed answers: {unparsed} (a miss on dirty, `unclear` on clean).")
-    if a.out:
-        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
-        Path(a.out).write_text(json.dumps(build_report(a, skill, items, res, per, pol),
-                                          ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-        print(f"Report: {a.out}")
+    except Exception as e:      # an executor or report-write failure is void, not a crash
+        print(f"exam: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
     if errors:
         print(f"\nModel call errors: {errors}. The measurement is void.", file=sys.stderr)
         return 2
