@@ -12,7 +12,7 @@ Measured results on agent-written open-source projects: [FIELD-RESULTS.md](FIELD
 |---|---|---|
 | `RULES.md` | 17 principles, signs of a dirty contour, how to move an entity into the clean contour | an agent that writes or changes an entity with a lifecycle |
 | `skills/clean-contour-check/SKILL.md` | 28 cards (C1–C28): search pattern, closed questions, verdict rule, exclusions, dirty and clean example | an agent that checks code |
-| `exam/` | runner and corpus of 638 labelled fragments | whoever edits a card or picks a model for checking |
+| `exam/` | runner and corpus of 660 labelled fragments | whoever edits a card or picks a model for checking |
 
 ## Install as a Claude Code plugin
 
@@ -97,7 +97,7 @@ C18, C19 and C20 were added on 24.11.2026 and measured the same way (3 answers p
 
 C21 was added on 27.11.2026 and measured on deepseek-v4-flash with 3 answers per fragment, worst answer counts: dev 10/10 dirty found and 0/10 clean flagged, holdout 5/5 dirty found and 0/5 clean flagged (see `exam/results/2026-11-27/`), so it joins the cheap list.
 
-C22 (an external call without a deadline) was added the same day and measured the same way, whole corpus (20 fragments × 3): 10/10 dirty found, 0/10 clean flagged (see `exam/results/2026-11-27/`), and joins the cheap list. C23 (a side effect hidden in a constructor, a getter, or an ORM hook) passed the same gate after one clean fragment was rewritten to the card's own clean case (see `exam/results/2026-11-27/`). C24 (a background task whose failure is lost) passed with 10/10 dirty and 1/10 clean flagged, exactly at the gate (see `exam/results/2026-11-27/`). C25 (the clock or the random generator called inside a rule) failed its first pass with 8/10 recall and passed 10/10 / 0/11 after the card named the boundary caller and the writer-computed stored deadline explicitly (see `exam/results/2026-11-27/`). C26 (an environment variable read inside business logic; issue #32) passed 10/10 / 0/10 the same way — it takes the number C26 because C21 was already taken by issue #39's card.
+C22 (an external call without a deadline) was added the same day and measured the same way, whole corpus (20 fragments × 3): 10/10 dirty found, 0/10 clean flagged (see `exam/results/2026-11-27/`), and joins the cheap list. C23 (a side effect hidden in a constructor, a getter, or an ORM hook) passed the same gate after one clean fragment was rewritten to the card's own clean case (see `exam/results/2026-11-27/`). C24 (a background task whose failure is lost) passed with 10/10 dirty and 1/10 clean flagged, exactly at the gate (see `exam/results/2026-11-27/`). C25 (the clock or the random generator called inside a rule) failed its first pass with 8/10 recall and passed 10/10 / 0/11 after the card named the boundary caller and the writer-computed stored deadline explicitly (see `exam/results/2026-11-27/`). C26 (an environment variable read inside business logic; issue #32) passed 16/16 / 0/16 after its corpus grew to five languages — it takes the number C26 because C21 was already taken by issue #39's card.
 
 | Cards | Who runs them |
 |---|---|
@@ -108,7 +108,7 @@ C10 passes the exam but goes to a strong model: on a real backend 2 of 15 places
 
 For another model, run the exam first: [exam/README.md](exam/README.md).
 
-The corpus is mostly Python and TypeScript; C18–C21 also carry TypeScript, Kotlin, Go and C# fragments (10 per card), and C17 has C# view models and Django templates. A fuller corpus for another language goes into its own directory and runs with `bin/exam --corpus exam/corpus-<lang>`.
+The corpus is mostly Python and TypeScript; C18–C21 and C26–C28 also carry TypeScript, Kotlin, Go and C# fragments, and C17 has C# view models and Django templates. A fuller corpus for another language goes into its own directory and runs with `bin/exam --corpus exam/corpus-<lang>`.
 
 ## C#
 
@@ -116,7 +116,7 @@ The cards name C# signs for EF Core, Dapper, ASP.NET Core (controllers and minim
 
 ## Search
 
-`tools/search.py <repo> [--lang py,ts,kt,go,cs] [--cards C4,C11]` prints candidates for every card, one line per hit, in the same `card<TAB>file:line<TAB>line` format as `tools/cs_search.py`. The language is taken from the file extension; the signs live in `skills/clean-contour-check/signs.json` (card → language → regexes, plus a per-language skip list for tests, migrations, generated and vendored code). `tools/search.py --selftest` checks that every regex compiles, every card C1–C21 is present, each pattern hits its fixture line, and the skip list drops a test file.
+`tools/search.py <repo> [--lang py,ts,kt,go,cs] [--cards C4,C11]` prints candidates for every card, one line per hit, in the same `card<TAB>file:line<TAB>line` format as `tools/cs_search.py`. The language is taken from the file extension; the signs live in `skills/clean-contour-check/signs.json` (card → language → regexes, plus a per-language skip list for tests, migrations, generated and vendored code). `tools/search.py --selftest` checks that every regex compiles, every card C1–C28 is present, each pattern hits its fixture line, and the skip list drops a test file.
 
 A sign the card describes over several lines (C5 name pairs, C10 a `raise` inside a loop over parts, C14 a `GET` handler that writes) is a `{"manual": …}` entry and is not searched. The Python, TypeScript, Kotlin and Go signs are not yet narrowed by reading their hits: on one 260k-line Python backend they gave about 8000 candidates, most of them from C7, C9, C15 and C16.
 

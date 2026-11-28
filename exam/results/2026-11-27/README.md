@@ -160,7 +160,7 @@ Reports: `exam/runs/2026-11-27-deepseek-c15-split.json` (first pass),
 `exam/runs/2026-11-27-deepseek-c7-c27-fix.json` (final). C7, C15, C27 and
 C28 join the cheap list; C1, C4, C8, C10, C14 remain strong.
 
-## DeepSeek table for all cards (issue #18)
+## DeepSeek table for all cards
 
 One provider (deepseek-v4-flash through `pi`), worst answer of 3 per fragment.
 Each row keeps the date of its latest measurement of the current card text;
@@ -190,7 +190,8 @@ rows measured before a card edit carry the old text and are marked so.
 
 Haiku and Sonnet were not re-measured after the C15 split and the new cards:
 this run's model budget is DeepSeek only, so those columns stand as of 11.11
-and are not comparable with the new rows.
+and are not comparable with the new rows. Issue #18, which asks for Haiku and
+Sonnet tables, remains open.
 
 ## Stage 5 — C26 and C27 corpora extended (issue #16, partial)
 
